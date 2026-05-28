@@ -888,6 +888,168 @@ def replace_folder(lib, win_folder, lose_folder):
                 "新 folder 改名回「%s」" % lose_folder if renamed_to == lose_folder else "")}
 
 
+def gaps_scan_lib_async(tid, lib):
+    """全库缺集扫描:对指定剧集库每部剧查缺集 + 落后 TMDb 数,排序返列表。
+    综合分 = 缺集数 + 落后数 × 2(落后更急)。"""
+    L = fetch_libs()
+    if lib not in L:
+        return {"err": "未知库 " + str(lib)}
+    m = L[lib]
+    if m["ctype"] != "tvshows":
+        return {"err": "只能扫剧集库(tvshows),当前: " + m["ctype"]}
+    try:
+        items = eget("/Items", {"ParentId": m["id"], "Recursive": "true",
+                                "IncludeItemTypes": "Series",
+                                "Fields": "ProviderIds", "Limit": 10000,
+                                "SortBy": "SortName"}).get("Items", [])
+    except Exception as e:
+        return {"err": "拉 Series 失败: " + str(e)}
+    task_set(tid, total=len(items) or 1, status_text="扫 " + lib)
+    rows = []
+    for idx, s in enumerate(items):
+        if task_is_cancelled(tid): break
+        if idx % 5 == 0:
+            task_set(tid, progress=idx, status_text="查 %s (%d/%d)" % (lib, idx, len(items)))
+        try:
+            g = series_gaps(s["Id"])
+            fmt = ""; gap_count = 0; behind = 0
+            if g.get("mode") == "absolute":
+                gap_count = len(g.get("gap_list", []))
+                behind = max(0, g.get("tmdb_max", 0) - g.get("max_ep", 0))
+                if g.get("gap_list"): fmt = "缺 E" + ",".join(g["gap_list"])
+                if behind:
+                    fmt += (" · " if fmt else "") + "落后到 E%d (本地 %d)" % (g.get("tmdb_max"), g.get("max_ep"))
+            else:
+                segs = []
+                for sn in g.get("seasons", []):
+                    if sn.get("gapcount", 0) > 0:
+                        segs.append("S%02d E%s" % (sn["season"], ",".join(sn["gaps"])))
+                        gap_count += sn["gapcount"]
+                behind = max(0, g.get("tmdb_max", 0) - g.get("max_ep", 0))
+                fmt = " · ".join(segs)
+                if behind: fmt += (" · " if fmt else "") + "落后 TMDb %d 集" % behind
+            if fmt:
+                rows.append({"name": s.get("Name", "?"), "id": s["Id"],
+                             "tmdb": (s.get("ProviderIds") or {}).get("Tmdb", ""),
+                             "fmt": fmt, "gap_count": gap_count, "behind": behind,
+                             "score": gap_count + behind * 2})
+        except Exception as e:
+            rows.append({"name": s.get("Name", "?"), "id": s.get("Id"),
+                         "err": str(e), "score": 0})
+    rows.sort(key=lambda x: -x.get("score", 0))
+    copy_text = "\n".join("求 %s — %s" % (r["name"], r["fmt"]) for r in rows if "fmt" in r)
+    log("全库缺集扫描 [%s]: %d 部 → 有缺/落后 %d 部" % (lib, len(items), len(rows)))
+    return {"lib": lib, "items": rows, "total": len(rows),
+            "analyzed": len(items), "copy_text": copy_text}
+
+
+def detect_mismatched_posters_async(tid):
+    """全库扫描"emby 元数据 vs folder 名"差异大的项 — 通常是绑错 tmdbid 的剧。
+    启发式:folder 含中文字符,但 emby name 完全没中文(或重合 < 30%)→ 可疑。"""
+    libs = fetch_libs()
+    task_set(tid, total=len(libs) or 1, status_text="扫各库")
+    out = []
+    cn_re = re.compile(r'[一-鿿]')
+    tmdbid_re = re.compile(r'\s*\[tmdbid[-_]\d+\]\s*$', re.IGNORECASE)
+    year_re = re.compile(r'\s*\(\d{4}\)\s*$')
+    for i, (lib, m) in enumerate(libs.items()):
+        if task_is_cancelled(tid): break
+        task_set(tid, progress=i, status_text="扫 " + lib)
+        typ = "Series" if m["ctype"] == "tvshows" else "Movie"
+        try:
+            items = eget("/Items", {"ParentId": m["id"], "Recursive": "true",
+                                    "IncludeItemTypes": typ,
+                                    "Fields": "Path,ProviderIds,ImageTags",
+                                    "Limit": 30000}).get("Items", [])
+        except Exception:
+            continue
+        sep = "/" + m["folder"] + "/"
+        for it in items:
+            path = it.get("Path") or ""
+            if sep not in path: continue
+            folder = path.split(sep, 1)[1].split("/", 1)[0]
+            # 去掉 [tmdbid-X] 后缀 + (YYYY) 年份
+            fc = tmdbid_re.sub("", folder)
+            fc = year_re.sub("", fc).strip()
+            if not fc: continue
+            name = it.get("Name") or ""
+            folder_cn = set(cn_re.findall(fc))
+            name_cn = set(cn_re.findall(name))
+            if not folder_cn:
+                continue  # folder 没中文不评判(国外剧)
+            score = 0
+            reasons = []
+            if not name_cn:
+                score = 100
+                reasons.append("folder 含中文但 emby 名全英文")
+            else:
+                overlap = len(folder_cn & name_cn) / max(len(folder_cn), 1)
+                if overlap < 0.3:
+                    score = int(80 * (1 - overlap))
+                    reasons.append("folder 中文字符在 emby 名中 < 30%%(重合 %d%%)" % int(overlap * 100))
+                elif overlap < 0.5:
+                    score = int(60 * (1 - overlap))
+                    reasons.append("folder/emby 名中文重合 %d%%(可疑)" % int(overlap * 100))
+            if score >= 30:
+                out.append({"id": it.get("Id"),
+                            "emby_name": name,
+                            "folder_clean": fc,
+                            "folder": folder,
+                            "lib": lib, "type": typ,
+                            "tmdb": (it.get("ProviderIds") or {}).get("Tmdb", ""),
+                            "has_poster": bool((it.get("ImageTags") or {}).get("Primary")),
+                            "score": score,
+                            "reasons": reasons})
+    out.sort(key=lambda x: -x["score"])
+    log("错绑海报检测: 全库扫描 → 疑似 %d 项" % len(out))
+    return {"items": out, "total": len(out)}
+
+
+def system_health_summary():
+    """system_info 之上加"健康预警"摘要:磁盘/内存/115/Emby/Docker 异常容器。"""
+    base = system_info()
+    warnings = []
+    # 磁盘 > 85% 红警告 / > 70% 黄
+    disk = base.get("disk") or {}
+    disk_pct = disk.get("pct", 0)
+    if disk_pct >= 85:
+        warnings.append({"level": "danger", "category": "disk",
+                         "msg": "💾 磁盘已用 %d%% — 建议立刻清理" % disk_pct,
+                         "action": "cleanup"})
+    elif disk_pct >= 70:
+        warnings.append({"level": "warn", "category": "disk",
+                         "msg": "💾 磁盘已用 %d%% — 关注" % disk_pct})
+    # 内存 > 90%
+    mem = base.get("mem") or {}
+    mem_pct = mem.get("pct", 0)
+    if mem_pct >= 90:
+        warnings.append({"level": "danger", "category": "mem",
+                         "msg": "🧠 内存已用 %d%%" % mem_pct})
+    elif mem_pct >= 80:
+        warnings.append({"level": "warn", "category": "mem",
+                         "msg": "🧠 内存已用 %d%%" % mem_pct})
+    # 115 挂载
+    if not base.get("cd_ok"):
+        warnings.append({"level": "danger", "category": "c115",
+                         "msg": "📦 CloudDrive2 挂载异常 — 115 暂时不可用",
+                         "action": "settings"})
+    # Docker 异常容器(非 Up 状态)
+    bad_containers = [c for c in (base.get("containers") or []) if not c.get("up")]
+    if bad_containers:
+        names = ", ".join(c["name"] for c in bad_containers[:5])
+        warnings.append({"level": "warn", "category": "docker",
+                         "msg": "🐳 %d 个 Docker 容器非 Up: %s" % (len(bad_containers), names)})
+    # 115 cookie 状态(从 CFG 查,不实际调 API 慢的)
+    if not CFG.get("c115_cookie"):
+        warnings.append({"level": "warn", "category": "c115",
+                         "msg": "🍪 115 Cookie 未配 — 转存功能不可用",
+                         "action": "settings"})
+    base["warnings"] = warnings
+    base["health_level"] = "danger" if any(w["level"] == "danger" for w in warnings) else \
+                           ("warn" if warnings else "ok")
+    return base
+
+
 def dash_todo():
     """仪表盘待办:并行(逻辑串行,反正每个都快)拿 noposter / dups / 在更剧数。
     每项点击跳对应 tab。返 {noposter, dups_auto, dups_review, airing_count, libs:[{name,noposter,...}]}"""

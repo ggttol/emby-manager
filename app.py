@@ -46,7 +46,9 @@ from lib.business import (LIB_LOCKS, LIB_LOCKS_GUARD, _lib_lock,
                           add_new_pipeline_async, replace_folder, replace_batch_async,
                           zhuigeng_scan_airing_async, zhuigeng_gaps_summary_async,
                           cleanup_suggest_async, dash_todo,
-                          cleanup_empty_folders_async, dedup_auto_all_async)
+                          cleanup_empty_folders_async, dedup_auto_all_async,
+                          gaps_scan_lib_async, detect_mismatched_posters_async,
+                          system_health_summary)
 from lib import business as _biz
 from lib.undo import UNDO_FILE, UNDO_MAX, UNDO_LOCK, _undo_record, list_undo, exec_undo
 
@@ -182,6 +184,7 @@ class H(BaseHTTPRequestHandler):
                 _, excluded = fetch_libs_full()
                 return self._json({"emby": emby_online(), "libs": all_libraries(), "excluded": excluded})
             if path == "/api/system": return self._json(system_info())
+            if path == "/api/system/health": return self._json(system_health_summary())
             if path == "/api/noposter": return self._json({"items": list_noposter()})
             if path == "/api/dups": return self._json(analyze_dups())
             if path == "/api/items": return self._json(list_items(q.get("lib", [""])[0]))
@@ -321,6 +324,13 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/dedup/auto_all":
                 # 一键处理 analyze_dups 的所有 auto dups(不进 review)
                 return self._json({"tid": run_async("dedup_auto_all", dedup_auto_all_async)})
+            if path == "/api/gaps/scan_lib":
+                # 全库缺集扫描:对该剧集库每部剧查缺集
+                return self._json({"tid": run_async("gaps_scan_lib",
+                    gaps_scan_lib_async, b.get("lib", ""))})
+            if path == "/api/poster/detect_mismatch":
+                # 检测疑似绑错 tmdbid(folder 中文 vs emby name 字符重合度低)
+                return self._json({"tid": run_async("detect_mismatch", detect_mismatched_posters_async)})
             if path == "/api/wizard/add_new":
                 # 一条龙加新资源:批量 receive → 扫涉及库 → 等刮削 → 海报+重复检查 → 报告
                 # 必须用 app 模块的 c115_save_to_lib(走 _c115_req 包装链)

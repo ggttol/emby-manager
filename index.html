@@ -250,8 +250,9 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
 
   <section id="gaps" class="hide">
     <div class="card"><h2>🔍 缺集检查</h2>
-      <p class="muted">选剧集库 → 选一部剧 → 查它内部缺哪些集 + 最大集号。</p>
-      <div class="row"><select id="gapLib" onchange="loadGapSeries()"></select><select id="gapSeries" style="flex:1;min-width:160px"></select><button class="btn" onclick="checkGaps()">检查</button><button class="btn ghost" onclick="refreshSeries()">刷新元数据</button></div>
+      <p class="muted">单剧:选剧集库 → 选一部剧 → 查它缺哪些集 + 最大集号。全库:扫整个剧集库每部剧的缺集状态。</p>
+      <div class="row"><select id="gapLib" onchange="loadGapSeries()"></select><select id="gapSeries" style="flex:1;min-width:160px"></select><button class="btn" onclick="checkGaps()">检查</button><button class="btn ghost" onclick="refreshSeries()">刷新元数据</button>
+      <button class="btn" style="background:#7c3aed" onclick="gapsScanLib()">📊 全库扫描</button></div>
       <div id="gapOut" class="muted" style="margin-top:12px"></div></div>
   </section>
 
@@ -262,10 +263,12 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
         <span style="flex:1"></span>
         <button class="btn ghost" onclick="loadNoposter()">刷新列表</button>
         <button class="btn ok" id="posterAutoAll" onclick="posterAutoAll()" style="display:none">🪄 尝试全部自动匹配</button>
+        <button class="btn" style="background:#7c3aed" onclick="detectMismatchPosters()">🔍 检测疑似绑错</button>
       </div>
-      <p class="muted">常因被刮到同名外国剧。点「修复」按中文名重搜→选正确的(带海报),或手动填 tmdbid。</p>
+      <p class="muted">常因被刮到同名外国剧。点「修复」按中文名重搜→选正确的(带海报),或手动填 tmdbid。<b>检测绑错</b>:扫全库找 folder 名中文跟 emby 名差异大的(可能绑错 tmdbid)。</p>
       <div id="posterList" style="margin-top:10px"></div>
-      <div id="posterPagi"></div></div>
+      <div id="posterPagi"></div>
+      <div id="mismatchOut" style="margin-top:14px"></div></div>
   </section>
 
   <section id="dedup" class="hide">
@@ -1849,10 +1852,31 @@ async function doMoveBatch(){
 // 系统
 async function loadSystem(){
   const o=$("#sysOut");o.innerHTML='<span class="spin"></span> 读取 NAS 状态…';
-  let d;try{d=await api("/api/system");}catch(e){o.textContent="出错: "+e;return;}
+  let d;try{d=await api("/api/system/health");}catch(e){o.textContent="出错: "+e;return;}
   const bar=(p,c)=>`<div style="background:#0b0f17;border-radius:6px;height:10px;overflow:hidden;margin-top:4px"><div style="width:${Math.min(p,100)}%;height:100%;background:${c}"></div></div>`;
   const mc=d.mem.pct>85?'var(--red)':d.mem.pct>65?'var(--gold)':'var(--green)';
-  let h=`<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
+  // 健康概览顶部
+  let h = '';
+  const warnings = d.warnings || [];
+  const lvl = d.health_level || 'ok';
+  const lvlColor = lvl==='danger'?'#fca5a5':lvl==='warn'?'#fcd34d':'#86efac';
+  const lvlBg = lvl==='danger'?'#3a1f1f':lvl==='warn'?'#3a2f12':'#13351f';
+  const lvlIcon = lvl==='danger'?'🔴':lvl==='warn'?'🟡':'🟢';
+  const lvlText = lvl==='danger'?'有严重问题':lvl==='warn'?'有警告':'全部正常';
+  h += `<div class="card" style="background:${lvlBg};border:1px solid ${lvlColor};margin-bottom:12px">
+    <div class="row" style="align-items:center"><h2 style="color:${lvlColor};font-size:15px">${lvlIcon} 系统健康:${lvlText}</h2>
+    <span style="flex:1"></span>
+    <button class="btn ghost" onclick="copySystemReport()" style="padding:5px 11px;font-size:12px">📋 复制系统报告</button></div>`;
+  if (warnings.length){
+    h += '<div style="margin-top:8px">' + warnings.map(w=>{
+      const wc = w.level==='danger'?'#fca5a5':'#fcd34d';
+      const actLink = w.action==='cleanup' ? ` <a href="#" style="color:#bfdbfe" onclick="event.preventDefault();tab('cleanup')">→ 去清理</a>` :
+                     w.action==='settings' ? ` <a href="#" style="color:#bfdbfe" onclick="event.preventDefault();tab('settings')">→ 去设置</a>` : '';
+      return `<div style="color:${wc};font-size:13px;margin:3px 0">• ${esc(w.msg)}${actLink}</div>`;
+    }).join('') + '</div>';
+  }
+  h += '</div>';
+  h+=`<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
     <div class="lib"><div class="n">内存</div><div class="s">${d.mem.used}/${d.mem.total} GB · 可用 ${d.mem.avail}G</div>${bar(d.mem.pct,mc)}<div class="s" style="margin-top:4px">已用 ${d.mem.pct}%</div></div>
     <div class="lib"><div class="n">Swap</div><div class="s">${d.swap.used}/${d.swap.total} GB</div>${bar(d.swap.pct,'var(--blue)')}<div class="s" style="margin-top:4px">已用 ${d.swap.pct}%</div></div>
     <div class="lib"><div class="n">磁盘 /volume1</div><div class="s">空闲 ${d.disk.free_tb}/${d.disk.total_tb} TB</div>${bar(d.disk.pct,d.disk.pct>90?'var(--red)':'var(--green)')}<div class="s" style="margin-top:4px">已用 ${d.disk.pct}%</div></div>
@@ -3054,6 +3078,162 @@ async function zgGapsSummary(){
     });
     UI.toast('已启动,看 🔔 任务中心进度;完成弹清单', {type:'info', ms:3000});
   } catch(e){ UI.toast('请求失败:'+e,{type:'error'}); }
+}
+
+// === gaps 全库扫描 ===
+async function gapsScanLib(){
+  const lib = document.querySelector('#gapLib').value;
+  if (!lib){ UI.toast('先选剧集库',{type:'warn'}); return; }
+  const out = document.querySelector('#gapOut');
+  out.innerHTML = UI.skeleton.rows(8);
+  try {
+    const r = await api('/api/gaps/scan_lib',{method:'POST',body:JSON.stringify({lib,async:true})});
+    if (r.err){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(r.err)}</div>`; return; }
+    UI.tasks.start(r.tid, {
+      label:`📊 全库缺集扫描 ${lib}`,
+      onDone:(t)=>{
+        const result = t.result || {};
+        if (result.err){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(result.err)}</div>`; return; }
+        renderGapsScan(result);
+      }
+    });
+  } catch(e){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(String(e))}</div>`; }
+}
+
+function renderGapsScan(r){
+  const out = document.querySelector('#gapOut');
+  const items = r.items || [];
+  if (!items.length){
+    out.innerHTML = `<div class="card"><h2 style="font-size:14px">📊 全库缺集报告 (${UI.esc(r.lib)})</h2><p class="muted">✨ ${r.analyzed} 部剧全部齐全(无缺集 / 无落后 TMDb)</p></div>`;
+    return;
+  }
+  let h = `<div class="card">
+    <h2 style="font-size:14px">📊 全库缺集报告 (${UI.esc(r.lib)}) <span class="muted" style="font-weight:normal;font-size:12px">${items.length} 部有缺/落后 (共扫 ${r.analyzed})</span></h2>
+    <div class="row" style="margin:8px 0;gap:6px">
+      <button class="btn" style="background:var(--blue)" onclick="(async()=>{try{await navigator.clipboard.writeText(${JSON.stringify(r.copy_text)});UI.toast('已复制 '+${items.length}+' 行求资源文本',{type:'ok'})}catch(e){UI.toast('复制失败:'+e,{type:'warn'})}})()">📋 复制全部求资源</button>
+      <span class="muted" style="font-size:12px">按综合分(缺集+落后×2)倒序</span>
+    </div>
+    <div style="max-height:500px;overflow:auto;font-size:13px">`;
+  items.forEach(it=>{
+    if (it.err){
+      h += `<div style="padding:6px 0;border-bottom:1px solid var(--line);color:var(--red)">${UI.esc(it.name)}: ${UI.esc(it.err)}</div>`;
+      return;
+    }
+    const sc = it.score || 0;
+    const scColor = sc>=20?'#fca5a5':sc>=10?'#fcd34d':'var(--sub)';
+    h += `<div style="padding:8px 0;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:flex-start">
+      <div style="text-align:right;min-width:50px">
+        <div style="font-size:18px;font-weight:700;color:${scColor}">${sc}</div>
+        <div class="muted" style="font-size:10px">分</div>
+      </div>
+      <div style="flex:1">
+        <div><b>${UI.esc(it.name)}</b></div>
+        <div class="muted" style="font-size:12px;margin-top:2px">${UI.esc(it.fmt)}</div>
+        <div style="margin-top:4px;font-size:11px">
+          <a href="#" style="color:var(--blue)" onclick='event.preventDefault();zgGoCheck(${JSON.stringify(it.id)})'>→ 单独看</a>
+        </div>
+      </div>
+    </div>`;
+  });
+  h += '</div></div>';
+  out.innerHTML = h;
+}
+
+// === poster 错绑检测 ===
+async function detectMismatchPosters(){
+  const out = document.querySelector('#mismatchOut');
+  out.innerHTML = UI.skeleton.rows(6);
+  try {
+    const r = await api('/api/poster/detect_mismatch',{method:'POST',body:JSON.stringify({async:true})});
+    if (r.err){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(r.err)}</div>`; return; }
+    UI.tasks.start(r.tid, {
+      label:'🔍 检测疑似绑错',
+      onDone:(t)=>{
+        const result = t.result || {};
+        if (result.err){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(result.err)}</div>`; return; }
+        renderMismatchPosters(result);
+      }
+    });
+  } catch(e){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(String(e))}</div>`; }
+}
+
+function renderMismatchPosters(r){
+  const out = document.querySelector('#mismatchOut');
+  const items = r.items || [];
+  if (!items.length){
+    out.innerHTML = `<div class="card"><h2 style="font-size:14px">🔍 疑似绑错检测</h2><p class="muted">✨ 全库扫描没发现 emby 名跟 folder 名差异大的(说明刮削基本对)</p></div>`;
+    return;
+  }
+  let h = `<div class="card">
+    <h2 style="font-size:14px">🔍 疑似绑错 (${items.length}) <span class="muted" style="font-weight:normal;font-size:12px">folder 中文 vs emby 名差异大</span></h2>
+    <div class="muted" style="font-size:11px;margin-bottom:8px">💡 高分 = 大概率绑错。点「→ 修复」跳海报修复 tab 重搜该剧。</div>
+    <div style="max-height:500px;overflow:auto;font-size:13px">`;
+  items.forEach((it, idx)=>{
+    const sc = it.score;
+    const scColor = sc>=80?'#fca5a5':sc>=50?'#fcd34d':'var(--sub)';
+    h += `<div style="padding:8px 0;border-bottom:1px solid var(--line);display:flex;gap:12px;align-items:flex-start">
+      <div style="text-align:right;min-width:50px">
+        <div style="font-size:18px;font-weight:700;color:${scColor}">${sc}</div>
+        <div class="muted" style="font-size:10px">疑分</div>
+      </div>
+      <div style="flex:1">
+        <div><b style="color:#fca5a5">emby 名:${UI.esc(it.emby_name)}</b></div>
+        <div style="color:#86efac;font-size:12px;margin-top:2px">folder 名:${UI.esc(it.folder_clean)}</div>
+        <div class="meta" style="margin-top:2px">[${UI.esc(it.lib)}] tmdb:${UI.esc(it.tmdb||'无')} · ${it.has_poster?'有海报':'无海报'}</div>
+        <div style="margin-top:4px;font-size:11px;color:var(--sub)">${(it.reasons||[]).map(UI.esc).join(' · ')}</div>
+        <div style="margin-top:4px;font-size:11px">
+          <a href="#" style="color:var(--blue)" onclick='event.preventDefault();fixMismatchPoster(${JSON.stringify(it.id)},${JSON.stringify(it.folder_clean)},${JSON.stringify(it.type)})'>→ 用中文名重搜+修复</a>
+        </div>
+      </div>
+    </div>`;
+  });
+  h += '</div></div>';
+  out.innerHTML = h;
+}
+
+async function fixMismatchPoster(id, search_name, typ){
+  try {
+    const d = await api(`/api/search?id=${encodeURIComponent(id)}&type=${encodeURIComponent(typ)}&name=${encodeURIComponent(search_name)}`);
+    const cands = d.candidates || [];
+    if (!cands.length){
+      UI.modal.alert({title:'没搜到候选',body:`TMDb 搜不到「${UI.esc(search_name)}」。手动去海报修复 tab 调整 tmdbid。`});
+      return;
+    }
+    let body = '<div style="margin-bottom:8px">选正确的候选(点击立即绑定 + 拉海报):</div>';
+    cands.forEach((c,i)=>{
+      body += `<div onclick="event.target.closest('.ui-modal-mask').dispatchEvent(new CustomEvent('pickCand',{detail:${JSON.stringify(c.tmdb)}}))" style="display:flex;gap:10px;padding:8px;border:1px solid var(--line);border-radius:6px;margin-bottom:6px;cursor:pointer">
+        ${c.img?`<img src="${c.img}" style="width:54px;height:80px;object-fit:cover;border-radius:4px">`:'<div style="width:54px;height:80px;background:#222;border-radius:4px"></div>'}
+        <div><div><b>${UI.esc(c.name||'?')}</b> ${c.year||''}</div>
+        <div class="muted" style="font-size:11px">tmdb:${c.tmdb} · ${UI.esc((c.overview||'').slice(0,80))}…</div></div>
+      </div>`;
+    });
+    // 用 ad-hoc modal(自带 pick 监听)
+    const mask = document.createElement('div');
+    mask.className='ui-modal-mask';
+    mask.innerHTML = `<div class="ui-modal" style="max-width:600px"><div class="ui-modal-head">🖼️ 选正确候选</div><div class="ui-modal-body">${body}</div><div class="ui-modal-foot"><button class="btn ghost">取消</button></div></div>`;
+    document.body.appendChild(mask);
+    mask.querySelector('.btn').addEventListener('click', ()=>mask.remove());
+    mask.addEventListener('click', e=>{if(e.target===mask) mask.remove();});
+    mask.addEventListener('pickCand', async ev=>{
+      mask.remove();
+      const tmdb = ev.detail;
+      UI.toast('绑定中…',{type:'info'});
+      const r = await api('/api/fixposter',{method:'POST',body:JSON.stringify({id, tmdb, type:typ, name:search_name})});
+      if (r.poster) UI.toast(`✓ 已修「${UI.esc(r.name)}」海报`,{type:'ok'});
+      else UI.toast(`已绑定 ${UI.esc(r.name||'')} 但海报未拉到`,{type:'warn'});
+      detectMismatchPosters();  // 重新扫
+    });
+  } catch(e){ UI.toast('搜索失败:'+e,{type:'error'}); }
+}
+
+// === system 健康预警 ===
+function copySystemReport(){
+  // 简单从当前 DOM 抓数据(避免再调一次 api)
+  const text = (document.querySelector('#sysOut') || {}).innerText || '';
+  navigator.clipboard.writeText(text).then(
+    ()=>UI.toast('已复制完整系统报告',{type:'ok'}),
+    e=>UI.toast('复制失败:'+e,{type:'warn'})
+  );
 }
 
 function zgGoCheck(id){
