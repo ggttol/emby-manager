@@ -2804,16 +2804,18 @@ function renderCleanupResult(r){
     return;
   }
   // 头部:统计 + 工具栏
+  const sizeScanned = r.size_scanned !== false;  // 后端没传字段默认认为扫了(向后兼容)
   const totalGB = items.reduce((s,i)=>s+(i.size_gb||0), 0);
   const dimLabel = {rating:'⭐评分',age:'📅入库久',idle:'👁️没看',size:'💾占空间',meta:'🖼️元数据'};
   const usedDims = (r.dimensions||[]).map(d=>dimLabel[d]||d).join(' · ');
+  const sizeText = sizeScanned ? `共占 <b>${totalGB.toFixed(1)} GB</b>` : `<span class="muted">大小未扫(勾「💾占空间」才扫)</span>`;
   let h = `<div class="row" style="margin-bottom:10px;gap:10px;flex-wrap:wrap;align-items:center">
-    <div><b>${items.length}</b> 个建议清理项 <span class="muted">(分析了 ${r.analyzed} 个,共 ${r.total} 个过门槛)</span> · 共占 <b>${totalGB.toFixed(1)} GB</b></div>
+    <div><b>${items.length}</b> 个建议清理项 <span class="muted">(分析了 ${r.analyzed} 个,共 ${r.total} 个过门槛)</span> · ${sizeText}</div>
     <span class="muted" style="font-size:12px;margin-left:auto">📐 当前维度:${usedDims}</span>
   </div>
   <div class="row" style="margin-bottom:10px;gap:6px;flex-wrap:wrap;align-items:center">
     <label class="muted"><input type="checkbox" id="ckAllCleanup" onchange="toggleAllCleanup()"> 全选</label>
-    <span class="muted" id="cleanupSelCnt">选中 0 · 0 GB</span>
+    <span class="muted" id="cleanupSelCnt">选中 0${sizeScanned ? ' · 0 GB' : ''}</span>
     <span style="flex:1"></span>
     <button class="btn ghost" onclick="cleanupSelectTopN(20)">勾前 20</button>
     <button class="btn ghost" onclick="cleanupSelectByScore(60)">勾分≥60</button>
@@ -2823,11 +2825,12 @@ function renderCleanupResult(r){
   <div style="font-size:13px">`;
   items.forEach((i, idx)=>{
     const ratingClr = (i.rating && i.rating < 5) ? '#fca5a5' : (i.rating ? '#86efac' : 'var(--sub)');
+    const sizeDisplay = sizeScanned ? `💾 ${i.size_gb||0} GB` : `💾 <span class="muted">未扫</span>`;
     h += `<div class="item" id="cleanupRow${idx}" style="border-bottom:1px solid var(--line);padding:10px 2px">
       <input type="checkbox" class="ckCleanup" data-idx="${idx}" data-gb="${i.size_gb||0}" onchange="updateCleanupSel()" style="margin-right:10px;width:16px;height:16px">
       <div class="main">
         <div class="nm">${UI.esc(i.name)} <span class="muted">${i.year||''}</span> <span style="color:${ratingClr};font-size:12px">⭐ ${i.rating!=null?i.rating:'—'}</span></div>
-        <div class="meta">📁 ${UI.esc(i.folder||'?')} · tmdb:${UI.esc(i.tmdb||'无')} · 💾 ${i.size_gb||0} GB</div>
+        <div class="meta">📁 ${UI.esc(i.folder||'?')} · tmdb:${UI.esc(i.tmdb||'无')} · ${sizeDisplay}</div>
         <div style="margin-top:4px;font-size:11px;color:var(--sub)">${i.reasons.map(r=>UI.esc(r)).join(' · ')}</div>
       </div>
       <div style="text-align:right">
@@ -2843,10 +2846,10 @@ function renderCleanupResult(r){
 
 function updateCleanupSel(){
   const cks = document.querySelectorAll('.ckCleanup:checked');
-  let gb = 0;
-  cks.forEach(c=>gb += parseFloat(c.dataset.gb||0));
+  let gb = 0, hasGb = false;
+  cks.forEach(c=>{ const g = parseFloat(c.dataset.gb||0); gb += g; if (g > 0) hasGb = true; });
   const el = document.querySelector('#cleanupSelCnt');
-  if (el) el.textContent = `选中 ${cks.length} · ${gb.toFixed(1)} GB`;
+  if (el) el.textContent = hasGb || cks.length === 0 ? `选中 ${cks.length} · ${gb.toFixed(1)} GB` : `选中 ${cks.length}(大小未扫)`;
 }
 
 function toggleAllCleanup(){

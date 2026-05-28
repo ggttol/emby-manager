@@ -1311,7 +1311,8 @@ def cleanup_suggest_async(tid, lib, top=80, min_score=20, dimensions=None):
     log("智能清理分析 [%s] 维度=%s: %d 项 → 建议 %d 个" % (lib, ",".join(sorted(enabled)), len(items), len(out)))
     return {"lib": lib, "items": out[:top], "total": len(out),
             "analyzed": len(items),
-            "dimensions": sorted(enabled)}
+            "dimensions": sorted(enabled),
+            "size_scanned": need_size}
 
 
 def _airing_series_list():
