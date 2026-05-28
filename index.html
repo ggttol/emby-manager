@@ -184,6 +184,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   <button data-tab="poster" onclick="tab('poster')">🖼️ 海报修复</button>
   <button data-tab="dedup" onclick="tab('dedup')">🧹 去重</button>
   <button data-tab="manage" onclick="tab('manage')">🗂️ 删除/移动</button>
+  <button data-tab="cleanup" onclick="tab('cleanup')">🧹 智能清理</button>
   <button data-tab="system" onclick="tab('system')">🩺 系统</button>
   <button data-tab="log" onclick="tab('log')">📜 日志</button>
   <button data-tab="users" onclick="tab('users')">👥 用户</button>
@@ -289,6 +290,31 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
       </div>
       <div id="itemListMeta" class="muted" style="margin-top:6px;font-size:12px"></div>
       <div id="itemList" style="margin-top:10px"></div></div>
+  </section>
+
+  <section id="cleanup" class="hide">
+    <div class="card"><h2>🧹 智能清理建议</h2>
+      <p class="muted" style="margin-bottom:10px">多维度分析某库找"建议清理"候选:⭐ 评分低 · 📅 入库久 · 👁️ 没人看 · 💾 占空间 · 🖼️ 元数据残缺。综合分高的优先列。<b>建议</b>不是强删,你勾选后再批量执行。</p>
+      <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="muted">选库</span>
+        <select id="cleanupLib" style="min-width:160px"></select>
+        <span class="muted">显示前</span>
+        <select id="cleanupTop" style="width:80px">
+          <option value="30">30</option>
+          <option value="80" selected>80</option>
+          <option value="200">200</option>
+        </select>
+        <span class="muted">最小分</span>
+        <select id="cleanupMinScore" style="width:80px">
+          <option value="10">10</option>
+          <option value="20" selected>20</option>
+          <option value="40">40</option>
+          <option value="60">60</option>
+        </select>
+        <button class="btn" style="background:#7c3aed" onclick="runCleanupAnalysis()">🔍 分析</button>
+      </div>
+      <div id="cleanupOut" style="margin-top:14px"></div>
+    </div>
   </section>
 
   <section id="system" class="hide">
@@ -1241,6 +1267,7 @@ function tab(name){
   if(name==="zhuigeng") loadZhuigeng();
   if(name==="gaps") fillGapLibs();
   if(name==="c115") loadC115();
+  if(name==="cleanup") loadCleanupLibs();
 }
 async function start(){
   $("#login").classList.add("hide");$("#app").classList.remove("hide");
@@ -2638,6 +2665,159 @@ ${noFolder.length?`<div class="muted" style="font-size:11px;margin-top:6px">⚠�
 }
 
 function goScan(lib){tab('scan');const sel=$("#scanLib");if(sel)sel.value=lib;}
+
+// === 🧹 智能清理 ===
+function loadCleanupLibs(){
+  const sel = document.querySelector('#cleanupLib');
+  if (!sel) return;
+  if (sel.options.length > 0) return;  // 已填过
+  sel.innerHTML = (LIBS||[]).map(l=>`<option value="${UI.esc(l.name)}">${UI.esc(l.name)} (${l.count})</option>`).join('');
+}
+
+async function runCleanupAnalysis(){
+  const lib = document.querySelector('#cleanupLib').value;
+  const top = parseInt(document.querySelector('#cleanupTop').value);
+  const minScore = parseInt(document.querySelector('#cleanupMinScore').value);
+  if (!lib){ UI.toast('先选库',{type:'warn'}); return; }
+  const out = document.querySelector('#cleanupOut');
+  out.innerHTML = UI.skeleton.rows(8);
+  try {
+    const r = await api('/api/cleanup/suggest', {method:'POST', body:JSON.stringify({lib, top, min_score:minScore, async:true})});
+    if (r.err){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(r.err)}</div>`; return; }
+    if (!r.tid){ out.innerHTML = '后端未返 tid'; return; }
+    UI.tasks.start(r.tid, {
+      label: `🧹 智能清理分析 ${lib}`,
+      onDone: (t)=>{
+        const result = t.result || {};
+        if (result.err){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(result.err)}</div>`; return; }
+        renderCleanupResult(result);
+      }
+    });
+  } catch(e){ out.innerHTML = `<div style="color:var(--red)">请求失败:${UI.esc(String(e))}</div>`; }
+}
+
+function renderCleanupResult(r){
+  const out = document.querySelector('#cleanupOut');
+  const items = r.items || [];
+  const lib = r.lib;
+  window._cleanupItems = items;
+  window._cleanupLib = lib;
+  if (!items.length){
+    out.innerHTML = UI.empty ? '' : '';
+    UI.empty(out, {icon:'✨', title:'没有建议清理的项目', hint:`分析了 ${r.analyzed} 个项目,没有达到清理建议门槛(都比较"干净")`});
+    return;
+  }
+  // 头部:统计 + 工具栏
+  const totalGB = items.reduce((s,i)=>s+(i.size_gb||0), 0);
+  let h = `<div class="row" style="margin-bottom:10px;gap:10px;flex-wrap:wrap;align-items:center">
+    <div><b>${items.length}</b> 个建议清理项 <span class="muted">(分析了 ${r.analyzed} 个,共 ${r.total} 个过门槛)</span> · 共占 <b>${totalGB.toFixed(1)} GB</b></div>
+  </div>
+  <div class="row" style="margin-bottom:10px;gap:6px;flex-wrap:wrap;align-items:center">
+    <label class="muted"><input type="checkbox" id="ckAllCleanup" onchange="toggleAllCleanup()"> 全选</label>
+    <span class="muted" id="cleanupSelCnt">选中 0 · 0 GB</span>
+    <span style="flex:1"></span>
+    <button class="btn ghost" onclick="cleanupSelectTopN(20)">勾前 20</button>
+    <button class="btn ghost" onclick="cleanupSelectByScore(60)">勾分≥60</button>
+    <button class="btn ghost" onclick="cleanupSelectByScore(100)">勾分≥100</button>
+    <button class="btn danger" onclick="cleanupDeleteSelected()">🗑️ 删除选中</button>
+  </div>
+  <div style="font-size:13px">`;
+  items.forEach((i, idx)=>{
+    const ratingClr = (i.rating && i.rating < 5) ? '#fca5a5' : (i.rating ? '#86efac' : 'var(--sub)');
+    h += `<div class="item" id="cleanupRow${idx}" style="border-bottom:1px solid var(--line);padding:10px 2px">
+      <input type="checkbox" class="ckCleanup" data-idx="${idx}" data-gb="${i.size_gb||0}" onchange="updateCleanupSel()" style="margin-right:10px;width:16px;height:16px">
+      <div class="main">
+        <div class="nm">${UI.esc(i.name)} <span class="muted">${i.year||''}</span> <span style="color:${ratingClr};font-size:12px">⭐ ${i.rating!=null?i.rating:'—'}</span></div>
+        <div class="meta">📁 ${UI.esc(i.folder||'?')} · tmdb:${UI.esc(i.tmdb||'无')} · 💾 ${i.size_gb||0} GB</div>
+        <div style="margin-top:4px;font-size:11px;color:var(--sub)">${i.reasons.map(r=>UI.esc(r)).join(' · ')}</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:20px;font-weight:700;color:${i.total_score>=100?'#fca5a5':i.total_score>=60?'#fcd34d':'var(--sub)'}">${i.total_score}</div>
+        <div class="muted" style="font-size:10px">综合分</div>
+      </div>
+    </div>`;
+  });
+  h += '</div>';
+  out.innerHTML = h;
+  updateCleanupSel();
+}
+
+function updateCleanupSel(){
+  const cks = document.querySelectorAll('.ckCleanup:checked');
+  let gb = 0;
+  cks.forEach(c=>gb += parseFloat(c.dataset.gb||0));
+  const el = document.querySelector('#cleanupSelCnt');
+  if (el) el.textContent = `选中 ${cks.length} · ${gb.toFixed(1)} GB`;
+}
+
+function toggleAllCleanup(){
+  const on = document.querySelector('#ckAllCleanup').checked;
+  document.querySelectorAll('.ckCleanup').forEach(c=>c.checked = on);
+  updateCleanupSel();
+}
+
+function cleanupSelectTopN(n){
+  document.querySelectorAll('.ckCleanup').forEach((c, i)=>c.checked = i < n);
+  updateCleanupSel();
+}
+
+function cleanupSelectByScore(thresh){
+  const items = window._cleanupItems || [];
+  document.querySelectorAll('.ckCleanup').forEach((c)=>{
+    const idx = parseInt(c.dataset.idx);
+    c.checked = (items[idx] && items[idx].total_score >= thresh);
+  });
+  updateCleanupSel();
+}
+
+async function cleanupDeleteSelected(){
+  const items = window._cleanupItems || [];
+  const lib = window._cleanupLib;
+  const cks = document.querySelectorAll('.ckCleanup:checked');
+  if (!cks.length){ UI.toast('先勾选要删的',{type:'warn'}); return; }
+  const selected = Array.from(cks).map(c => items[parseInt(c.dataset.idx)]).filter(Boolean);
+  const totalGB = selected.reduce((s,i)=>s+(i.size_gb||0), 0);
+  const preview = selected.slice(0,12).map(i=>`· ${UI.esc(i.name)} ${i.year||''} (${i.size_gb||0}GB · 分${i.total_score})`).join('<br>');
+  const extra = selected.length > 12 ? `<br>… 另 ${selected.length-12} 部` : '';
+  const ok = await UI.modal.confirm({
+    danger: true,
+    title: `🗑️ 删除 ${selected.length} 部(共 ${totalGB.toFixed(1)} GB)`,
+    body: `<div>从库 <b>${UI.esc(lib)}</b> 删除以下 <b>${selected.length}</b> 部:</div>
+<div style="margin-top:8px;font-size:11px;max-height:280px;overflow:auto;background:#0b0f17;padding:10px;border-radius:6px">${preview}${extra}</div>
+<div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 文件夹进回收站(7 天可还原)+ strm + Emby 条目同步删。释放约 <b>${totalGB.toFixed(1)} GB</b>。</div>`,
+    okText: `🗑️ 删除 ${selected.length} 部`,
+    requireType: '删除'
+  });
+  if (!ok) return;
+  try {
+    const r = await api('/api/manage/delete_batch', {method:'POST', body:JSON.stringify({
+      lib: lib,
+      items: selected.map(i=>({folder:i.folder, id:i.id})),
+      async: true
+    })});
+    if (r.err){ UI.toast('启动失败:'+r.err,{type:'error'}); return; }
+    if (!r.tid){ UI.toast('后端未返 tid',{type:'error'}); return; }
+    UI.tasks.start(r.tid, {
+      label:`🗑️ 智能清理删 ${selected.length} 部`,
+      onDone:(t)=>{
+        const rr = t.result || {};
+        const okN = rr.ok_count||0, failN = (rr.total||0) - okN;
+        UI.toast(`清理完成 ✓${okN}${failN?` ✗${failN}`:''} · 释放约 ${totalGB.toFixed(1)} GB`, {
+          type:failN?'warn':'ok', ms:7000,
+          action: failN ? {label:'失败详情', fn:()=>UI.modal.alert({
+            title:'失败列表',
+            body:(rr.results||[]).filter(x=>!x.ok).map(x=>'· '+UI.esc(x.folder||'?')+': '+UI.esc(x.err||'')).join('<br>') || '无',
+            copyable:true
+          })} : null
+        });
+        // 重新分析
+        runCleanupAnalysis();
+        start();
+      }
+    });
+  } catch(e){ UI.toast('请求失败:'+e,{type:'error'}); }
+}
+
 
 // === 追更智能:一键扫所有在更剧 + 缺集汇总 ===
 async function zgScanAiring(){

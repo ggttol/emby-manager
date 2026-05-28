@@ -44,7 +44,8 @@ from lib.business import (LIB_LOCKS, LIB_LOCKS_GUARD, _lib_lock,
                           fix_poster_batch_async, delete_batch_async,
                           move_batch_async, dedup_exec_batch_async,
                           add_new_pipeline_async, replace_folder, replace_batch_async,
-                          zhuigeng_scan_airing_async, zhuigeng_gaps_summary_async)
+                          zhuigeng_scan_airing_async, zhuigeng_gaps_summary_async,
+                          cleanup_suggest_async)
 from lib import business as _biz
 from lib.undo import UNDO_FILE, UNDO_MAX, UNDO_LOCK, _undo_record, list_undo, exec_undo
 
@@ -304,6 +305,13 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/zhuigeng/gaps_summary":
                 # 汇总所有在更剧的缺集 → 求资源清单
                 return self._json({"tid": run_async("zhuigeng_gaps_summary", zhuigeng_gaps_summary_async)})
+            if path == "/api/cleanup/suggest":
+                # 智能清理建议:多维度分析某库,返候选 + 评分
+                lib = b.get("lib", "")
+                top = max(10, min(500, int(b.get("top", 80))))
+                min_score = max(0, min(200, int(b.get("min_score", 20))))
+                return self._json({"tid": run_async("cleanup_suggest",
+                    cleanup_suggest_async, lib, top, min_score)})
             if path == "/api/wizard/add_new":
                 # 一条龙加新资源:批量 receive → 扫涉及库 → 等刮削 → 海报+重复检查 → 报告
                 # 必须用 app 模块的 c115_save_to_lib(走 _c115_req 包装链)

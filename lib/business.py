@@ -887,6 +887,148 @@ def replace_folder(lib, win_folder, lose_folder):
                 "新 folder 改名回「%s」" % lose_folder if renamed_to == lose_folder else "")}
 
 
+def _folder_size_bytes(path):
+    """递归算 folder 字节数。CloudDrive2 FUSE 上 stat 走 115 metadata cache,通常秒级。
+    超大文件夹(>500 文件)可能慢几秒,任务异步无所谓。"""
+    if not os.path.isdir(path):
+        return 0
+    total = 0
+    for root, _ds, fs in os.walk(path):
+        for f in fs:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except Exception:
+                pass
+    return total
+
+
+def cleanup_suggest_async(tid, lib, top=80, min_score=20):
+    """多维度分析 lib 内可建议清理的资源。
+    维度:rating(TMDb 评分)/ age(入库久)/ idle(没人看)/ size(占空间)/ meta(元数据残缺)。
+    返 {items: [{id,name,...,scores:{},reasons:[],total_score}], total, lib}"""
+    from datetime import datetime
+    L = fetch_libs()
+    if lib not in L:
+        return {"err": "未知库 " + str(lib)}
+    m = L[lib]
+    typ = "Series" if m["ctype"] == "tvshows" else "Movie"
+    fields = "Path,CommunityRating,DateCreated,PremiereDate,UserData,ProductionYear,Overview,ImageTags,ProviderIds"
+    try:
+        items = eget("/Items", {"ParentId": m["id"], "Recursive": "true",
+                                "IncludeItemTypes": typ,
+                                "Fields": fields, "Limit": 30000,
+                                "SortBy": "SortName"}).get("Items", [])
+    except Exception as e:
+        return {"err": "拉 emby 项目失败: " + str(e)}
+    task_set(tid, total=len(items) or 1, status_text="分析 " + lib)
+    out = []
+    now = time.time()
+    sep = "/" + m["folder"] + "/"
+    cd_lib = os.path.join(CD, m["folder"])
+    for idx, i in enumerate(items):
+        if task_is_cancelled(tid):
+            break
+        if idx % 10 == 0:
+            task_set(tid, progress=idx, status_text="分析 %s (%d/%d)" % (lib, idx, len(items)))
+        path = i.get("Path") or ""
+        folder = path.split(sep, 1)[1].split("/", 1)[0] if sep in path else ""
+        # 文件夹大小(CloudDrive2 FUSE,quick metadata)
+        size_bytes = 0
+        if folder:
+            try:
+                size_bytes = _folder_size_bytes(os.path.join(cd_lib, folder))
+            except Exception:
+                pass
+        # 评分(0-10 范围)
+        rating = i.get("CommunityRating") or 0
+        # 入库时间 → 距今天数
+        days_in_lib = 0
+        try:
+            dc = i.get("DateCreated", "")
+            if dc:
+                t = datetime.fromisoformat(dc.replace("Z", "+00:00")).timestamp()
+                days_in_lib = int((now - t) / 86400)
+        except Exception:
+            pass
+        # 最近播放
+        ud = i.get("UserData") or {}
+        play_count = ud.get("PlayCount") or 0
+        last_play = ud.get("LastPlayedDate") or ""
+        days_since_play = None
+        if last_play:
+            try:
+                lp = datetime.fromisoformat(last_play.replace("Z", "+00:00")).timestamp()
+                days_since_play = int((now - lp) / 86400)
+            except Exception:
+                pass
+        # === 各维度评分(每项 0-100)===
+        reasons = []
+        # rating:< 5 = 差评,越低越高
+        rating_score = 0
+        if rating > 0 and rating < 5:
+            rating_score = int((5 - rating) * 20)
+            reasons.append("⭐ 评分 %.1f(差评)" % rating)
+        elif rating == 0:
+            rating_score = 10
+            reasons.append("⭐ 无评分(冷门)")
+        # age:入库 > 365 天每 30 天 +1
+        age_score = 0
+        if days_in_lib > 365:
+            age_score = min(50, int((days_in_lib - 365) / 30))
+            reasons.append("📅 入库 %d 天" % days_in_lib)
+        # idle:从未播过 / 长期未看
+        idle_score = 0
+        if play_count == 0:
+            if days_in_lib > 180:
+                idle_score = 40
+                reasons.append("👁️ 入库 %d 天从未播过" % days_in_lib)
+            elif days_in_lib > 60:
+                idle_score = 20
+                reasons.append("👁️ 入库 %d 天未播过" % days_in_lib)
+        elif days_since_play and days_since_play > 365:
+            idle_score = 30
+            reasons.append("👁️ %d 天未看" % days_since_play)
+        # size:> 50GB 大,> 20GB 中
+        size_gb = size_bytes / (1024.0 ** 3)
+        size_score = 0
+        if size_gb > 50:
+            size_score = min(40, int(size_gb / 5))
+            reasons.append("💾 占 %.1f GB(大)" % size_gb)
+        elif size_gb > 20:
+            size_score = int(size_gb / 2)
+            reasons.append("💾 占 %.1f GB" % size_gb)
+        # meta:无海报 / 无简介
+        meta_score = 0
+        if not (i.get("ImageTags") or {}).get("Primary"):
+            meta_score += 10; reasons.append("🖼️ 无海报")
+        if not i.get("Overview"):
+            meta_score += 5; reasons.append("📝 无简介")
+        total = rating_score + age_score + idle_score + size_score + meta_score
+        if total < min_score:
+            continue
+        out.append({
+            "id": i.get("Id"),
+            "name": i.get("Name"),
+            "year": i.get("ProductionYear"),
+            "folder": folder,
+            "tmdb": (i.get("ProviderIds") or {}).get("Tmdb", ""),
+            "size_gb": round(size_gb, 1),
+            "rating": round(rating, 1) if rating else None,
+            "play_count": play_count,
+            "days_in_lib": days_in_lib,
+            "days_since_play": days_since_play,
+            "total_score": total,
+            "scores": {"rating": rating_score, "age": age_score,
+                       "idle": idle_score, "size": size_score, "meta": meta_score},
+            "reasons": reasons,
+        })
+    out.sort(key=lambda x: -x["total_score"])
+    task_set(tid, progress=len(items))
+    log("智能清理分析 [%s]: %d 个项目 → 建议清理 %d 个" % (lib, len(items), len(out)))
+    return {"lib": lib, "items": out[:top], "total": len(out),
+            "analyzed": len(items)}
+
+
 def _airing_series_list():
     """拿所有「追更」库里 TMDb Status=Continuing/Returning Series 的剧。
     返 [{lib, name, id, tmdb}]。每库一次 emby /Items 调用。"""
