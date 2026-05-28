@@ -186,6 +186,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   <button data-tab="manage" onclick="tab('manage')">🗂️ 删除/移动</button>
   <button data-tab="cleanup" onclick="tab('cleanup')">🧹 智能清理</button>
   <button data-tab="system" onclick="tab('system')">🩺 系统</button>
+  <button data-tab="schedule" onclick="tab('schedule')">⏰ 定时</button>
   <button data-tab="log" onclick="tab('log')">📜 日志</button>
   <button data-tab="users" onclick="tab('users')">👥 用户</button>
   <button data-tab="settings" onclick="tab('settings')">⚙️ 设置</button>
@@ -350,6 +351,19 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
     <div class="card">
       <div class="row"><h2>🕓 最近任务</h2><span style="flex:1"></span><button class="btn ghost" onclick="loadRecentTasks()">刷新</button></div>
       <div id="recentTasks" class="muted">加载中…</div>
+    </div>
+  </section>
+
+  <section id="schedule" class="hide">
+    <div class="card">
+      <div class="row" style="margin-bottom:10px;align-items:center">
+        <h2 style="margin:0">⏰ 定时任务</h2>
+        <span class="muted" style="margin-left:14px;font-size:12px">后台 30s 轮询;命中 5min 触发窗口跑一次,同周期不重入</span>
+        <span style="flex:1"></span>
+        <button class="btn ghost" onclick="loadSchedules()">刷新</button>
+        <button class="btn" onclick="newScheduleModal()">+ 新建定时</button>
+      </div>
+      <div id="scheduleList" class="muted">加载中…</div>
     </div>
   </section>
 
@@ -1318,6 +1332,7 @@ function tab(name){
   if(name==="gaps") fillGapLibs();
   if(name==="c115") loadC115();
   if(name==="cleanup") loadCleanupLibs();
+  if(name==="schedule") loadSchedules();
 }
 async function start(){
   $("#login").classList.add("hide");$("#app").classList.remove("hide");
@@ -1969,6 +1984,249 @@ async function loadRecentTasks(){
     </div>`;
   }).join('');
 }
+
+// === ⏰ 定时任务 ===
+window._scheduleKinds = window._scheduleKinds || [];
+
+async function loadSchedules(){
+  const el = $("#scheduleList");
+  el.innerHTML = '<span class="spin"></span> 加载…';
+  let d; try { d = await api('/api/schedules'); } catch(e){ el.textContent='出错: '+e; return; }
+  window._scheduleKinds = d.kinds || [];
+  const arr = d.schedules || [];
+  if (!arr.length){
+    el.innerHTML = `<div style="padding:24px;text-align:center">
+      <div style="font-size:32px;margin-bottom:10px">⏰</div>
+      <div style="font-size:14px">还没有任何定时任务</div>
+      <div class="muted" style="font-size:12px;margin:6px 0 14px">扫全库 / 扫追更剧 / 海报修复等都可挂定时</div>
+      <button class="btn" onclick="newScheduleModal()">+ 新建第一个</button>
+    </div>`;
+    return;
+  }
+  el.innerHTML = arr.map(s => {
+    const enabled = s.enabled;
+    const stChip = scheduleStatusChip(s);
+    const lastTxt = s.last_run_at ? `${fmtRelTime(s.last_run_at)} ${stChip}` : '<span class="muted">未运行过</span>';
+    // 下次:enabled 才显示;disabled 时直接说"已停用,不会跑"
+    const nextRow = enabled
+      ? `<span class="muted">下次:</span><span><b>${esc(s.next_run_at ? fmtRelTime(s.next_run_at) : '—')}</b></span>`
+      : `<span style="color:var(--warn);font-weight:600">⏸ 已停用 · 不会跑</span>`;
+    return `<div style="border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:10px;background:${enabled?'transparent':'rgba(127,127,127,.08)'}">
+      <div class="row" style="gap:10px;align-items:center;flex-wrap:wrap">
+        <span style="font-size:18px">${esc((s.kind_label||s.kind||'?').slice(0,2))}</span>
+        <div>
+          <div style="font-weight:700;font-size:14px">${esc(s.name||s.kind)}</div>
+          <div class="muted" style="font-size:11px">${esc(s.kind_label||s.kind)} · <b>${esc(s.schedule_human||'')}</b></div>
+        </div>
+        <span style="flex:1"></span>
+        <button class="btn ghost" title="${enabled?'停用':'启用'}" onclick="toggleSchedule('${s.id}', ${!enabled})">${enabled?'⏸ 停':'▶ 启'}</button>
+        <button class="btn ghost" onclick="runSchedule('${s.id}')">▶ 立即跑</button>
+        <button class="btn ghost" onclick="editScheduleModal('${s.id}')">改</button>
+        <button class="btn ghost" style="color:var(--red)" onclick="deleteScheduleConfirm('${s.id}')">删</button>
+      </div>
+      <div class="row" style="margin-top:8px;gap:14px;font-size:12px;flex-wrap:wrap">
+        ${nextRow}
+        <span class="muted" style="margin-left:14px">最近:</span><span>${lastTxt}</span>
+        ${s.last_err ? `<span style="color:var(--red);font-size:11px;flex:1 0 100%;margin-top:4px">错误: ${esc(s.last_err.slice(0,200))}</span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function scheduleStatusChip(s){
+  const st = s.last_status;
+  if (!st) return '';
+  const map = {
+    running: ['<span class="badge">running</span>', '运行中'],
+    done:    ['<span class="badge g">✓ ok</span>', '成功'],
+    error:   ['<span class="badge warn">✗ err</span>', '失败'],
+    cancelled:['<span class="badge warn">cancel</span>', '取消'],
+    watch_timeout:['<span class="badge warn">watch?</span>', '监控超时']
+  };
+  return (map[st] || [`<span class="badge">${esc(st)}</span>`])[0];
+}
+
+function fmtRelTime(iso){
+  try {
+    const t = new Date(iso);
+    const now = new Date();
+    const diff = (t - now) / 1000;
+    const abs = Math.abs(diff);
+    const pre = diff < 0 ? '' : '+';
+    const post = diff < 0 ? '前' : '后';
+    if (abs < 60) return Math.round(abs) + ' 秒' + post;
+    if (abs < 3600) return Math.round(abs/60) + ' 分' + post;
+    if (abs < 86400) return Math.round(abs/3600) + ' 小时' + post;
+    if (abs < 86400*7) return Math.round(abs/86400) + ' 天' + post;
+    // 远期或远过去 → 显示日期 + HH:MM
+    return t.toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+  } catch(e){ return iso; }
+}
+
+async function newScheduleModal(){
+  if (!window._scheduleKinds.length){
+    try { const d = await api('/api/schedules'); window._scheduleKinds = d.kinds || []; }
+    catch(e){ UI.toast('加载 kinds 失败: '+e, {type:'error'}); return; }
+  }
+  renderScheduleForm(null);
+}
+
+async function editScheduleModal(sid){
+  if (!window._scheduleKinds.length){
+    try { const d = await api('/api/schedules'); window._scheduleKinds = d.kinds || []; }
+    catch(e){ UI.toast('加载失败', {type:'error'}); return; }
+  }
+  const d = await api('/api/schedules');
+  const s = (d.schedules || []).find(x => x.id === sid);
+  if (!s){ UI.toast('找不到', {type:'error'}); return; }
+  renderScheduleForm(s);
+}
+
+// inline 表单(不走 modal,直接渲染到 tab 顶部),改/新建共用
+function renderScheduleForm(existing){
+  const isEdit = !!existing;
+  const init = existing || {kind: (window._scheduleKinds[0] || {}).kind || '',
+                            name: '',
+                            schedule: {mode:'daily', hour:3, minute:0, weekday:0, day:1},
+                            enabled: true};
+  const sch = init.schedule;
+  const kindOpts = window._scheduleKinds.map(k =>
+    `<option value="${esc(k.kind)}" ${k.kind===init.kind?'selected':''}>${esc(k.label)}</option>`).join('');
+  const wdNames = ['周一','周二','周三','周四','周五','周六','周日'];
+  const wdOpts = wdNames.map((n,i)=>`<option value="${i}" ${i===(sch.weekday||0)?'selected':''}>${n}</option>`).join('');
+  const dayOpts = Array.from({length:31},(_,i)=>i+1).map(d=>`<option value="${d}" ${d===(sch.day||1)?'selected':''}>${d} 日</option>`).join('');
+  const hourOpts = Array.from({length:24},(_,i)=>i).map(h=>`<option value="${h}" ${h===(sch.hour||0)?'selected':''}>${String(h).padStart(2,'0')}</option>`).join('');
+  const minOpts = [0,5,10,15,20,25,30,35,40,45,50,55].map(m=>`<option value="${m}" ${m===(sch.minute||0)?'selected':''}>${String(m).padStart(2,'0')}</option>`).join('');
+  const html = `<div class="card" id="schForm" style="background:rgba(99,102,241,.08);border:1px solid var(--blue);margin-bottom:14px">
+    <div class="row" style="margin-bottom:10px"><h3 style="margin:0">${isEdit?'✎ 改定时:'+esc(init.name||init.kind):'+ 新建定时任务'}</h3><span style="flex:1"></span><button class="btn ghost" onclick="closeScheduleForm()">取消</button></div>
+    <div style="display:grid;gap:10px">
+      <div>
+        <label class="muted" style="display:block;font-size:12px;margin-bottom:4px">任务类型</label>
+        <select id="schKind" style="width:100%" ${isEdit?'disabled':''} onchange="schUpdateKindDesc()">${kindOpts}</select>
+        <div id="schKindDesc" class="muted" style="font-size:11px;margin-top:4px"></div>
+      </div>
+      <div>
+        <label class="muted" style="display:block;font-size:12px;margin-bottom:4px">名称(可选,留空自动生成)</label>
+        <input id="schName" type="text" style="width:100%" value="${esc(init.name||'')}" placeholder="例如「凌晨扫全库」">
+      </div>
+      <div>
+        <label class="muted" style="display:block;font-size:12px;margin-bottom:4px">触发模式</label>
+        <div class="row" style="gap:12px">
+          <label style="cursor:pointer"><input type="radio" name="schMode" value="daily" ${sch.mode==='daily'?'checked':''} onchange="schUpdateMode()"> 每日</label>
+          <label style="cursor:pointer"><input type="radio" name="schMode" value="weekly" ${sch.mode==='weekly'?'checked':''} onchange="schUpdateMode()"> 每周</label>
+          <label style="cursor:pointer"><input type="radio" name="schMode" value="monthly" ${sch.mode==='monthly'?'checked':''} onchange="schUpdateMode()"> 每月</label>
+        </div>
+      </div>
+      <div class="row" style="gap:10px;align-items:end;flex-wrap:wrap">
+        <div id="schWeekdayWrap" style="${sch.mode==='weekly'?'':'display:none'}">
+          <label class="muted" style="display:block;font-size:12px;margin-bottom:4px">星期</label>
+          <select id="schWeekday">${wdOpts}</select>
+        </div>
+        <div id="schDayWrap" style="${sch.mode==='monthly'?'':'display:none'}">
+          <label class="muted" style="display:block;font-size:12px;margin-bottom:4px">日期</label>
+          <select id="schDay">${dayOpts}</select>
+          <div class="muted" style="font-size:10px">(31 日不存在的月份夹到月末)</div>
+        </div>
+        <div>
+          <label class="muted" style="display:block;font-size:12px;margin-bottom:4px">时间(HH:MM)</label>
+          <span class="row" style="gap:4px"><select id="schHour">${hourOpts}</select>:<select id="schMinute">${minOpts}</select></span>
+        </div>
+      </div>
+      <label style="cursor:pointer"><input id="schEnabled" type="checkbox" ${init.enabled?'checked':''}> 启用(关掉则保留配置但不跑)</label>
+      <div class="row" style="gap:8px;margin-top:6px">
+        <button class="btn" onclick="submitSchedule(${isEdit ? `'${init.id}'` : 'null'})">${isEdit?'保存':'创建'}</button>
+        <button class="btn ghost" onclick="closeScheduleForm()">取消</button>
+      </div>
+    </div>
+  </div>`;
+  const list = $("#scheduleList");
+  // 表单插在列表上方
+  const existed = document.querySelector('#schForm');
+  if (existed) existed.remove();
+  list.insertAdjacentHTML('beforebegin', html);
+  schUpdateKindDesc();
+  // 滚到表单可见
+  document.querySelector('#schForm').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function closeScheduleForm(){
+  const f = document.querySelector('#schForm');
+  if (f) f.remove();
+}
+
+function schUpdateKindDesc(){
+  const k = document.querySelector('#schKind').value;
+  const spec = window._scheduleKinds.find(x => x.kind === k);
+  const el = document.querySelector('#schKindDesc');
+  if (el) el.textContent = spec ? spec.desc : '';
+}
+
+function schUpdateMode(){
+  const mode = document.querySelector('input[name="schMode"]:checked').value;
+  const w = document.querySelector('#schWeekdayWrap');
+  const d = document.querySelector('#schDayWrap');
+  if (w) w.style.display = mode === 'weekly' ? '' : 'none';
+  if (d) d.style.display = mode === 'monthly' ? '' : 'none';
+}
+
+async function submitSchedule(editId){
+  const mode = document.querySelector('input[name="schMode"]:checked').value;
+  const payload = {
+    kind: document.querySelector('#schKind').value,
+    name: document.querySelector('#schName').value.trim(),
+    schedule: {
+      mode,
+      hour: parseInt(document.querySelector('#schHour').value),
+      minute: parseInt(document.querySelector('#schMinute').value),
+      weekday: parseInt(document.querySelector('#schWeekday').value || 0),
+      day: parseInt(document.querySelector('#schDay').value || 1),
+    },
+    enabled: document.querySelector('#schEnabled').checked,
+  };
+  if (editId){
+    payload.id = editId;
+    const r = await api('/api/schedules/update', {method:'POST', body:JSON.stringify(payload)});
+    if (r.err){ UI.toast('保存失败: '+r.err, {type:'error'}); return; }
+    UI.toast('已保存', {type:'ok'});
+  } else {
+    const r = await api('/api/schedules/new', {method:'POST', body:JSON.stringify(payload)});
+    if (r.err){ UI.toast('创建失败: '+r.err, {type:'error'}); return; }
+    UI.toast('已创建,下次到点会自动跑', {type:'ok'});
+  }
+  closeScheduleForm();
+  loadSchedules();
+}
+
+async function toggleSchedule(sid, enable){
+  const r = await api('/api/schedules/update', {method:'POST', body:JSON.stringify({id:sid, enabled:enable})});
+  if (r.err){ UI.toast('失败: '+r.err, {type:'error'}); return; }
+  UI.toast(enable?'已启用':'已停用', {type:'ok', ms:1500});
+  loadSchedules();
+}
+
+async function runSchedule(sid){
+  const r = await api('/api/schedules/run', {method:'POST', body:JSON.stringify({id:sid})});
+  if (r.err){ UI.toast('启动失败: '+r.err, {type:'error'}); return; }
+  if (!r.tid){ UI.toast('未返 tid', {type:'error'}); return; }
+  UI.tasks.start(r.tid, {
+    label: '⏰ 立即跑定时任务',
+    onDone: () => { loadSchedules(); }
+  });
+  UI.toast('已启动,看 🔔 任务中心进度', {type:'info', ms:2500});
+}
+
+async function deleteScheduleConfirm(sid){
+  const ok = await UI.modal.confirm({
+    title: '🗑️ 删除定时任务',
+    body: '删了就不会再跑了,**配置消失不可恢复**(可以新建同样的)。'
+  });
+  if (!ok) return;
+  const r = await api('/api/schedules/delete', {method:'POST', body:JSON.stringify({id:sid})});
+  if (!r.ok){ UI.toast('删除失败', {type:'error'}); return; }
+  UI.toast('已删', {type:'ok', ms:1500});
+  loadSchedules();
+}
+
 // 日志:两个子页(操作日志 / Undo 记录),共享过滤框
 window._logSub = window._logSub || 'ops';
 window._logsRaw = window._logsRaw || []; // 全量缓存供过滤
@@ -2851,7 +3109,7 @@ function renderCleanupResult(r){
     <button class="btn ghost" onclick="cleanupSelectTopN(20)">勾前 20</button>
     <button class="btn ghost" onclick="cleanupSelectByScore(60)">勾分≥60</button>
     <button class="btn ghost" onclick="cleanupSelectByScore(100)">勾分≥100</button>
-    <button class="btn danger" onclick="cleanupDeleteSelected()">🗑️ 删除选中</button>
+    <button class="btn danger" id="cleanupDelBtn" onclick="cleanupDeleteSelected()" disabled style="opacity:.4;cursor:not-allowed">先勾选要删的</button>
   </div>
   <div style="font-size:13px">`;
   items.forEach((i, idx)=>{
@@ -2881,6 +3139,20 @@ function updateCleanupSel(){
   cks.forEach(c=>{ const g = parseFloat(c.dataset.gb||0); gb += g; if (g > 0) hasGb = true; });
   const el = document.querySelector('#cleanupSelCnt');
   if (el) el.textContent = hasGb || cks.length === 0 ? `选中 ${cks.length} · ${gb.toFixed(1)} GB` : `选中 ${cks.length}(大小未扫)`;
+  // 同步「删除选中」按钮:0 时灰掉 + 文字提示,>0 时高亮 + 显示数量
+  const btn = document.querySelector('#cleanupDelBtn');
+  if (btn){
+    if (cks.length === 0){
+      btn.textContent = '先勾选要删的';
+      btn.disabled = true;
+      btn.style.opacity = '.4'; btn.style.cursor = 'not-allowed';
+    } else {
+      const sizeStr = hasGb ? ` · ${gb.toFixed(1)} GB` : '';
+      btn.textContent = `🗑️ 删除选中 ${cks.length} 部${sizeStr}`;
+      btn.disabled = false;
+      btn.style.opacity = '1'; btn.style.cursor = 'pointer';
+    }
+  }
 }
 
 function toggleAllCleanup(){

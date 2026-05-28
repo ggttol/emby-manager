@@ -51,6 +51,7 @@ from lib.business import (LIB_LOCKS, LIB_LOCKS_GUARD, _lib_lock,
                           system_health_summary, refresh_no_rating_async)
 from lib import business as _biz
 from lib.undo import UNDO_FILE, UNDO_MAX, UNDO_LOCK, _undo_record, list_undo, exec_undo
+from lib import scheduler as _sched
 
 
 # ===== 版本缓存:_version() 读 VERSION 文件并缓存到模块级(每次 do_GET 不要 fs hit) =====
@@ -223,6 +224,18 @@ class H(BaseHTTPRequestHandler):
                 t = self._cookie_token() or self.headers.get("X-Token")
                 return self._json({"csrf": _token_csrf(t) or "",
                                    "username": CFG.get("username") or "admin"})
+            if path == "/api/schedules":
+                from lib.business import SCHEDULE_KINDS
+                # 顺带把 next_run 算进列表,UI 直接展示;kinds map 也带上避免再多发一次请求
+                rows = []
+                for s in _sched.list_schedules():
+                    nr = _sched.next_run_dt(s)
+                    rows.append({**s, "next_run_at": nr.isoformat(timespec="seconds") if nr else None,
+                                 "schedule_human": _sched.human_schedule(s.get("schedule") or {}),
+                                 "kind_label": SCHEDULE_KINDS.get(s.get("kind"), {}).get("label", s.get("kind"))})
+                kinds = [{"kind": k, "label": v["label"], "desc": v.get("desc", "")}
+                         for k, v in SCHEDULE_KINDS.items()]
+                return self._json({"schedules": rows, "kinds": kinds})
             return self._json({"err": "未知接口"}, 404)
         return self._send(404, "text/plain", "404")
     def do_POST(self):
@@ -344,6 +357,31 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"tid": run_async("add_new_pipeline",
                     add_new_pipeline_async, b.get("items") or [], b.get("default_lib", ""),
                     c115_save_to_lib)})
+            if path == "/api/schedules/new":
+                try:
+                    item = _sched.add_schedule(
+                        b.get("name") or "", b.get("kind") or "",
+                        b.get("schedule") or {}, b.get("params") or {},
+                        b.get("enabled", True))
+                    return self._json({"ok": True, "schedule": item})
+                except ValueError as e:
+                    return self._json({"err": str(e)}, 400)
+            if path == "/api/schedules/update":
+                sid = b.get("id") or ""
+                try:
+                    item = _sched.update_schedule(sid, {
+                        k: b[k] for k in ("name", "params", "schedule", "enabled") if k in b
+                    })
+                    if not item: return self._json({"err": "找不到 schedule"}, 404)
+                    return self._json({"ok": True, "schedule": item})
+                except ValueError as e:
+                    return self._json({"err": str(e)}, 400)
+            if path == "/api/schedules/delete":
+                return self._json({"ok": _sched.delete_schedule(b.get("id") or "")})
+            if path == "/api/schedules/run":
+                tid = _sched.run_now(b.get("id") or "")
+                if not tid: return self._json({"err": "schedule 不存在 / kind 未注册"}, 404)
+                return self._json({"ok": True, "tid": tid})
             if path == "/api/task/cancel":
                 return self._json({"ok": task_cancel(b.get("tid", ""))})
             if path == "/api/undo":
@@ -376,6 +414,7 @@ class H(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     migrate_cfg()
     threading.Thread(target=_token_reaper, daemon=True, name="token-reaper").start()
+    _sched.start()  # 定时任务循环
     host = CFG.get("host", "127.0.0.1"); port = CFG["port"]
     log("服务启动 @ %s:%d" % (host, port))
     print("Emby 管理工具: http://%s:%d  (schema v%d)" % (host, port, CFG.get("schema_version", 1)), file=sys.stderr)

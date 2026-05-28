@@ -237,7 +237,9 @@ def _del_folder(lib, folder):
         p = os.path.join(base, folder)
         if os.path.isdir(p):
             shutil.rmtree(p); done.append(label)
-    epost("/Library/Media/Updated", body={"Updates": [{"Path": "/strm/%s/%s" % (fol, folder), "UpdateType": "Deleted"}]})
+    # 只在真删过磁盘文件夹时通知 Emby — 空通知会让 Emby 锁 Series Item 让后续 DELETE silent fail
+    if done:
+        epost("/Library/Media/Updated", body={"Updates": [{"Path": "/strm/%s/%s" % (fol, folder), "UpdateType": "Deleted"}]})
     _undo_record("delete", {"lib": lib, "folder": folder, "deleted_from": done})
     return done
 
@@ -262,11 +264,27 @@ def exec_dedup(tmdb, removes):
 
 
 def delete_item(lib, folder, emby_id):
-    done = _del_folder(lib, folder)
+    # ⚠️ 顺序很关键:先让 Emby 强删 Item,再动磁盘
+    # 历史 bug:磁盘先删 → epost Updated/Deleted → Emby 异步加锁 Series Item
+    #          → 紧接的 DELETE /Items/{id} silent fail → 用户反复删除都不消失
+    emby_gone = True
     if emby_id:
         edelete("/Items/%s" % emby_id)
-    log("删除 [%s] %s" % (lib, folder))
-    return {"deleted": done, "folder": folder}
+        # verify 一道:Emby 偶发吞 DELETE,真没删就重试一次(0.5s 后)
+        try:
+            chk = eget("/Items", {"Ids": str(emby_id), "Limit": "1"})
+            if chk.get("Items"):
+                time.sleep(0.5)
+                edelete("/Items/%s" % emby_id)
+                chk2 = eget("/Items", {"Ids": str(emby_id), "Limit": "1"})
+                emby_gone = not chk2.get("Items")
+        except Exception:
+            pass  # 验证失败不算致命,后面磁盘还是要清
+    done = _del_folder(lib, folder)
+    log("删除 [%s] %s%s%s" % (lib, folder,
+        "" if done else " (磁盘空)",
+        "" if emby_gone else " ⚠️ Emby 未删干净"))
+    return {"deleted": done, "folder": folder, "emby_gone": emby_gone}
 
 
 def _count_strm(folder_path):
@@ -725,35 +743,36 @@ def list_strm(lib, folder):
     return {"lib": lib, "folder": folder, "files": out}
 
 
+def _fix_poster_one(item_id, typ):
+    """处理单条无海报项的核心逻辑(无 task_set,供 batch + scheduled wrapper 共用)。返 {id,name,ok,tmdb?,err?}。"""
+    try:
+        it = eget("/Items", {"Ids": item_id, "Fields": "Name,Path"}).get("Items", [{}])[0]
+        name = it.get("Name", "")
+        folder = (it.get("Path") or "").split("/")[-2] if it.get("Path") else name
+        search_name = re.sub(r'[(（\[【].*$', '', folder).strip() or name
+        cands = remote_search(item_id, search_name, typ)
+        picked = None
+        for c in cands:
+            if c.get("img") and search_name in (c.get("name") or ""):
+                picked = c; break
+        if not picked:
+            return {"id": item_id, "name": name, "ok": False, "err": "无合适候选"}
+        r = apply_match(item_id, picked["tmdb"], typ, name)
+        return {"id": item_id, "name": name, "ok": bool(r.get("poster")),
+                "tmdb": picked["tmdb"],
+                "err": "" if r.get("poster") else "已绑定但海报未到"}
+    except Exception as e:
+        return {"id": item_id, "name": "(?)", "ok": False, "err": str(e)}
+
+
 def fix_poster_batch_async(tid, ids, typ):
-    """批量自动修海报。保守:对每个无海报条目,取 remote_search 第一个 name 含原 folder 关键词且有 img 的候选。
-    返 {results=[{id, name, ok, tmdb, err}], ok_count, total}"""
+    """批量自动修海报。复用 _fix_poster_one 核心,+ 进度上报 + 频控 sleep。"""
     task_set(tid, total=len(ids))
     results = []
     for i, item_id in enumerate(ids):
         if task_is_cancelled(tid): break
         task_set(tid, progress=i, status_text="修 " + str(item_id)[:8])
-        try:
-            it = eget("/Items", {"Ids": item_id, "Fields": "Name,Path"}).get("Items", [{}])[0]
-            name = it.get("Name", "")
-            # 用 path 倒数第二段作 folder 名(更接近文件夹原名),fallback 到 Name
-            folder = (it.get("Path") or "").split("/")[-2] if it.get("Path") else name
-            # 去掉年份等 (YYYY) / [xxx] / 【xxx】/(YYYY) 后缀(中英文括号都支持)
-            search_name = re.sub(r'[(（\[【].*$', '', folder).strip() or name
-            cands = remote_search(item_id, search_name, typ)
-            picked = None
-            for c in cands:
-                if c.get("img") and search_name in (c.get("name") or ""):
-                    picked = c; break
-            if not picked:
-                results.append({"id": item_id, "name": name, "ok": False, "err": "无合适候选"})
-            else:
-                r = apply_match(item_id, picked["tmdb"], typ, name)
-                results.append({"id": item_id, "name": name, "ok": bool(r.get("poster")),
-                                "tmdb": picked["tmdb"],
-                                "err": "" if r.get("poster") else "已绑定但海报未到"})
-        except Exception as e:
-            results.append({"id": item_id, "name": "(?)", "ok": False, "err": str(e)})
+        results.append(_fix_poster_one(item_id, typ))
         task_set(tid, progress=i + 1)
         time.sleep(0.5)  # 反 TMDb / Emby 频控
     ok_n = sum(1 for r in results if r["ok"])
@@ -1709,3 +1728,99 @@ def c115_save_batch(c115_save_to_lib_fn, items, lib, default_pwd=""):
         time.sleep(1.0)  # 115 anti-bot 缓冲
     log("115 批量转存 → 库「%s」: ✓ %d / 共 %d" % (lib, ok_n, len(results)))
     return {"ok": ok_n > 0, "lib": lib, "results": results, "ok_count": ok_n, "total": len(results)}
+
+
+# ======= 定时任务包装:遍历所有 strm 库的一键全局版本 ===========
+# 设计:wrapper 不复用 *_async(那会 task_set total reset 让 UI 进度跳变),
+#     直接用 *_one core + 自己一次性算 grand total + 单调 progress。
+def scheduled_fix_posters_all_async(tid):
+    """对所有库无海报项跑保守自动匹配。Series + Movie 一起串行,total/progress 单调。"""
+    try:
+        all_noposter = list_noposter()
+    except Exception as e:
+        return {"err": "list_noposter 失败: " + str(e)}
+    # 拼成 (id, typ) 序列,一气呵成不分段
+    seq = [(x["id"], "Series") for x in all_noposter if x.get("type") == "Series"] + \
+          [(x["id"], "Movie") for x in all_noposter if x.get("type") == "Movie"]
+    task_set(tid, total=len(seq) or 1,
+             status_text="海报修复 全局(%d 个无海报项)" % len(seq))
+    results = []
+    for i, (item_id, typ) in enumerate(seq):
+        if task_is_cancelled(tid): break
+        task_set(tid, progress=i, status_text="修 %s %s" % (typ, str(item_id)[:8]))
+        results.append(_fix_poster_one(item_id, typ))
+        task_set(tid, progress=i + 1)
+        time.sleep(0.5)  # 反 TMDb / Emby 频控
+    ok_n = sum(1 for r in results if r["ok"])
+    series_n = sum(1 for x in all_noposter if x.get("type") == "Series")
+    log("⏰ 定时海报修复 全局: ✓ %d / 共 %d (剧 %d / 电影 %d)" % (
+        ok_n, len(results), series_n, len(all_noposter) - series_n))
+    return {"results": results, "ok_count": ok_n, "total": len(results),
+            "by_type": {"Series": series_n, "Movie": len(all_noposter) - series_n}}
+
+
+def scheduled_refresh_no_rating_all_async(tid):
+    """遍历所有库,对所有无评分剧发 Emby Refresh。total 一次性算 grand total,progress 不跳。"""
+    libs = fetch_libs()
+    # 先一次性把所有无评分 items 拉出来,算准 grand total
+    plan = []  # [(lib_name, item_id, item_name)]
+    for lib, m in libs.items():
+        if task_is_cancelled(tid): break
+        typ = "Series" if m["ctype"] == "tvshows" else "Movie"
+        try:
+            items = eget("/Items", {"ParentId": m["id"], "Recursive": "true",
+                                    "IncludeItemTypes": typ,
+                                    "Fields": "CommunityRating", "Limit": 30000}).get("Items", [])
+        except Exception:
+            continue
+        for it in items:
+            if not (it.get("CommunityRating") or 0) > 0:
+                plan.append((lib, it["Id"], it.get("Name") or "?"))
+    task_set(tid, total=len(plan) or 1, status_text="找到 %d 个无评分项" % len(plan))
+    sub_count = collections.Counter()
+    ok_count = collections.Counter()
+    for i, (lib, item_id, name) in enumerate(plan):
+        if task_is_cancelled(tid): break
+        task_set(tid, progress=i, status_text="[%s] 刷新 %s" % (lib, name[:30]))
+        sub_count[lib] += 1
+        try:
+            code = epost("/Items/%s/Refresh" % item_id,
+                         {"MetadataRefreshMode": "FullRefresh",
+                          "ImageRefreshMode": "FullRefresh",
+                          "ReplaceAllMetadata": "false",
+                          "ReplaceAllImages": "false"})
+            if code in (200, 204): ok_count[lib] += 1
+        except Exception:
+            pass
+        task_set(tid, progress=i + 1)
+        time.sleep(0.5)  # 防 emby 后台任务挤爆
+    sub = [{"lib": k, "no_rating_count": sub_count[k], "refresh_triggered": ok_count[k]}
+           for k in sorted(sub_count)]
+    log("⏰ 定时无评分刷新 全局: 共 %d 个无评分剧 → 已发起 %d" % (len(plan), sum(ok_count.values())))
+    return {"sub_results": sub, "no_rating_total": len(plan),
+            "refresh_triggered_total": sum(ok_count.values())}
+
+
+# 定时任务 kind 注册表:scheduler 从这里查 fn。kind 字符串是 schedule.kind 的值,**改名要兼容旧 schedule**。
+SCHEDULE_KINDS = {
+    "scan_all": {
+        "label": "🔍 扫全库",
+        "desc": "对每个 strm 库发 Refresh,发现手动加的新 strm",
+        "fn": scan_all_async,
+    },
+    "zhuigeng_scan_airing": {
+        "label": "🔄 扫追更剧",
+        "desc": "对所有「在更」剧用剧名作 keyword 扫对应库,拿新集",
+        "fn": zhuigeng_scan_airing_async,
+    },
+    "fix_posters_all": {
+        "label": "🖼️ 海报自动修(全库)",
+        "desc": "对所有无海报项跑保守自动匹配(取候选里 name 含原名 + 有 img 的第一个)",
+        "fn": scheduled_fix_posters_all_async,
+    },
+    "refresh_no_rating_all": {
+        "label": "🔄 无评分剧刷新(全库)",
+        "desc": "对所有无评分剧调 emby Refresh 重拉 TMDb 评分/海报/简介",
+        "fn": scheduled_refresh_no_rating_all_async,
+    },
+}
