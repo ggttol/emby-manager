@@ -268,8 +268,28 @@ def delete_item(lib, folder, emby_id):
     return {"deleted": done, "folder": folder}
 
 
+def _count_strm(folder_path):
+    """统计 folder 下 .strm 文件总数(衡量集数)。folder 不存在返 0。"""
+    if not os.path.isdir(folder_path):
+        return 0
+    n = 0
+    for _root, _ds, fs in os.walk(folder_path):
+        for f in fs:
+            if f.endswith(".strm"):
+                n += 1
+    return n
+
+
 # ===== 移动:跨库重命名 + 重建 strm =====
-def move_item(from_lib, folder, to_lib, emby_id):
+def move_item(from_lib, folder, to_lib, emby_id, on_conflict="error"):
+    """跨库移动 folder。
+    on_conflict:
+      - "error"(默认):目标已存在 → 拒绝
+      - "skip":目标已存在 → 返 {ok:false, skipped:true},不抛错(批量场景不阻塞)
+      - "smart":比 source/target 的 .strm 集数 → 集多的留,集少的删
+                · src > dst:删 dst(115 → 回收站)+ 继续 normal move
+                · src ≤ dst:认为目标更全/相等 → 删源(归档目的已达成),不 move
+    """
     L = fetch_libs()
     if from_lib not in L or to_lib not in L:
         return {"err": "未知库"}
@@ -281,12 +301,12 @@ def move_item(from_lib, folder, to_lib, emby_id):
             if not lk.acquire(blocking=False):
                 raise AppError("库「%s」忙,稍后再试" % l, status=409)
             acquired.append(lk)
-        return _move_item_locked(from_lib, folder, to_lib, emby_id, L)
+        return _move_item_locked(from_lib, folder, to_lib, emby_id, L, on_conflict)
     finally:
         for lk in acquired: lk.release()
 
 
-def _move_item_locked(from_lib, folder, to_lib, emby_id, L):
+def _move_item_locked(from_lib, folder, to_lib, emby_id, L, on_conflict="error"):
     ff = L[from_lib]["folder"]; tf = L[to_lib]["folder"]
     # path traversal guard:src 和 dst 都必须在对应库下
     src = _safe_under(os.path.join(CD, ff), folder)
@@ -294,7 +314,45 @@ def _move_item_locked(from_lib, folder, to_lib, emby_id, L):
     if not os.path.isdir(src):
         return {"err": "源 115 文件夹不存在"}
     if os.path.exists(dst):
-        return {"err": "目标已存在同名文件夹"}
+        if on_conflict == "error":
+            return {"err": "目标已存在同名文件夹"}
+        if on_conflict == "skip":
+            return {"err": "目标已存在同名文件夹(skip)", "skipped": True}
+        if on_conflict == "smart":
+            # 比 strm 集数:source vs target
+            src_n = _count_strm(os.path.join(STRM, ff, folder))
+            dst_n = _count_strm(os.path.join(STRM, tf, folder))
+            if src_n > dst_n:
+                # 源更全 → 删目标(115 → 回收站 + strm)+ 通知 emby + 继续 normal move
+                shutil.rmtree(dst)
+                dst_strm_old = os.path.join(STRM, tf, folder)
+                if os.path.isdir(dst_strm_old):
+                    shutil.rmtree(dst_strm_old)
+                epost("/Library/Media/Updated", body={"Updates": [
+                    {"Path": "/strm/%s/%s" % (tf, folder), "UpdateType": "Deleted"}
+                ]})
+                log("智能归档 %s: 源 %d 集 > 目标 %d 集 → 删目标 + 继续 move" % (folder, src_n, dst_n))
+                # fall through 到正常 move
+            else:
+                # 目标更全 / 相等 → 删源(归档目的达成,目标本就是 canonical)
+                shutil.rmtree(src)
+                src_strm_old = os.path.join(STRM, ff, folder)
+                if os.path.isdir(src_strm_old):
+                    shutil.rmtree(src_strm_old)
+                if emby_id:
+                    edelete("/Items/%s" % emby_id)
+                epost("/Library/Media/Updated", body={"Updates": [
+                    {"Path": "/strm/%s/%s" % (ff, folder), "UpdateType": "Deleted"}
+                ]})
+                log("智能归档 %s: 源 %d 集 ≤ 目标 %d 集 → 删源(目标版本更全)" % (folder, src_n, dst_n))
+                _undo_record("smart_archive", {"from": from_lib, "folder": folder, "to": to_lib,
+                                                "action": "deleted_source", "src_n": src_n, "dst_n": dst_n})
+                return {"ok": True, "smart_action": "deleted_source",
+                        "src_n": src_n, "dst_n": dst_n,
+                        "msg": "源 %d 集 ≤ 目标 %d 集 → 删源保留目标(已在 %s 库)" % (src_n, dst_n, to_lib),
+                        "moved": folder, "from": from_lib, "to": to_lib, "strm": 0}
+        else:
+            return {"err": "未知 on_conflict 模式: " + str(on_conflict)}
     os.rename(src, dst)
     old_strm = os.path.join(STRM, ff, folder)
     if os.path.isdir(old_strm):
@@ -720,25 +778,31 @@ def delete_batch_async(tid, lib, items):
     return {"lib": lib, "results": results, "ok_count": ok_n, "total": len(results)}
 
 
-def move_batch_async(tid, from_lib, to_lib, items):
-    """批量移动(items=[{folder, id}])from_lib → to_lib。"""
+def move_batch_async(tid, from_lib, to_lib, items, on_conflict="error"):
+    """批量移动(items=[{folder, id}])from_lib → to_lib。
+    on_conflict 透传给 move_item:error/skip/smart(归档场景常用 smart)。"""
     task_set(tid, total=len(items))
     results = []
     for i, it in enumerate(items):
         if task_is_cancelled(tid): break
         task_set(tid, progress=i, status_text="移 " + (it.get("folder") or "?")[:40])
         try:
-            r = move_item(from_lib, it.get("folder"), to_lib, it.get("id"))
+            r = move_item(from_lib, it.get("folder"), to_lib, it.get("id"), on_conflict=on_conflict)
             if r.get("err"):
-                results.append({"folder": it.get("folder"), "ok": False, "err": r["err"]})
+                results.append({"folder": it.get("folder"), "ok": False, "err": r["err"], "skipped": r.get("skipped", False)})
             else:
-                results.append({"folder": it.get("folder"), "ok": True})
+                results.append({"folder": it.get("folder"), "ok": True,
+                                "smart_action": r.get("smart_action"),
+                                "msg": r.get("msg", "")})
         except Exception as e:
             results.append({"folder": it.get("folder"), "ok": False, "err": str(e)})
         task_set(tid, progress=i + 1)
     ok_n = sum(1 for r in results if r["ok"])
-    log("批量移动 %s→%s → ✓ %d / 共 %d" % (from_lib, to_lib, ok_n, len(results)))
-    return {"from": from_lib, "to": to_lib, "results": results, "ok_count": ok_n, "total": len(results)}
+    smart_n = sum(1 for r in results if r.get("smart_action"))
+    log("批量移动 %s→%s [on_conflict=%s] → ✓ %d / 智能处理 %d / 共 %d" % (
+        from_lib, to_lib, on_conflict, ok_n, smart_n, len(results)))
+    return {"from": from_lib, "to": to_lib, "results": results,
+            "ok_count": ok_n, "smart_count": smart_n, "total": len(results)}
 
 
 def dedup_exec_batch_async(tid, groups):

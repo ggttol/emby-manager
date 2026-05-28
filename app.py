@@ -252,7 +252,7 @@ class H(BaseHTTPRequestHandler):
                 return self._json(scan_lib(b.get("lib"), b.get("keyword")))
             if path == "/api/fixposter": return self._json(apply_match(b.get("id"), b.get("tmdb"), b.get("type", "Series"), b.get("name", "")))
             if path == "/api/dedup": return self._json(exec_dedup(b.get("tmdb"), b.get("remove", [])))
-            if path == "/api/move": return self._json(move_item(b.get("from"), b.get("folder"), b.get("to"), b.get("id")))
+            if path == "/api/move": return self._json(move_item(b.get("from"), b.get("folder"), b.get("to"), b.get("id"), on_conflict=b.get("on_conflict", "error")))
             if path == "/api/createlib": return self._json(create_library(b.get("name"), b.get("ctype")))
             if path == "/api/users/new": return self._json(create_user(b.get("name"), b.get("pw")))
             if path == "/api/users/update": return self._json(update_user(b.get("id"), b.get("maxsessions"), b.get("disabled")))
@@ -279,7 +279,8 @@ class H(BaseHTTPRequestHandler):
                                                    b.get("lib", ""), b.get("items") or [])})
             if path == "/api/manage/move_batch":
                 return self._json({"tid": run_async("move_batch", move_batch_async,
-                                                   b.get("from", ""), b.get("to", ""), b.get("items") or [])})
+                                                   b.get("from", ""), b.get("to", ""), b.get("items") or [],
+                                                   b.get("on_conflict", "error"))})
             if path == "/api/dedup/exec_batch":
                 return self._json({"tid": run_async("dedup_exec_batch", dedup_exec_batch_async,
                                                    b.get("groups") or [])})
