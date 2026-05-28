@@ -373,16 +373,18 @@ def list_items(name):
 
 # ===== 追更剧集状态 =====
 def zhuigeng_status():
-    """查名字含「追更」的剧集库,标出哪些剧还在更新中(TMDb Status=Continuing)。"""
+    """查名字含「追更」的剧集库,标出哪些剧还在更新中(TMDb Status=Continuing)。
+    每项带 folder + id,前端可直接调 /api/move 一键归档完结剧。"""
     out = []
     for name, m in fetch_libs().items():
         if "追更" not in name or m["ctype"] != "tvshows":
             continue
         try:
             series = eget("/Items", {"ParentId": m["id"], "Recursive": "true", "IncludeItemTypes": "Series",
-                                    "Fields": "Status", "SortBy": "SortName"}).get("Items", [])
+                                    "Fields": "Status,Path,ProviderIds", "SortBy": "SortName"}).get("Items", [])
         except Exception:
             series = []
+        sep = "/" + m["folder"] + "/"
         for s in series:
             try:
                 eps = eget("/Shows/%s/Episodes" % s["Id"], {"Fields": "PremiereDate,LocationType"}).get("Items", [])
@@ -391,7 +393,13 @@ def zhuigeng_status():
             have = [e for e in eps if e.get("LocationType") != "Virtual"]
             dates = sorted([(e.get("PremiereDate") or "")[:10] for e in have if e.get("PremiereDate")])
             st = s.get("Status") or "?"
-            out.append({"lib": name, "name": s["Name"], "status": st,
+            # 从 Path 解 top-level folder 名(给 move_item 用)
+            path = s.get("Path") or ""
+            folder = path.split(sep, 1)[1].split("/", 1)[0] if sep in path else ""
+            out.append({"lib": name, "name": s["Name"], "id": s.get("Id"),
+                        "folder": folder,
+                        "tmdb": (s.get("ProviderIds") or {}).get("Tmdb", ""),
+                        "status": st,
                         "airing": st in ("Continuing", "Returning Series"),
                         "count": len(have), "latest": dates[-1] if dates else ""})
     out.sort(key=lambda x: (not x["airing"], x["count"]))

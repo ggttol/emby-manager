@@ -2476,15 +2476,148 @@ async function loadZhuigeng(){
   const o=$("#zgOut");o.innerHTML='<span class="spin"></span> 查各追更剧状态(几十秒)…';
   let d;try{d=await api("/api/zhuigeng");}catch(e){o.textContent="出错: "+e;return;}
   const airing=d.items.filter(i=>i.airing),ended=d.items.filter(i=>!i.airing);
+  // 缓存供归档调用
+  window._zgEnded = ended;
+  // 自动猜归档目标库:LIBS 里名字含「完结」的剧集库
+  const archiveCandidates = (LIBS||[]).filter(l => l.type==='tvshows' && /完结/.test(l.name));
+  const archiveDefault = archiveCandidates.length ? archiveCandidates[0].name : '';
+
   let h=`<h2>🔄 还在更新中(${airing.length})— 重点盯,去源站看新集</h2>`;
   if(!airing.length)h+='<p class="muted">追更库里没有还在更新中的剧(都完结了)</p>';
   h+=airing.map(i=>`<div class="item"><div class="main">
     <div class="nm">${esc(i.name)} ${i.count<=10?'<span class="badge warn">才 '+i.count+' 集 · 八成有新</span>':''}</div>
     <div class="meta"><span class="badge">${esc(i.lib)}</span>已有 ${i.count} 集${i.latest?' · 最新播出 '+i.latest:''}</div></div>
     <button class="btn ghost" onclick="goScan('${esc(i.lib)}')">去扫这个库</button></div>`).join("");
-  h+=`<h2 style="margin-top:18px">✅ 已完结(${ended.length})</h2><div class="muted" style="line-height:1.9">`+ended.map(i=>esc(i.name)+`<span style="opacity:.6">(${i.count})</span>`).join(" · ")+`</div>`;
-  o.innerHTML=h;
+
+  // ✅ 已完结 — 每行可单独归档 + 顶部一键全部归档
+  h += `<h2 style="margin-top:18px">✅ 已完结(${ended.length})</h2>`;
+  if (!ended.length){
+    h += '<p class="muted">追更库里没有完结剧</p>';
+  } else {
+    // 顶部操作栏:目标库下拉 + 一键全部归档
+    const targetOpts = (LIBS||[]).filter(l=>l.type==='tvshows' && !/追更/.test(l.name))
+      .map(l=>`<option value="${esc(l.name)}"${l.name===archiveDefault?' selected':''}>${esc(l.name)}</option>`).join('');
+    if (targetOpts){
+      h += `<div class="row" style="margin:8px 0;gap:8px;align-items:center;flex-wrap:wrap">
+        <span class="muted" style="font-size:13px">📦 归档完结剧 →</span>
+        <select id="zgArchiveTo" style="min-width:160px">${targetOpts}</select>
+        <button class="btn" style="background:#7c3aed" onclick="zgArchiveAll()">📦 一键全部归档 (${ended.length})</button>
+        <span class="muted" style="font-size:12px;flex:1">把"已完结"全部从追更库 → 完结库,Emby 路径变(播放历史/收藏可能要重建)</span>
+      </div>`;
+    } else {
+      h += `<div class="muted" style="font-size:12px;margin:8px 0">⚠️ 没有找到非追更的剧集库可归档(需要先建一个,如"2026完结剧集")</div>`;
+    }
+    // 完结剧列表 — 每行一个 [归档]
+    h += ended.map((i, idx)=>`<div class="item">
+      <div class="main">
+        <div class="nm">${esc(i.name)} <span class="muted">(${i.count} 集)</span></div>
+        <div class="meta"><span class="badge">${esc(i.lib)}</span>tmdb:${esc(i.tmdb||'无')}${i.folder?` · 📁 ${esc(i.folder)}`:''}</div>
+      </div>
+      ${i.folder ? `<button class="btn ghost" onclick="zgArchiveOne(${idx})">📦 归档</button>` : '<span class="muted" style="font-size:12px">无 folder 信息</span>'}
+    </div>`).join('');
+  }
+  o.innerHTML = h;
 }
+
+async function zgArchiveOne(idx){
+  const list = window._zgEnded || [];
+  const item = list[idx]; if (!item){ UI.toast('数据丢失,重新检查',{type:'warn'}); return; }
+  if (!item.folder){ UI.toast('该剧无 folder 信息,无法移动',{type:'error'}); return; }
+  // 让用户确认目标库
+  const targets = (LIBS||[]).filter(l=>l.type==='tvshows' && l.name!==item.lib);
+  if (!targets.length){ UI.toast('没有别的剧集库可归档到',{type:'error'}); return; }
+  const archiveDef = targets.find(l=>/完结/.test(l.name)) || targets[0];
+  const opts = targets.map(l=>({value:l.name, label:l.name + (l.name===archiveDef.name?' (推荐)':'')}));
+  const v = await UI.modal.form({
+    title:'📦 归档完结剧',
+    okText:'归档',
+    fields:[
+      {name:'_info', label:'剧名', type:'text', value:item.name + ' (' + item.lib + ')'},
+      {name:'to', label:'移到哪个库', type:'select', value:archiveDef.name, options:opts}
+    ]
+  });
+  if (!v) return;
+  try {
+    const r = await api('/api/move', {method:'POST', body:JSON.stringify({
+      from: item.lib, folder: item.folder, to: v.to, id: item.id
+    })});
+    if (r.err){ UI.toast('归档失败:'+r.err,{type:'error'}); return; }
+    UI.toast(`✓ 已归档「${item.name}」→ ${v.to}`, {type:'ok', ms:5000,
+      action: {label:'撤销', fn: async ()=>{
+        // 反向移
+        const r2 = await api('/api/move', {method:'POST', body:JSON.stringify({from:v.to, folder:item.folder, to:item.lib, id:item.id})});
+        if (r2.err) UI.toast('撤销失败:'+r2.err,{type:'error'});
+        else { UI.toast('已撤销',{type:'ok'}); loadZhuigeng(); }
+      }}
+    });
+    loadZhuigeng();
+    start();
+  } catch(e){ UI.toast('请求失败:'+e,{type:'error'}); }
+}
+
+async function zgArchiveAll(){
+  const list = window._zgEnded || [];
+  const valid = list.filter(i=>i.folder);
+  const noFolder = list.filter(i=>!i.folder);
+  if (!valid.length){ UI.toast('没有可归档的(全部缺 folder 信息)',{type:'warn'}); return; }
+  const to = document.querySelector('#zgArchiveTo').value;
+  if (!to){ UI.toast('先选目标库',{type:'warn'}); return; }
+  // 按 from_lib 分组(批量 endpoint 一次只接 1 个 from)
+  const byLib = {};
+  valid.forEach(i=>{(byLib[i.lib]=byLib[i.lib]||[]).push(i);});
+  const groups = Object.keys(byLib).map(lib => ({from:lib, items: byLib[lib]}));
+  const preview = valid.slice(0,15).map(i=>`· ${UI.esc(i.name)} (${i.count}集) [${UI.esc(i.lib)}]`).join('<br>');
+  const extra = valid.length > 15 ? `<br>… 另 ${valid.length-15} 部` : '';
+  const ok = await UI.modal.confirm({
+    danger: true,
+    title: `📦 一键归档 ${valid.length} 部完结剧`,
+    body: `<div>把以下 <b>${valid.length}</b> 部完结剧从追更库 → <b>${UI.esc(to)}</b>:</div>
+<div style="margin-top:8px;font-size:11px;max-height:280px;overflow:auto;background:#0b0f17;padding:10px;border-radius:6px">${preview}${extra}</div>
+${noFolder.length?`<div class="muted" style="font-size:11px;margin-top:6px">⚠️ ${noFolder.length} 部缺 folder 信息会跳过(可能 emby 路径不规范)</div>`:''}
+<div style="margin-top:8px;font-size:12px;color:var(--warn)">⚠️ Emby 路径会变,但同 tmdbid 播放历史通常保留。如失败原因是"目标已存在同名 folder",说明该剧已经在目标库,会跳过。</div>`,
+    okText: `📦 归档 ${valid.length} 部`,
+    requireType: '归档'
+  });
+  if (!ok) return;
+  // 每个 from_lib 启一个 task(move_batch_async 一次只接一个 from→to)
+  let totalOk = 0, totalFail = 0, failDetails = [];
+  for (const g of groups){
+    try {
+      const r = await api('/api/manage/move_batch', {method:'POST', body:JSON.stringify({
+        from: g.from, to: to,
+        items: g.items.map(i=>({folder:i.folder, id:i.id})),
+        async: true
+      })});
+      if (r.err){ totalFail += g.items.length; failDetails.push(`${g.from} 启动失败:${r.err}`); continue; }
+      if (r.tid){
+        await new Promise(res=>{
+          UI.tasks.start(r.tid, {
+            label:`📦 归档 ${g.from}→${to} (${g.items.length} 部)`,
+            onDone:(t)=>{
+              const rr = t.result || {};
+              totalOk += rr.ok_count||0;
+              totalFail += (rr.total||0) - (rr.ok_count||0);
+              (rr.results||[]).filter(x=>!x.ok).forEach(x=>failDetails.push(`${UI.esc(x.folder)}: ${UI.esc(x.err||'')}`));
+              res();
+            }
+          });
+        });
+      }
+    } catch(e){
+      totalFail += g.items.length;
+      failDetails.push(`${g.from}: ${e}`);
+    }
+  }
+  UI.toast(`归档完成 ✓${totalOk}${totalFail?` ✗${totalFail}`:''}`, {
+    type: totalFail?'warn':'ok', ms:7000,
+    action: totalFail ? {label:'失败详情', fn:()=>UI.modal.alert({
+      title:'失败列表', body: failDetails.join('<br>') || '无', copyable: true
+    })} : null
+  });
+  loadZhuigeng();
+  start();
+}
+
 function goScan(lib){tab('scan');const sel=$("#scanLib");if(sel)sel.value=lib;}
 
 // === 追更智能:一键扫所有在更剧 + 缺集汇总 ===
