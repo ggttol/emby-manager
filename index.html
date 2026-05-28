@@ -516,24 +516,54 @@ window.UI = (() => {
     else if (body instanceof Node) bodyWrap.appendChild(body);
     let typeInput = null;
     if (requireType) {
-      const hint = $h('div', { style: 'margin-top:14px;font-size:12px;color:var(--sub)' },
-        `请打字「${requireType}」确认:`);
-      typeInput = $h('input', { type: 'text', placeholder: requireType, style: 'width:100%;margin-top:6px' });
-      bodyWrap.appendChild(hint);
-      bodyWrap.appendChild(typeInput);
+      // 醒目的红色警示框 + 大字提示 + autofocus input + 实时反馈
+      const wrap = $h('div', {
+        style: 'margin-top:14px;padding:12px;background:rgba(239,68,68,.12);border:1px solid var(--red);border-radius:8px'
+      });
+      wrap.appendChild($h('div', { style: 'font-size:13px;color:var(--red);font-weight:600;margin-bottom:6px' },
+        `⚠️ 危险操作 — 必须打字「${requireType}」才能确认`));
+      typeInput = $h('input', {
+        type: 'text',
+        placeholder: `在这里打字:${requireType}`,
+        style: 'width:100%;font-size:15px;padding:10px;border:2px solid var(--red);background:var(--field-bg);color:var(--field-ink);font-weight:600;letter-spacing:1px'
+      });
+      wrap.appendChild(typeInput);
+      const statusEl = $h('div', { style: 'font-size:11px;color:var(--sub);margin-top:4px' },
+        '↑ 上方输入框打入「' + requireType + '」(完全一致),下方红色按钮才会激活');
+      wrap.appendChild(statusEl);
+      bodyWrap.appendChild(wrap);
     }
     const okBtn = $h('button', { class: 'btn primary ' + (danger ? 'danger' : ''), disabled: !!requireType }, okText);
+    if (requireType) okBtn.title = `必须先在上方输入框打字「${requireType}」`;
     const cancelBtn = $h('button', { class: 'btn ghost' }, cancelText);
     if (typeInput) {
       typeInput.addEventListener('input', () => {
-        okBtn.disabled = typeInput.value.trim() !== requireType;
+        const ok = typeInput.value.trim() === requireType;
+        okBtn.disabled = !ok;
+        typeInput.style.borderColor = ok ? 'var(--green)' : 'var(--red)';
       });
     }
     cancelBtn.addEventListener('click', () => _closeTop(false));
-    okBtn.addEventListener('click', () => _closeTop(true));
+    okBtn.addEventListener('click', () => {
+      if (okBtn.disabled) {
+        // 用户点了 disabled 按钮 — 闪烁 input 提示
+        if (typeInput) {
+          typeInput.focus();
+          typeInput.style.transition = 'border-color .15s';
+          typeInput.style.borderColor = '#fbbf24';
+          setTimeout(()=>{ typeInput.style.borderColor = 'var(--red)'; }, 200);
+        }
+        return;
+      }
+      _closeTop(true);
+    });
     return _makeModal({
       title, danger, bodyNode: bodyWrap,
       footerBtns: [cancelBtn, okBtn],
+      onMount: ({ dialog }) => {
+        // 自动 focus 到 requireType input(若有),否则 focus 第一个按钮
+        if (typeInput) setTimeout(()=>typeInput.focus(), 50);
+      }
     }).then(v => v === true);
   }
 
