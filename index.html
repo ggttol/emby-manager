@@ -3,11 +3,11 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Emby 管理工具</title>
 <style>
-:root{--bg:#0f1420;--card:#19202e;--line:#2a3346;--ink:#e6eaf2;--sub:#8b95a8;--blue:#3b82f6;--green:#22c55e;--red:#ef4444;--gold:#eab308;
+:root{--bg:#0f1420;--card:#19202e;--line:#2a3346;--ink:#e6eaf2;--sub:#8b95a8;--blue:#3b82f6;--green:#22c55e;--red:#ef4444;--gold:#eab308;--field-bg:#0f1420;--field-ink:#e6eaf2;
   /* v3.0 新增 */
   --warn:#f59e0b;--danger-bg:#3a1f1f;--ok-bg:#13351f;
   --skeleton-bg:#1f2937;--overlay:rgba(0,0,0,.5);--focus:#3b82f6;}
-body[data-theme="light"]{--bg:#f8fafc;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--sub:#64748b;--skeleton-bg:#e2e8f0;--overlay:rgba(15,23,42,.4);--danger-bg:#fee2e2;--ok-bg:#dcfce7;}
+body[data-theme="light"]{--bg:#f8fafc;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--sub:#64748b;--skeleton-bg:#e2e8f0;--overlay:rgba(15,23,42,.4);--danger-bg:#fee2e2;--ok-bg:#dcfce7;--field-bg:#fff;--field-ink:#0f172a;}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);font-size:14px}
 header{background:linear-gradient(120deg,#1e3a5f,#2563eb);padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
@@ -20,7 +20,9 @@ nav button.on{color:#fff;border-bottom-color:var(--blue)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
 .lib{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
 .lib .n{font-size:16px;font-weight:600}.lib .c{font-size:26px;font-weight:700;margin:6px 0;color:var(--blue)}.lib .s{font-size:12px;color:var(--sub)}
-select,input{background:#0f1420;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:14px}
+select,input,textarea{background:var(--field-bg);color:var(--field-ink);border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:14px}
+select option{background:var(--field-bg);color:var(--field-ink)}
+input::placeholder,textarea::placeholder{color:var(--sub);opacity:.7}
 button.btn{background:var(--blue);color:#fff;border:none;border-radius:8px;padding:9px 16px;cursor:pointer;font-size:14px}
 button.btn:hover{filter:brightness(1.1)}button.btn:disabled{opacity:.5;cursor:default}
 button.danger{background:var(--red)}button.ok{background:var(--green)}button.ghost{background:#2a3346}
