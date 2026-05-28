@@ -815,6 +815,104 @@ def replace_folder(lib, win_folder, lose_folder):
                 "新 folder 改名回「%s」" % lose_folder if renamed_to == lose_folder else "")}
 
 
+def _airing_series_list():
+    """拿所有「追更」库里 TMDb Status=Continuing/Returning Series 的剧。
+    返 [{lib, name, id, tmdb}]。每库一次 emby /Items 调用。"""
+    libs = [(n, m) for n, m in fetch_libs().items() if "追更" in n and m["ctype"] == "tvshows"]
+    out = []
+    for name, m in libs:
+        try:
+            series = eget("/Items", {"ParentId": m["id"], "Recursive": "true",
+                                     "IncludeItemTypes": "Series",
+                                     "Fields": "Status,ProviderIds",
+                                     "SortBy": "SortName"}).get("Items", [])
+        except Exception:
+            series = []
+        for s in series:
+            st = s.get("Status") or "?"
+            if st in ("Continuing", "Returning Series"):
+                out.append({"lib": name, "name": s.get("Name", "?"),
+                            "id": s.get("Id"),
+                            "tmdb": (s.get("ProviderIds") or {}).get("Tmdb", "")})
+    return out
+
+
+def zhuigeng_scan_airing_async(tid):
+    """对所有在更剧用剧名作 keyword 扫对应库 → 聚合 report。"""
+    airing = _airing_series_list()
+    task_set(tid, total=len(airing) or 1, status_text="开始…")
+    results = []
+    for i, item in enumerate(airing):
+        if task_is_cancelled(tid): break
+        task_set(tid, progress=i, status_text="扫 " + item["name"][:30])
+        try:
+            r = scan_lib(item["lib"], item["name"])
+            results.append({"name": item["name"], "lib": item["lib"],
+                            "id": item["id"], "tmdb": item["tmdb"],
+                            "new": r.get("new_count", 0),
+                            "orphans": r.get("orphans_cleaned", 0),
+                            "matched": r.get("matched", 0),
+                            "ok": True})
+        except Exception as e:
+            results.append({"name": item["name"], "lib": item["lib"],
+                            "ok": False, "err": str(e)})
+    new_total = sum(r.get("new", 0) for r in results if r.get("ok"))
+    has_new = [r for r in results if r.get("new", 0) > 0]
+    no_new = [r for r in results if r.get("ok") and r.get("new", 0) == 0]
+    fail = [r for r in results if not r.get("ok")]
+    log("追更一键扫 %d 部: 新增 %d strm,有更新 %d 部,无更新 %d 部,失败 %d" % (
+        len(results), new_total, len(has_new), len(no_new), len(fail)))
+    return {"results": results, "total": len(results),
+            "new_total": new_total,
+            "has_new": has_new, "no_new": no_new, "fail": fail}
+
+
+def zhuigeng_gaps_summary_async(tid):
+    """对所有在更剧查缺集 → 聚合「求资源清单」可复制文本。"""
+    airing = _airing_series_list()
+    task_set(tid, total=len(airing) or 1, status_text="开始…")
+    rows = []
+    for i, item in enumerate(airing):
+        if task_is_cancelled(tid): break
+        task_set(tid, progress=i, status_text="查 " + item["name"][:30])
+        try:
+            g = series_gaps(item["id"])
+            fmt = ""; gap_count = 0; behind = 0
+            if g.get("mode") == "absolute":
+                # 海贼王这种绝对集号
+                gaps = g.get("gap_list", [])
+                behind = max(0, g.get("tmdb_max", 0) - g.get("max_ep", 0))
+                gap_count = len(gaps)
+                if gaps: fmt = "缺 E" + ",".join(gaps)
+                if behind:
+                    fmt += (" · " if fmt else "") + "落后到 E%d (本地 %d)" % (g.get("tmdb_max", 0), g.get("max_ep", 0))
+            else:
+                segs = []
+                for s in g.get("seasons", []):
+                    if s.get("gapcount", 0) > 0:
+                        segs.append("S%02d E%s" % (s["season"], ",".join(s["gaps"])))
+                        gap_count += s["gapcount"]
+                behind = max(0, g.get("tmdb_max", 0) - g.get("max_ep", 0))
+                fmt = " · ".join(segs)
+                if behind: fmt += (" · " if fmt else "") + "落后 TMDb %d 集" % behind
+            if fmt:
+                rows.append({"name": item["name"], "lib": item["lib"],
+                             "id": item["id"], "tmdb": item["tmdb"],
+                             "fmt": fmt, "behind": behind, "gaps": gap_count})
+        except Exception as e:
+            rows.append({"name": item["name"], "lib": item["lib"],
+                         "err": str(e)})
+    # 排序:落后多的优先,gap 多的次之
+    rows.sort(key=lambda x: (-(x.get("behind", 0)), -(x.get("gaps", 0))))
+    copy_lines = []
+    for r in rows:
+        if "fmt" in r:
+            copy_lines.append("求 %s — %s" % (r["name"], r["fmt"]))
+    log("追更缺集汇总: %d 部有缺/落后" % len(rows))
+    return {"items": rows, "total": len(rows),
+            "copy_text": "\n".join(copy_lines)}
+
+
 def replace_batch_async(tid, items):
     """批量替换 [{lib, win_folder, lose_folder}, ...] → 进度上报 + 聚合结果。
     每条调 replace_folder;失败的项不阻塞其他项。"""

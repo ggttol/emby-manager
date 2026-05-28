@@ -238,6 +238,11 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   <section id="zhuigeng" class="hide">
     <div class="card"><h2>🔄 追更检查 <button class="btn ghost" onclick="loadZhuigeng()">重新检查</button></h2>
       <p class="muted">查「追更」库里哪些剧<b>还在更新中</b>(该去源站看新集),完结的不用管。集数偏少又在更的最可能有新集。</p>
+      <div class="row" style="margin-top:8px;gap:8px">
+        <button class="btn" style="background:#7c3aed" onclick="zgScanAiring()">🔄 一键扫所有在更剧(收新集)</button>
+        <button class="btn" style="background:#0ea5e9" onclick="zgGapsSummary()">📋 生成求资源清单(缺集汇总)</button>
+        <span class="muted" style="font-size:12px;flex:1">对每部在更剧用剧名作 keyword 扫对应库 / 查 TMDb 缺集 — 走 🔔 任务中心</span>
+      </div>
       <div id="zgOut" class="muted" style="margin-top:10px">检查中…</div></div>
   </section>
 
@@ -2481,6 +2486,98 @@ async function loadZhuigeng(){
   o.innerHTML=h;
 }
 function goScan(lib){tab('scan');const sel=$("#scanLib");if(sel)sel.value=lib;}
+
+// === 追更智能:一键扫所有在更剧 + 缺集汇总 ===
+async function zgScanAiring(){
+  const ok = await UI.modal.confirm({
+    title:'🔄 一键扫所有在更剧',
+    body:'对所有「在更」剧用<b>剧名作 keyword</b> 扫对应库,串行执行。一部约 1-3 秒。<br>扫完报告:有新集的 / 无新集的 / 失败的。',
+    okText:'开始'
+  });
+  if (!ok) return;
+  try {
+    const r = await api('/api/zhuigeng/scan_airing', {method:'POST', body:JSON.stringify({async:true})});
+    if (r.err){ UI.toast('启动失败:'+r.err,{type:'error'}); return; }
+    if (!r.tid){ UI.toast('后端未返 tid',{type:'error'}); return; }
+    UI.tasks.start(r.tid, {
+      label:'🔄 扫所有在更剧',
+      onDone:(t)=>{
+        const rep = t.result || {};
+        const hasNew = rep.has_new || [], noNew = rep.no_new || [], fail = rep.fail || [];
+        let h = `<div style="margin-bottom:10px"><b>共 ${rep.total||0} 部 · 新增 strm ${rep.new_total||0} 个</b></div>`;
+        if (hasNew.length){
+          h += `<div class="card" style="margin-bottom:8px;padding:10px"><h2 style="font-size:13px;color:var(--green)">✨ 有新集 (${hasNew.length})</h2>`;
+          hasNew.forEach(r=>{
+            h += `<div style="margin:3px 0;font-size:13px">${UI.esc(r.name)} <span class="muted">[${UI.esc(r.lib)}]</span> <b style="color:var(--green)">+${r.new}</b>${r.orphans?` <span class="muted">(清孤儿 ${r.orphans})</span>`:''}</div>`;
+          });
+          h += '</div>';
+        }
+        if (noNew.length){
+          h += `<div class="card" style="margin-bottom:8px;padding:10px"><h2 style="font-size:13px">😐 无新集 (${noNew.length})</h2><div class="muted" style="font-size:12px">${noNew.map(r=>UI.esc(r.name)).join(' · ')}</div></div>`;
+        }
+        if (fail.length){
+          h += `<div class="card" style="margin-bottom:8px;padding:10px;background:#3a1f1f"><h2 style="font-size:13px;color:var(--red)">✗ 失败 (${fail.length})</h2>`;
+          fail.forEach(r=>{
+            h += `<div style="margin:3px 0;font-size:12px">${UI.esc(r.name)}: ${UI.esc(r.err||'')}</div>`;
+          });
+          h += '</div>';
+        }
+        const node = document.createElement('div'); node.innerHTML = h;
+        new UI.Drawer({title:'🔄 一键扫报告', side:'right', width:520, content:node}).open();
+        loadZhuigeng();  // 重新刷追更列表
+      }
+    });
+    UI.toast('已启动,看 🔔 任务中心进度;完成弹报告', {type:'info', ms:3000});
+  } catch(e){ UI.toast('请求失败:'+e,{type:'error'}); }
+}
+
+async function zgGapsSummary(){
+  try {
+    const r = await api('/api/zhuigeng/gaps_summary', {method:'POST', body:JSON.stringify({async:true})});
+    if (r.err){ UI.toast('启动失败:'+r.err,{type:'error'}); return; }
+    if (!r.tid){ UI.toast('后端未返 tid',{type:'error'}); return; }
+    UI.tasks.start(r.tid, {
+      label:'📋 缺集汇总求资源',
+      onDone:(t)=>{
+        const rep = t.result || {};
+        const items = rep.items || [], copyText = rep.copy_text || '';
+        let h = `<div style="margin-bottom:10px"><b>共 ${rep.total||0} 部有缺集 / 落后 TMDb</b></div>`;
+        if (!items.length){
+          h += '<p class="muted">✓ 在更剧本地全集,暂无缺口</p>';
+        } else {
+          h += `<div class="row" style="margin-bottom:10px;gap:6px">
+            <button class="btn" onclick="(async()=>{try{await navigator.clipboard.writeText(${JSON.stringify(copyText)});UI.toast('已复制 '+${items.length}+' 行,直接粘到群里',{type:'ok'})}catch(e){UI.toast('复制失败:'+e,{type:'warn'})}})()" style="background:var(--blue)">📋 复制全部求资源文本</button>
+            <span class="muted" style="font-size:12px">按"落后/缺口"排序,落后最严重的在最上</span>
+          </div>`;
+          h += '<div style="max-height:400px;overflow:auto;font-size:13px">';
+          items.forEach(r=>{
+            if (r.err){
+              h += `<div style="padding:6px 0;border-bottom:1px solid var(--line);color:var(--red)">${UI.esc(r.name)}: ${UI.esc(r.err)}</div>`;
+              return;
+            }
+            h += `<div style="padding:6px 0;border-bottom:1px solid var(--line)">
+              <div><b>${UI.esc(r.name)}</b> <span class="muted">[${UI.esc(r.lib)}]</span></div>
+              <div class="muted" style="font-size:12px;margin-top:2px">${UI.esc(r.fmt)}</div>
+              <div style="margin-top:4px"><a href="#" style="color:var(--blue);font-size:11px" onclick='event.preventDefault();zgGoCheck(${JSON.stringify(r.id)});return false'>→ 单独查这部</a></div>
+            </div>`;
+          });
+          h += '</div>';
+        }
+        const node = document.createElement('div'); node.innerHTML = h;
+        new UI.Drawer({title:'📋 求资源清单', side:'right', width:560, content:node}).open();
+      }
+    });
+    UI.toast('已启动,看 🔔 任务中心进度;完成弹清单', {type:'info', ms:3000});
+  } catch(e){ UI.toast('请求失败:'+e,{type:'error'}); }
+}
+
+function zgGoCheck(id){
+  tab('gaps');
+  setTimeout(()=>{
+    const sel = document.querySelector('#gapSeries');
+    if (sel){ sel.value = id; if (typeof checkGaps === 'function') checkGaps(); }
+  }, 200);
+}
 
 // 缺集检查
 function fillGapLibs(){
