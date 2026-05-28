@@ -1205,6 +1205,8 @@ async function logout(){
 function tab(name){
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.tab===name));
   document.querySelectorAll("section").forEach(s=>s.classList.toggle("hide",s.id!==name));
+  // 切走 system 必须清自动刷新计时器(否则后台一直 30s 打 /api/system)
+  if (name !== "system" && window._sysRefresh){ clearInterval(window._sysRefresh); window._sysRefresh = null; }
   if(name==="poster"&&!NOPOSTER.length) loadNoposter();
   if(name==="system") loadSystem();
   if(name==="log") loadLog();
@@ -1384,6 +1386,20 @@ async function createLib(){
 // 扫描
 async function doScan(){
   const lib=$("#scanLib").value, kw=$("#scanKw").value.trim(), btn=$("#scanBtn"), out=$("#scanOut");
+  // 大库整扫(>500 项 + 空关键词)先弹确认 — 整扫会慢且占资源
+  if (!kw){
+    const meta = LIBS.find(l=>l.name===lib);
+    if (meta && (meta.count||0) > 500){
+      const ok = await UI.modal.confirm({
+        danger: true,
+        title: '扫整库',
+        body: `<div>「<b>${UI.esc(lib)}</b>」当前 <b>${meta.count}</b> 项,空关键词等于<b>扫整库</b></div>
+               <div class="muted" style="font-size:12px;margin-top:6px">大库整扫可能跑 30+ 秒,期间页面会一直转圈。建议填片名关键词缩范围,或确认继续。</div>`,
+        okText: '继续扫整库', cancelText: '回去填关键词'
+      });
+      if (!ok) return;
+    }
+  }
   btn.disabled=true; btn.innerHTML='扫描中 <span class="spin"></span>';
   out.classList.remove("hide");
   out.innerHTML='<div>开始扫描 '+esc(lib)+(kw?(' / 关键词「'+esc(kw)+'」'):'(整库)') +'…</div><div id="scanProg" class="muted" style="margin-top:6px"></div>';
@@ -1597,6 +1613,46 @@ async function loadSystem(){
   h+=`<div class="card" style="margin-top:12px"><h2>Docker 容器</h2>`+d.containers.map(c=>`<div class="row" style="padding:4px 0"><span class="badge ${c.up?'g':'warn'}">${c.up?'运行':'停止'}</span>${esc(c.name)} <span class="muted">${esc(c.status)}</span></div>`).join("")+`</div>`;
   h+=`<div class="card"><h2>占内存最多的进程</h2>`+d.procs.map(p=>`<div class="row" style="padding:3px 0"><span class="badge">${p.rss_mb} MB</span><span class="muted">${p.mem}%</span> ${esc(p.cmd)}</div>`).join("")+`</div>`;
   o.innerHTML=h;
+  // 顺带刷"最近任务"卡
+  loadRecentTasks();
+  // 启动/重置 30s 自动刷新
+  scheduleSysAuto();
+}
+function scheduleSysAuto(){
+  if (window._sysRefresh) { clearInterval(window._sysRefresh); window._sysRefresh = null; }
+  const cb = document.querySelector('#sysAutoRefresh');
+  if (cb && cb.checked){
+    window._sysRefresh = setInterval(()=>{
+      // 仅当 system tab 可见时刷
+      const sec = document.querySelector('#system');
+      if (sec && !sec.classList.contains('hide')) loadSystem();
+      else { clearInterval(window._sysRefresh); window._sysRefresh = null; }
+    }, 30000);
+  }
+}
+function toggleSysAuto(){ scheduleSysAuto(); }
+async function loadRecentTasks(){
+  const el = document.querySelector('#recentTasks');
+  if (!el) return;
+  el.innerHTML = '<span class="spin"></span> 加载…';
+  let d;
+  try { d = await api('/api/tasks/list?limit=5'); }
+  catch(e){ el.textContent = '出错: '+e; return; }
+  const arr = (d && d.tasks) || [];
+  if (!arr.length){ el.innerHTML = '<p class="muted">最近无任务</p>'; return; }
+  el.innerHTML = arr.map(t=>{
+    const pct = t.total ? Math.round(100*(t.progress||0)/t.total) : 0;
+    const cls = ({done:'g', cancelled:'warn', error:'warn', running:'', pending:'warn'})[t.status] || '';
+    const label = t.kind || t.label || t.tid || '?';
+    return `<div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:6px">
+      <div class="row" style="justify-content:space-between"><div><span class="badge ${cls}">${esc(t.status||'?')}</span> <b>${esc(label)}</b></div>
+      <span class="muted" style="font-size:11px;font-family:ui-monospace,Menlo,monospace">${esc(String(t.tid||'').slice(0,10))}</span></div>
+      ${(t.status==='running'||t.status==='pending')
+        ? `<div style="background:#0b0f17;border-radius:4px;height:5px;margin-top:6px;overflow:hidden"><div style="width:${pct}%;height:100%;background:var(--blue);transition:width .3s"></div></div>
+           <div class="muted" style="font-size:11px;margin-top:2px">${t.progress||0}/${t.total||'?'} · ${pct}% · ${esc(t.status_text||'')}</div>`
+        : `<div class="muted" style="font-size:11px;margin-top:4px">${esc(t.status_text||'')}${t.err?' · <span style="color:var(--red)">'+esc(t.err)+'</span>':''}</div>`}
+    </div>`;
+  }).join('');
 }
 // 日志
 async function loadLog(){const o=$("#logOut");o.textContent="加载…";const d=await api("/api/log");o.textContent=(d.logs||[]).join("\n")||"(暂无操作记录)";}
@@ -1604,14 +1660,17 @@ async function loadLog(){const o=$("#logOut");o.textContent="加载…";const d=
 // 用户管理
 async function loadUsers(){
   const o=$("#userList");o.innerHTML='<span class="spin"></span> 加载…';
-  const d=await api("/api/users");
-  o.innerHTML=(d.users||[]).map(u=>`<div class="item"><div class="main">
+  const d=await api("/api/users?withActivity=1");
+  o.innerHTML=(d.users||[]).map(u=>{
+    const act = (u.last_activity||'').slice(0,10) || (u.last_login||'').slice(0,10) || '';
+    return `<div class="item"><div class="main">
     <div class="nm">${esc(u.name)} ${u.admin?'<span class="badge">管理员</span>':''} ${u.disabled?'<span class="badge warn">已停用</span>':''}</div>
-    <div class="meta">同时串流上限: ${u.maxsessions?u.maxsessions:'不限'}</div></div>
+    <div class="meta">同时串流上限: ${u.maxsessions?u.maxsessions:'不限'} · 最后活跃: <span class="muted">${esc(act||'未记录')}</span></div></div>
     <input id="ms${u.id}" type="number" min="0" value="${u.maxsessions}" style="width:64px" title="0=不限">
     <button class="btn ghost" onclick="updateUser('${u.id}')">存上限</button>
     <button class="btn ghost" onclick="updateUser('${u.id}',${u.disabled?0:1})">${u.disabled?'启用':'停用'}</button>
-    ${u.admin?'':`<button class="btn danger" onclick="delUser('${u.id}','${esc(u.name)}')">删</button>`}</div>`).join("");
+    ${u.admin?'':`<button class="btn danger" onclick="delUser('${u.id}','${esc(u.name)}')">删</button>`}</div>`;
+  }).join("");
 }
 async function addUser(){
   const name=$("#nuName").value.trim(),pw=$("#nuPw").value;
@@ -1624,7 +1683,9 @@ async function updateUser(id,toggleDisabled){
   if(toggleDisabled!==undefined) body.disabled=(toggleDisabled===1);
   else{const el=$("#ms"+id); if(el) body.maxsessions=el.value;}
   const r=await api("/api/users/update",{method:"POST",body:JSON.stringify(body)});
-  toast(r.ok?"已更新":"失败");loadUsers();
+  if (r.ok) UI.toast('已保存', {type:'ok', ms:1500});
+  else UI.toast('失败' + (r.err?': '+r.err:''), {type:'error'});
+  loadUsers();
 }
 async function delUser(id,name){
   if(!(await UI.modal.confirm({danger:true,title:'删除 Emby 用户',body:`<div>删除用户 <b>${UI.esc(name)}</b>?</div><div style="margin-top:8px;font-size:12px;color:var(--warn)">⚠️ 不可恢复 — 用户的播放记录、收藏全消失</div>`,okText:'删除用户',requireType:name})))return;
@@ -1639,6 +1700,25 @@ async function loadConfig(){
   if(!LIBS.length){const x=await api("/api/libraries");LIBS=x.libs;}
   const m=d.c115_cid_map||{};
   $("#setC115Cids").innerHTML=LIBS.map(l=>`<div class="row" style="margin-bottom:4px"><span class="muted" style="width:120px">${esc(l.name)}</span><input class="cidInp" data-lib="${esc(l.name)}" placeholder="115 cid (纯数字)" value="${esc(m[l.name]||'')}" style="flex:1"></div>`).join("");
+  // 粘 cookie → 立即(不写 CFG)调 test_candidate 校验
+  const ck = $("#setC115Ck");
+  if (ck && !ck._pasteWired){
+    ck._pasteWired = true;
+    const tryProbe = ()=>{
+      const v = (ck.value||'').trim();
+      if (!v) return;
+      const st = $("#setC115State");
+      if (st) st.innerHTML = '<span class="spin"></span> 校验中…';
+      api('/api/c115/test_candidate', {method:'POST', body:JSON.stringify({cookie:v})}).then(r=>{
+        if (!st) return;
+        if (r && r.ok) st.innerHTML = `<span class="badge g">✓ cookie 有效</span> UID ${esc(r.uid||'?')}${r.used?' · 已用 '+esc(r.used):''}`;
+        else st.innerHTML = `<span class="badge warn">✗ ${esc((r&&r.err)||'校验失败')}</span>`;
+      }).catch(e=>{ if (st) st.innerHTML = `<span class="badge warn">✗ ${esc(String(e))}</span>`; });
+    };
+    ck.addEventListener('paste', ()=>setTimeout(tryProbe, 100));
+    // 也接 blur(用户手动 type 完一段也校一下)
+    ck.addEventListener('blur', ()=>{ if (ck.value.trim().length > 30) tryProbe(); });
+  }
 }
 async function saveConfig(which){
   const body={};
@@ -1763,22 +1843,50 @@ async function checkGaps(){
   const o=$("#gapOut"); o.innerHTML='<span class="spin"></span> 分析…';
   const d=await api("/api/gaps?id="+encodeURIComponent(id));
   const behind=(d.tmdb_max>d.max_ep)?(d.tmdb_max-d.max_ep):0;
+  // 集号 → 可点 chip(点一下复制到剪贴板)
+  const chip = (ep)=>`<span class="ep-chip" onclick="copyEp('${UI.esc(String(ep))}')" style="display:inline-block;padding:1px 8px;margin:2px 3px 2px 0;background:#1f2937;border:1px solid var(--line);border-radius:4px;cursor:pointer;font-family:ui-monospace,Menlo,monospace;font-size:12px" title="点一下复制">${UI.esc(String(ep))}</span>`;
+  // 收集全部缺集(给"复制全部"用)
+  const allGaps = [];
   let h=`<div class="card"><b>你有 ${d.have} 集 · 你的最新 E${d.max_ep}`;
   if(d.tmdb_max>d.max_ep) h+=` · TMDb 已知最新 E${d.tmdb_max}`;
   h+=` · 缺 ${d.gaps} 集</b> ${d.gaps===0?'<span class="badge g">无缺口</span>':'<span class="badge warn">有缺口</span>'}`;
-  if(behind) h+=`<div style="margin-top:6px;color:var(--gold)">⚠️ 落后最新 ${behind} 集(缺 E${d.max_ep+1}–E${d.tmdb_max})</div>`;
+  if(behind){
+    const behindList = [];
+    for (let i=d.max_ep+1; i<=d.tmdb_max; i++) behindList.push('E'+i);
+    h+=`<div style="margin-top:6px;color:var(--gold)">⚠️ 落后最新 ${behind} 集: ${behindList.map(chip).join('')}</div>`;
+    behindList.forEach(e=>allGaps.push(e));
+  }
   h+='</div>';
   if(d.mode==="absolute"){
     h+=`<div class="card"><span class="badge">动漫·绝对集号</span> 按 1–最新 连续统计`;
-    if(d.gaps) h+=`<div style="margin-top:6px"><span class="badge warn">缺这些集</span> ${d.gap_list.join(", ")}</div>`;
+    if(d.gaps){
+      h+=`<div style="margin-top:6px"><span class="badge warn">缺这些集</span> ${(d.gap_list||[]).map(chip).join('')}</div>`;
+      (d.gap_list||[]).forEach(e=>allGaps.push(String(e)));
+    }
     else h+=` <span class="badge g">1–E${d.max_ep} 全</span>`;
     h+='</div>';
   } else {
-    h+=d.seasons.map(s=>`<div class="row" style="padding:4px 0"><span class="badge">第${s.season}季</span>${s.count}集 · E${s.lo}–E${s.hi} ${s.gapcount?`<span class="badge warn">缺 ${s.gapcount}: ${s.gaps.join(", ")}</span>`:'<span class="badge g">全</span>'}</div>`).join("");
+    h+=d.seasons.map(s=>{
+      (s.gaps||[]).forEach(e=>allGaps.push(String(e)));
+      return `<div class="row" style="padding:4px 0"><span class="badge">第${s.season}季</span>${s.count}集 · E${s.lo}–E${s.hi} ${s.gapcount?`<span class="badge warn">缺 ${s.gapcount}:</span> ${(s.gaps||[]).map(chip).join('')}`:'<span class="badge g">全</span>'}</div>`;
+    }).join("");
   }
   if(d.noidx) h+=`<p class="muted">另有 ${d.noidx} 个无集号项(特典/SP/剧场版)</p>`;
-  h+='<p class="muted" style="margin-top:8px">注:动漫绝对集号按 1–最新 连续统计;"落后最新"靠 Emby 元数据,国产网剧 TMDb 常不记分集。</p>';
+  if (allGaps.length){
+    h += `<div style="margin-top:10px"><button class="btn ghost" onclick='copyEp(${JSON.stringify(allGaps.join(", "))})'>📋 复制全部缺集 (${allGaps.length})</button></div>`;
+  }
+  h+='<p class="muted" style="margin-top:8px">注:动漫绝对集号按 1–最新 连续统计;"落后最新"靠 Emby 元数据,国产网剧 TMDb 常不记分集。集号点一下=复制。</p>';
   o.innerHTML=h;
+}
+function copyEp(s){
+  try { navigator.clipboard.writeText(s); UI.toast('已复制 '+s, {type:'ok', ms:1500}); }
+  catch(e){
+    // fallback:execCommand
+    const ta = document.createElement('textarea'); ta.value = s; document.body.appendChild(ta);
+    ta.select(); try { document.execCommand('copy'); UI.toast('已复制 '+s, {type:'ok', ms:1500}); }
+    catch(e2){ UI.toast('复制失败,请手动选 '+s, {type:'warn'}); }
+    ta.remove();
+  }
 }
 async function refreshSeries(){
   const id=$("#gapSeries").value; if(!id){toast("先选一部剧");return;}
