@@ -1,0 +1,219 @@
+# Emby Manager
+
+给非技术亲戚装一台 Emby 后,自己用来「日常运维」的网页工具。基于 Emby HTTP API + NAS 本地文件系统操作,**纯 Python 标准库零依赖** —— 一个 `app.py` 加一个 `index.html`,丢进 NAS 任意目录 `python3 app.py` 就跑。
+
+为 strm 架构(strm 文件 + 115 网盘 CloudDrive2 挂载)而生,但纯 Emby 库也能用大部分功能。
+
+**v3.0** 升级了体验:全局 UI 组件库(Modal/Toast/TaskCenter/Drawer/VirtualList/Combobox),危险操作走 Modal + 打字防误删,长任务进 TaskCenter(顶部进度条 + 🔔 bell + 可取消、跨 tab 不丢、刷新自动恢复),键盘快捷键全覆盖,暗/亮三态主题,撤销系统接入 UI,配置导出/导入。后端能力 100% 暴露,9 lib 模块零循环依赖,148+ 单元测试。
+
+---
+
+## 功能(12 个 tabs)
+
+| Tab | 用途 |
+|---|---|
+| 仪表盘 | Emby 在线状态、库列表、各库项目数 / 海报缺失数 / 重复数概览 |
+| 扫描 | 单库 / 全库扫描(异步任务,进度条),按关键词扫描指定子目录,集成自动清孤儿 strm |
+| 115 转存 | 粘贴 115 分享链接 → snap 列文件 → receive 到指定库 cid;支持多链接批量 |
+| 追更检查 | 拉 TMDb `status` 看哪部剧已完结 / 在播,标红「应追更但本地没新集」 |
+| 缺集检查 | 对照 TMDb 季集表,列出本地缺失的集号(支持绝对集号模式) |
+| 海报修复 | 列无海报项 → 调 Emby RemoteSearch 给候选 → 一键 Apply TMDb id |
+| 去重 | 同 TMDb id 多份的项目对照(分辨率 / 容器 / 大小),勾选删冗余 |
+| 删除·移动 | 单选 / 多选删除项目,或在库之间移动 strm + nfo + 海报 |
+| 系统 | Docker 容器列表、磁盘 / 内存 / 负载、Emby 版本 |
+| 日志 | 应用日志环形缓冲(最近 200 条) |
+| 用户 | Emby 用户增删改、最大会话数、禁用 |
+| 设置 | 改 Emby 地址 / API Key / 登录密码 / 115 cookie / 115 cid 映射 / 反代信任 IP / 配置导出导入 |
+
+---
+
+## ⌨️ 键盘快捷键
+
+| 键 | 作用 |
+|---|---|
+| `/` 或 `Cmd+K` | 全局搜索 / 跳转 tab |
+| `?` | 快捷键帮助 |
+| `Esc` | 关闭最上层 Modal / Drawer |
+| `g` 然后 `d/s/c/z/g/p/r/m/y/l/u/,` | 跳 12 个 tab(仪/扫/115/追/缺/海/重/管/系/日/用/设) |
+
+在 input/textarea 输入时整套快捷键自动屏蔽,只允许 Esc blur 输入框。
+
+## 🔔 任务中心
+
+任何长操作(扫库 / 批量删 / 批量移 / 115 批量转存 / 海报批量修复 / 配置自动检测)走 `UI.tasks`:
+
+- **顶部进度条**:任意活跃任务即显示,宽度 = `Σprogress / Σtotal`
+- **🔔 Bell 数字**:活跃任务数;点开右侧 Drawer 列每个任务的标签、进度、状态
+- **跨 tab 不丢**:切 tab 不影响任务,完成时 toast 提示
+- **取消**:Drawer 内每个 running 任务有取消按钮 → `POST /api/task/cancel`
+- **刷新自动恢复**:启动时 `UI.tasks.hydrate()` 调 `/api/tasks/list` 把后端还在跑的任务拉回前端
+
+## 🌓 主题
+
+三态:auto(跟系统) / light / dark。点击 header 🌓 切换,持久化到 `localStorage.theme`。所有组件 CSS 走 `:root` 变量,无主题闪烁。
+
+---
+
+## 部署
+
+### 最小步骤
+
+1. 把整个目录拷到 NAS,比如 `/volume1/docker/emby-manager/`。
+2. 第一次跑:
+
+   ```sh
+   sudo python3 /volume1/docker/emby-manager/app.py
+   ```
+
+   首次启动会生成 `config.json`(权限 0o600)。打开 `http://<NAS>:8097`,**默认无密码** —— 立刻进「设置」改密码。
+
+3. 默认绑 `127.0.0.1`(只 NAS 本机能访问)。外网用走 NAS 反代或 iKuai 端口转发(见下)。
+
+### 开机自启(Synology DSM)
+
+```sh
+# 控制脚本
+cp /volume1/docker/emby-manager/manager.sh /usr/local/etc/rc.d/emby_manager.sh
+chmod +x /usr/local/etc/rc.d/emby_manager.sh
+# 立即启
+/usr/local/etc/rc.d/emby_manager.sh start
+```
+
+DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用 `setsid` 守护,日志到 `/tmp/embymgr.log`。
+
+### 外网访问
+
+**不要**直接把 `host` 改成 `0.0.0.0` 然后裸暴露 —— 没 HTTPS。推荐方式:
+
+- **NAS 反代:** DSM 控制面板 → 应用程序门户 → 反向代理 → 加一条 `https://mgr.你域名/` → `http://127.0.0.1:8097`,DSM 自动配 Let's Encrypt。
+- **iKuai 端口转发:** 仅在你信任的源 IP 上转发(白名单),且仍建议在 NAS 上反代加 HTTPS。
+
+如果一定要 bind `0.0.0.0`:`config.json` 把 `host` 改成 `"0.0.0.0"`,**前提是已经设过登录密码**(没密码时启动会拒绝监听公网,见 `migrate_cfg`)。
+
+---
+
+## 配置(config.json)
+
+文件与 `app.py` 同目录,首次启动自动建,权限固定 0o600。
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `emby_url` | str | Emby API 基址,默认 `http://127.0.0.1:8096/emby` |
+| `api_key` | str | Emby API Key(Emby 控制台 → 高级 → API Keys 生成) |
+| `password_hash` | str | 登录密码 PBKDF2-SHA256 hash(自动生成,不要手填明文) |
+| `host` | str | 监听地址,默认 `127.0.0.1`;改 `0.0.0.0` 才能外网直连 |
+| `port` | int | 监听端口,默认 `8097` |
+| `c115_cookie` | str | 115 网盘 cookie(整段,含 `UID=...; CID=...; SEID=...`);仅 115 转存 tab 用 |
+| `c115_cid_map` | dict | 库显示名 → 115 目标文件夹 cid 的映射,例如 `{"电影": "1234567"}` |
+| `trusted_proxies` | list | 受信任反代 IP 列表;默认 `[]` 不读 XFF。配 `["192.168.2.1"]` 让 X-Forwarded-For 生效(防反代后所有用户共享 IP 限流) |
+| `last_password_change_at` | int/null | 最近改密 unix timestamp;`null` = grace 模式,允许一次无旧密码改密(首次升级 v3.0 后用) |
+| `username` | str | header 显示用户名,默认 `admin`(单用户系统硬编码) |
+| `schema_version` | int | 配置 schema 版本,启动时 `migrate_cfg` 自动升(v3.0 = 4) |
+
+旧字段 `password`(明文)在启动时会被 `migrate_cfg` 自动转成 `password_hash` 并删除。
+
+---
+
+## 安全
+
+- **密码:** PBKDF2-SHA256 +per-user salt + 120k iter,只存 hash。
+- **登录限流:** 同源 IP 5 分钟内 10 次失败 → 429。
+- **Token:** 登录成功后发 token(HttpOnly cookie),7 天过期,后台 `token-reaper` 线程定期回收。
+- **CSRF:** 改写类请求(POST / DELETE)校验 CSRF token。
+- **CSP:** 响应头限制脚本源到 `'self'`,内联脚本走 nonce。
+- **默认监听:** `127.0.0.1`(loopback),不主动暴露公网。
+- **config 权限:** 写入时原子 rename + `chmod 0600`,只 owner 可读(护住 cookie / api_key / hash)。
+- **Path traversal:** 所有暴露给前端的文件操作参数都过 `_safe_join` —— 拒绝 `..`、绝对路径、超出 base 的 realpath。
+- **危险操作 Modal + requireType:** 删除 / 移动 / 删用户 / 配置导入 / 容器重启都走 UI.modal.confirm,批量 ≥5 项或不可逆操作要求**打字「删除」或库名/用户名**才能确认。
+- **API Key + 115 Cookie 默认遮罩:** input `type="password"` + 「👁️ 显示」toggle,防止截图泄露。
+- **配置导出剔密:** `/api/config/export` 返回的 JSON 把 `password_hash` 和 `c115_cookie` 替换为 `"<redacted>"`,导入时这些字段保留原值。
+- **反代 X-Forwarded-For:** 配 `trusted_proxies` 白名单后,login 限流按真实客户端 IP 而非反代 IP,防止所有用户被同时锁。
+- **Cookie / API Key 明文存:** 见下「已知未做」。
+
+## 已知未做(诚实清单)
+
+- **`config.json` 是明文 JSON** —— `c115_cookie` 和 `api_key` 没加密。原因:不想引 `cryptography` pip 依赖(项目主打零依赖)。靠 `chmod 0600` + NAS 本机访问兜底。要更安全自己挂 KMS / `pass` / 系统 keychain。
+- **单用户:** 只一个登录密码,没多账号 / 角色 / 权限分层。亲戚用 Emby 自己账号,管理工具只你一人用。
+- **115 cookie 1-2 周过期:** 115 没刷新 token 机制,过期了「设置 → 115 Cookie」粘新的即可。每次过期工具会在 115 tab 标红。
+- **无 HTTPS:** HTTP 服务,加密交给反代(NAS 反代 / nginx / Caddy)。
+- **无审计日志持久化:** 日志只环形缓冲 200 条 + `lib/embymgr.log`,没接 ELK / Loki。
+- **undo log 局部:** 删除 / 移动有 undo log,但 115 转存 / 海报 Apply 没记录。
+- **测试覆盖:** 只覆盖纯函数(path 安全、cfg migrate、TMDb 解析),HTTP handler / Emby API 调用未覆盖。
+
+---
+
+## 接口摘要
+
+所有 `/api/*` 都要登录(除 `/api/login` 自身和 `/health`)。修改类请求要 CSRF token。
+
+| Method | Path | 用途 |
+|---|---|---|
+| GET | `/` | 单页 HTML |
+| GET | `/health` | 健康检查(Emby 可达 + 磁盘 + 任务管理器状态) |
+| POST | `/api/login` | 登录,body `{pw}`,返回 token cookie |
+| GET | `/api/libraries` | Emby 在线状态 + 全部库 |
+| GET | `/api/system` | 主机磁盘 / 内存 / 负载 / Docker 容器列表 |
+| GET | `/api/items?lib=` | 列指定库所有项目 |
+| GET | `/api/noposter` | 列无海报项目 |
+| GET | `/api/dups` | 同 TMDb id 重复项目分析 |
+| GET | `/api/zhuigeng` | 追更状态(对照 TMDb status) |
+| GET | `/api/gaps?id=` | 单剧缺集列表 |
+| GET | `/api/refreshseries?id=` | 触发单剧元数据刷新 |
+| GET | `/api/search?id=&name=&type=` | Emby RemoteSearch 候选 |
+| GET | `/api/users` | 列 Emby 用户 |
+| GET | `/api/config` | 读 config(脱敏:cookie/key 只回 mask) |
+| GET | `/api/log` | 最近 200 条应用日志 |
+| GET | `/api/task?tid=` | 查异步任务进度 / 结果 |
+| GET | `/api/c115/test` | 测 115 cookie 是否有效 |
+| GET | `/api/c115/auto_cid` | 自动按库名匹配 115 cid |
+| POST | `/api/scan` | 单库扫描,body `{lib, keyword?}` |
+| POST | `/api/scan_all` | 全库异步扫描,返回 `tid` |
+| POST | `/api/fixposter` | 应用 TMDb id 修海报,body `{id, tmdb, type, name}` |
+| POST | `/api/dedup` | 删冗余项,body `{tmdb, remove: [ids]}` |
+| POST | `/api/move` | 跨库移动,body `{from, folder, to, id}` |
+| POST | `/api/createlib` | 创建 strm 库,body `{name, ctype}` |
+| POST | `/api/users/new` | 新建 Emby 用户 |
+| POST | `/api/users/update` | 改 Emby 用户(maxsessions / disabled) |
+| POST | `/api/config` | 改 config(密码 / Emby / API Key / 115) |
+| POST | `/api/c115/snap` | 115 分享 → snap 列文件(支持批量 + async) |
+| POST | `/api/c115/save` | 115 receive 到库(支持批量 + async) |
+| POST | `/api/task/cancel` | 取消异步任务,body `{tid}` |
+| DELETE | `/api/item` | 删项目,body `{lib, folder, id}` |
+| DELETE | `/api/user` | 删 Emby 用户,body `{id}` |
+
+### v3.0 新增 endpoint
+
+| Method | Path | 用途 |
+|---|---|---|
+| GET | `/api/me` | 返当前 csrf + username(supersedes the older endpoint) |
+| POST | `/api/logout` | 登出,清 cookie + token |
+| GET | `/api/tasks/list?limit=20` | 任务总览,前端 hydrate 用 |
+| GET | `/api/undo_log` | 撤销日志列表 |
+| POST | `/api/undo` | 执行撤销,body `{id}` |
+| GET | `/api/strm_list?lib=&folder=` | 列指定 folder 下所有 strm 文件 |
+| GET | `/api/config/export` | 配置导出(敏感字段 `<redacted>`) |
+| POST | `/api/config/import` | 配置导入,body `{cfg, confirm:true}` |
+| POST | `/api/c115/test_candidate` | 候选 cookie 不写 CFG 直接验证,body `{cookie}` |
+| POST | `/api/zhuigeng` `{async:true}` | 追更检查异步,返 tid |
+| POST | `/api/fixposter_batch?async=1` | 海报批量自动匹配,body `{ids, type}` |
+| POST | `/api/manage/delete_batch?async=1` | 批量删,body `{lib, items}` |
+| POST | `/api/manage/move_batch?async=1` | 批量移,body `{from, to, items}` |
+| POST | `/api/dedup/exec_batch?async=1` | 批量去重,body `{groups}` |
+| POST | `/api/c115/auto_cid?async=1` | 自动检测 cid 异步 |
+| Header | `X-Server-Version` | 所有响应附带工具版本号(VERSION 文件) |
+
+---
+
+## 升级到 v3.0(从 v2.x)
+
+- **第一次 v3 启动 grace**:`migrate_cfg` 加 `last_password_change_at: null` 字段。该字段为 `null` 时允许一次无旧密码改密;改密后会写入 timestamp,以后必须输旧密码才能改。
+- **TOKENS 重启清空**:所有用户需重新登录(token 在内存,无持久化)。
+- **老 X-Token header 兼容**:v2 用 header,v3 改 HttpOnly cookie。后端两种都接,但建议清浏览器 localStorage 老 token 残留(v3 启动 JS 会自动清)。
+- **旧 endpoint 全部保留**(向后兼容);新增 16 个异步/批量/管理类 endpoint(见上表)。
+- **部署方式不变**:`tar -cf - . | ssh ... "tar -xf -"` 然后 `manager.sh restart`(注意 chmod +x manager.sh 和 scripts/*.sh)。
+
+---
+
+## License
+
+MIT

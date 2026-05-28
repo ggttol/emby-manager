@@ -1,0 +1,7 @@
+config.json
+undo_log.jsonl
+logs/*.log*
+__pycache__/
+*.pyc
+.DS_Store
+scripts/alert.conf

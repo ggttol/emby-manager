@@ -1,0 +1,1802 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Emby 管理工具</title>
+<style>
+:root{--bg:#0f1420;--card:#19202e;--line:#2a3346;--ink:#e6eaf2;--sub:#8b95a8;--blue:#3b82f6;--green:#22c55e;--red:#ef4444;--gold:#eab308;
+  /* v3.0 新增 */
+  --warn:#f59e0b;--danger-bg:#3a1f1f;--ok-bg:#13351f;
+  --skeleton-bg:#1f2937;--overlay:rgba(0,0,0,.5);--focus:#3b82f6;}
+body[data-theme="light"]{--bg:#f8fafc;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--sub:#64748b;--skeleton-bg:#e2e8f0;--overlay:rgba(15,23,42,.4);--danger-bg:#fee2e2;--ok-bg:#dcfce7;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);font-size:14px}
+header{background:linear-gradient(120deg,#1e3a5f,#2563eb);padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+header h1{font-size:18px}.stat{margin-left:auto;font-size:12px;opacity:.9}
+nav{display:flex;gap:4px;background:#141a26;padding:0 12px;border-bottom:1px solid var(--line);overflow-x:auto}
+nav button{background:none;border:none;color:var(--sub);padding:12px 15px;cursor:pointer;font-size:14px;border-bottom:2px solid transparent;white-space:nowrap}
+nav button.on{color:#fff;border-bottom-color:var(--blue)}
+.wrap{max-width:1100px;margin:0 auto;padding:18px 16px 60px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+.lib{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+.lib .n{font-size:16px;font-weight:600}.lib .c{font-size:26px;font-weight:700;margin:6px 0;color:var(--blue)}.lib .s{font-size:12px;color:var(--sub)}
+select,input{background:#0f1420;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:14px}
+button.btn{background:var(--blue);color:#fff;border:none;border-radius:8px;padding:9px 16px;cursor:pointer;font-size:14px}
+button.btn:hover{filter:brightness(1.1)}button.btn:disabled{opacity:.5;cursor:default}
+button.danger{background:var(--red)}button.ok{background:var(--green)}button.ghost{background:#2a3346}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.item{display:flex;gap:12px;align-items:center;border-bottom:1px solid var(--line);padding:10px 2px}
+.item:last-child{border-bottom:none}.item .main{flex:1;min-width:0}
+.item .nm{font-weight:600}.item .meta{font-size:12px;color:var(--sub);margin-top:2px;word-break:break-all}
+.badge{font-size:11px;padding:2px 8px;border-radius:20px;background:#243049;color:#9db4e6;margin-right:6px}
+.badge.warn{background:#3a2f12;color:var(--gold)}.badge.g{background:#13351f;color:#6ee7a0}
+.muted{color:var(--sub)}.hide{display:none}
+.log{background:#0b0f17;border:1px solid var(--line);border-radius:8px;padding:10px;font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;max-height:420px;overflow:auto}
+.cand{display:flex;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:6px;cursor:pointer}
+.cand:hover{border-color:var(--blue)}.cand img{width:46px;height:68px;object-fit:cover;border-radius:4px;background:#222}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#222c3e;border:1px solid var(--line);color:#fff;padding:12px 20px;border-radius:10px;z-index:99;max-width:90%}
+#login{max-width:340px;margin:80px auto;text-align:center}h2{font-size:16px;margin-bottom:10px}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid #fff5;border-top-color:#fff;border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px}
+@keyframes s{to{transform:rotate(360deg)}}
+@media (max-width:640px){
+  /* nav: 12 个 tab 横排太挤,缩小按钮尺寸,横向滚动已由原 nav 提供 */
+  nav button{padding:10px 12px;font-size:13px}
+  /* wrap: 缩内边距,把屏幕宽度让给内容 */
+  .wrap{padding:12px 10px 40px}
+  /* .row 内的表单控件让其撑满剩余宽度,避免被压缩成一小条 */
+  .row > input, .row > select, .row > textarea{flex:1;min-width:0}
+  /* item 列表行: 主信息独占一行,操作按钮挤在下一行均分 */
+  .item{flex-wrap:wrap}
+  .item .main{flex-basis:100%}
+  .item select, .item button{flex:1 1 30%;margin-top:6px}
+  /* header 状态栏: 不再 margin-left:auto 推到右边,占整行 */
+  .stat{margin-left:0;flex-basis:100%}
+  /* 库卡片网格: 360px 屏也能两列,数字字号略降 */
+  .grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
+  .lib .c{font-size:22px}
+  /* iOS Safari < 16px 输入框会自动 zoom,把可输入控件锁到 16px */
+  input[type=text], input[type=password], input[type=number], input:not([type]), textarea{font-size:16px}
+  /* toast: 显式锁 13px,避免被默认 14px body 字号继承覆盖时显得太大 */
+  .toast{font-size:13px}
+}
+
+/* ============================================================
+   v3.0 UI 组件库样式 (前缀 ui-*)
+   ============================================================ */
+.ui-modal-mask{position:fixed;inset:0;background:var(--overlay);z-index:1000;display:flex;align-items:center;justify-content:center;animation:ui-fade .15s}
+.ui-modal{background:var(--card);border-radius:12px;max-width:min(540px,92vw);max-height:90vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.5);border:1px solid var(--line)}
+.ui-modal-head{padding:16px 18px;border-bottom:1px solid var(--line);font-weight:600;display:flex;align-items:center;gap:8px;font-size:15px}
+.ui-modal-body{padding:18px;overflow:auto;flex:1;line-height:1.6}
+.ui-modal-foot{padding:12px 18px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end;background:rgba(0,0,0,.06)}
+.ui-modal.danger .ui-modal-head{color:var(--red)}
+.ui-modal-body label{display:block;font-size:12px;color:var(--sub);margin-bottom:4px}
+.ui-modal-body textarea{resize:vertical}
+
+.ui-skeleton{background:linear-gradient(90deg,var(--skeleton-bg) 0%,#2a3346 50%,var(--skeleton-bg) 100%);background-size:200% 100%;animation:ui-shimmer 1.3s linear infinite;border-radius:6px;display:block}
+body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0%,#cbd5e1 50%,#e2e8f0 100%);background-size:200% 100%}
+@keyframes ui-shimmer{to{background-position:-200% 0}}
+@keyframes ui-fade{from{opacity:0}to{opacity:1}}
+@keyframes ui-slide-r{from{transform:translateX(100%)}to{transform:translateX(0)}}
+
+.ui-drawer{position:fixed;top:0;right:0;bottom:0;width:380px;max-width:92vw;background:var(--card);border-left:1px solid var(--line);z-index:900;display:flex;flex-direction:column;animation:ui-slide-r .2s;box-shadow:-8px 0 24px rgba(0,0,0,.3)}
+.ui-drawer-head{padding:14px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;font-weight:600}
+.ui-drawer-body{padding:14px;overflow:auto;flex:1}
+
+.ui-toast-stack{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);z-index:1100;display:flex;flex-direction:column;gap:8px;align-items:center;max-width:92vw;pointer-events:none}
+.ui-toast{background:#222c3e;border:1px solid var(--line);color:#fff;padding:10px 16px;border-radius:10px;display:flex;align-items:center;gap:12px;animation:ui-fade .15s;pointer-events:auto;max-width:480px;font-size:13px;box-shadow:0 6px 20px rgba(0,0,0,.4)}
+.ui-toast.warn{background:#3a2f12;border-color:var(--warn);color:#fef3c7}
+.ui-toast.error{background:var(--danger-bg);border-color:var(--red);color:#fecaca}
+.ui-toast.ok{background:var(--ok-bg);border-color:var(--green);color:#86efac}
+.ui-toast button.action{background:none;border:1px solid currentColor;color:inherit;padding:3px 10px;border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap}
+.ui-toast button.action:hover{background:rgba(255,255,255,.1)}
+
+.ui-empty{text-align:center;padding:36px 20px;color:var(--sub)}
+.ui-empty .icon{font-size:42px;margin-bottom:8px;opacity:.6}
+.ui-empty .title{font-size:15px;color:var(--ink);margin-bottom:4px}
+.ui-empty .hint{font-size:12px;margin-bottom:10px}
+
+.ui-progress-global{position:fixed;top:0;left:0;right:0;height:2px;background:transparent;z-index:1200;pointer-events:none}
+.ui-progress-global .bar{height:100%;background:var(--blue);width:0%;transition:width .3s ease-out}
+
+.ui-bell{position:relative;cursor:pointer;padding:6px 10px;border-radius:6px}
+.ui-bell .count{position:absolute;top:0;right:0;background:var(--red);color:#fff;font-size:10px;padding:1px 5px;border-radius:8px;min-width:14px;text-align:center;line-height:1.4}
+
+.ui-combo{position:relative}
+.ui-combo input{width:100%}
+.ui-combo .dropdown{position:absolute;top:100%;left:0;right:0;background:var(--card);border:1px solid var(--line);border-top:none;border-radius:0 0 8px 8px;max-height:280px;overflow:auto;z-index:50;display:none;box-shadow:0 8px 20px rgba(0,0,0,.3)}
+.ui-combo.open .dropdown{display:block}
+.ui-combo .item{padding:8px 11px;cursor:pointer;border-bottom:1px solid rgba(255,255,255,.04)}
+.ui-combo .item:last-child{border-bottom:none}
+.ui-combo .item:hover,.ui-combo .item.focus{background:var(--line)}
+.ui-combo .item .sub{font-size:11px;color:var(--sub);margin-top:2px}
+.ui-combo .empty{padding:12px;color:var(--sub);text-align:center;font-size:12px}
+
+.ui-virt{position:relative;overflow:auto}
+.ui-virt .spacer{position:relative;left:0;right:0;top:0}
+.ui-virt .vp{position:absolute;left:0;right:0;top:0;will-change:transform}
+
+.ui-pagi{display:flex;gap:6px;justify-content:center;margin-top:12px;flex-wrap:wrap;align-items:center}
+.ui-pagi button{background:var(--card);border:1px solid var(--line);color:var(--ink);padding:5px 11px;border-radius:6px;cursor:pointer;font-size:13px}
+.ui-pagi button.on{background:var(--blue);color:#fff;border-color:var(--blue)}
+.ui-pagi button:hover:not(:disabled):not(.on){background:var(--line)}
+.ui-pagi button:disabled{opacity:.5;cursor:default}
+.ui-pagi .info{color:var(--sub);font-size:12px;margin:0 6px}
+
+.ui-banner{padding:10px 14px;border-radius:8px;margin-bottom:10px;display:flex;align-items:center;gap:10px;font-size:13px;border:1px solid transparent}
+.ui-banner.warn{background:#3a2f12;border-color:var(--warn);color:#fef3c7}
+.ui-banner.info{background:#1e3a5f;border-color:var(--blue);color:#bfdbfe}
+.ui-banner.danger{background:var(--danger-bg);border-color:var(--red);color:#fecaca}
+.ui-banner.ok{background:var(--ok-bg);border-color:var(--green);color:#86efac}
+.ui-banner .action{margin-left:auto}
+
+:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+.ui-header-right{margin-left:auto;display:flex;gap:4px;align-items:center}
+.ui-header-right button{background:none;border:none;color:#fff;cursor:pointer;padding:6px 10px;border-radius:6px;font-size:14px}
+.ui-header-right button:hover{background:rgba(255,255,255,.15)}
+.ui-header-right .ui-bell{padding:6px 10px}
+
+.ui-menu{position:absolute;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 0;min-width:160px;z-index:200;box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.ui-menu .item{padding:8px 14px;cursor:pointer;font-size:13px;color:var(--ink)}
+.ui-menu .item:hover{background:var(--line)}
+.ui-menu .sep{height:1px;background:var(--line);margin:4px 0}
+
+.ui-help-kbd{display:inline-block;background:var(--line);padding:2px 7px;border-radius:4px;font-family:ui-monospace,Menlo,monospace;font-size:12px;margin:0 2px;color:var(--ink);border:1px solid rgba(255,255,255,.05)}
+
+@media (max-width:640px){
+  .ui-modal{max-width:100vw;max-height:100vh;border-radius:0;width:100vw;height:100vh}
+  .ui-drawer{width:100vw;max-width:100vw}
+  .ui-toast{font-size:13px;max-width:92vw}
+  .ui-modal-body input,.ui-modal-body textarea,.ui-modal-body select{font-size:16px}
+  .ui-combo input{font-size:16px}
+  .ui-header-right button{padding:6px 8px;font-size:13px}
+}
+</style></head>
+<body>
+
+<div id="login" class="card">
+  <h2>🎬 Emby 管理工具</h2><p class="muted" style="margin-bottom:14px">请输入登录密码</p>
+  <input id="pw" type="password" placeholder="密码" style="width:100%;margin-bottom:10px" onkeydown="if(event.key=='Enter')login()">
+  <button class="btn" style="width:100%" onclick="login()">登录</button>
+  <div id="loginErr" style="color:var(--red);margin-top:10px"></div>
+</div>
+
+<div id="app" class="hide">
+<div class="ui-progress-global" id="globalProg" style="display:none"><div class="bar"></div></div>
+<header>
+  <h1>🎬 Emby 管理工具</h1>
+  <span class="stat" id="embyStat">…</span>
+  <div class="ui-header-right">
+    <button id="hdrSearch" title="全局搜索 (/)" aria-label="全局搜索">🔍</button>
+    <button id="hdrTheme" title="切换主题" aria-label="切换主题">🌓</button>
+    <button class="ui-bell" id="hdrBell" title="任务中心" aria-label="任务中心">🔔<span class="count" style="display:none">0</span></button>
+    <button id="hdrUser" title="账户" aria-label="账户菜单">👤 admin</button>
+  </div>
+</header>
+<nav>
+  <button data-tab="dash" class="on" onclick="tab('dash')">📊 仪表盘</button>
+  <button data-tab="scan" onclick="tab('scan')">➕ 扫描加新内容</button>
+  <button data-tab="c115" onclick="tab('c115')">⬇️ 115 转存</button>
+  <button data-tab="zhuigeng" onclick="tab('zhuigeng')">🔄 追更检查</button>
+  <button data-tab="gaps" onclick="tab('gaps')">🔍 缺集检查</button>
+  <button data-tab="poster" onclick="tab('poster')">🖼️ 海报修复</button>
+  <button data-tab="dedup" onclick="tab('dedup')">🧹 去重</button>
+  <button data-tab="manage" onclick="tab('manage')">🗂️ 删除/移动</button>
+  <button data-tab="system" onclick="tab('system')">🩺 系统</button>
+  <button data-tab="log" onclick="tab('log')">📜 日志</button>
+  <button data-tab="users" onclick="tab('users')">👥 用户</button>
+  <button data-tab="settings" onclick="tab('settings')">⚙️ 设置</button>
+</nav>
+<div class="wrap">
+
+  <section id="dash">
+    <div id="dashHealth"></div>
+    <div class="card">
+      <div class="row">
+        <button class="btn" id="scanAllBtn" onclick="scanAll()">➕ 一键扫全库(收新内容)</button>
+        <button class="btn ok" onclick="createLibDlg()">🆕 新建库</button>
+        <span id="scanAllOut" class="muted"></span>
+      </div>
+    </div>
+    <div class="grid" id="libGrid"></div>
+    <div id="dashExcluded" style="margin-top:8px"></div>
+  </section>
+
+  <section id="scan" class="hide">
+    <div class="card"><h2>扫描某个库的新内容</h2>
+      <p class="muted" style="margin-bottom:10px">往 115 对应文件夹放好带 <code>[tmdbid-XXX]</code> 的内容后,选库扫描 → 自动生成 strm + 刷新刮削。</p>
+      <div class="row" style="align-items:flex-start">
+        <div id="scanLibCombo" style="width:240px"></div>
+        <input id="scanKw" placeholder="片名关键词(留空=扫整库;动漫等大库建议填)" style="flex:1;min-width:160px" onkeydown="if(event.key=='Enter')doScan()">
+        <button class="btn" id="scanBtn" onclick="doScan()">开始扫描</button>
+      </div>
+      <div id="scanOut" class="log hide" style="margin-top:12px"></div></div>
+  </section>
+
+  <section id="c115" class="hide">
+    <div class="card"><h2>⬇️ 115 分享转存 <span id="c115Status" class="muted" style="font-size:13px;font-weight:normal;margin-left:8px">检查中…</span></h2>
+      <p class="muted" style="margin-bottom:10px">贴 115 分享链接 → 选目标库 → 全部转存到该库 115 根目录。需要先在 ⚙️ 设置 填 cookie 和库 cid 映射。</p>
+      <div class="row" style="margin-bottom:6px;align-items:flex-start"><span class="muted" style="width:72px;padding-top:6px">分享链接</span>
+        <textarea id="cShareUrl" rows="4" placeholder="一行一个分享链接,如 https://115cdn.com/s/swXXX?password=YYY；同一行还可用空格/逗号隔开提取码" style="flex:1;font-family:monospace;font-size:12px;padding:6px;border-radius:4px;background:#0f172a;color:#e2e8f0;border:1px solid #334155;resize:vertical"></textarea></div>
+      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:72px">默认提取码</span>
+        <input id="cSharePwd" placeholder="单一提取码兜底(链接里有 password 或行尾自带的优先)" style="flex:1"></div>
+      <div class="row" style="margin-bottom:8px"><span class="muted" style="width:72px">转到库</span>
+        <select id="cShareLib" style="flex:1"></select>
+        <label class="muted" style="white-space:nowrap"><input type="checkbox" id="cShareScan" checked> 转完立刻扫库</label></div>
+      <div class="row"><button class="btn ghost" onclick="parseShare()">🔍 先看文件</button>
+        <button class="btn danger" onclick="saveShare()">⬇️ 全部转存</button>
+        <span id="cShareOut" class="muted" style="margin-left:6px"></span></div>
+      <div id="cShareList"></div>
+    </div>
+  </section>
+
+  <section id="zhuigeng" class="hide">
+    <div class="card"><h2>🔄 追更检查 <button class="btn ghost" onclick="loadZhuigeng()">重新检查</button></h2>
+      <p class="muted">查「追更」库里哪些剧<b>还在更新中</b>(该去源站看新集),完结的不用管。集数偏少又在更的最可能有新集。</p>
+      <div id="zgOut" class="muted" style="margin-top:10px">检查中…</div></div>
+  </section>
+
+  <section id="gaps" class="hide">
+    <div class="card"><h2>🔍 缺集检查</h2>
+      <p class="muted">选剧集库 → 选一部剧 → 查它内部缺哪些集 + 最大集号。</p>
+      <div class="row"><select id="gapLib" onchange="loadGapSeries()"></select><select id="gapSeries" style="flex:1;min-width:160px"></select><button class="btn" onclick="checkGaps()">检查</button><button class="btn ghost" onclick="refreshSeries()">刷新元数据</button></div>
+      <div id="gapOut" class="muted" style="margin-top:12px"></div></div>
+  </section>
+
+  <section id="poster" class="hide">
+    <div class="card">
+      <div class="row">
+        <h2>没有海报的条目 <span class="muted" id="posterCount" style="font-size:13px;font-weight:normal"></span></h2>
+        <span style="flex:1"></span>
+        <button class="btn ghost" onclick="loadNoposter()">刷新列表</button>
+        <button class="btn ok" id="posterAutoAll" onclick="posterAutoAll()" style="display:none">🪄 尝试全部自动匹配</button>
+      </div>
+      <p class="muted">常因被刮到同名外国剧。点「修复」按中文名重搜→选正确的(带海报),或手动填 tmdbid。</p>
+      <div id="posterList" style="margin-top:10px"></div>
+      <div id="posterPagi"></div></div>
+  </section>
+
+  <section id="dedup" class="hide">
+    <div class="card"><h2>重复资源 <button class="btn ghost" onclick="loadDups()">分析全库</button></h2>
+      <p class="muted">按 tmdbid 找重复、比画质。确认后留高画质、删其余(进 115 回收站)。</p>
+      <div id="dupList" style="margin-top:10px"></div></div>
+  </section>
+
+  <section id="manage" class="hide">
+    <div class="card"><h2>删除 / 跨库移动</h2>
+      <div class="row" style="align-items:flex-start">
+        <div id="mgLibCombo" style="width:240px"></div>
+        <span class="muted" id="mgCount"></span>
+      </div>
+      <input id="mgFilter" placeholder="过滤(支持 tmdb:123 / 年:2024 / 路径:S01,默认搜片名+文件夹)" style="width:100%;margin-top:10px" oninput="renderItems()">
+      <div class="row" style="margin-top:8px;align-items:center;flex-wrap:wrap;gap:8px">
+        <label class="muted" style="white-space:nowrap"><input type="checkbox" id="ckAll" onchange="toggleAll()"> 全选(当前过滤结果)</label>
+        <span class="muted" id="selCnt">选中 0</span>
+        <span style="flex:1"></span>
+        <div id="mgBatchToCombo" style="width:200px"></div>
+        <button class="btn ghost" onclick="doMoveBatch()">批量移动</button>
+        <button class="btn danger" onclick="doDeleteBatch()">批量删除</button>
+      </div>
+      <div id="itemListMeta" class="muted" style="margin-top:6px;font-size:12px"></div>
+      <div id="itemList" style="margin-top:10px"></div></div>
+  </section>
+
+  <section id="system" class="hide">
+    <div class="card">
+      <div class="row">
+        <h2>🩺 NAS 健康</h2>
+        <span style="flex:1"></span>
+        <label class="muted" style="white-space:nowrap"><input type="checkbox" id="sysAutoRefresh" checked onchange="toggleSysAuto()"> 每 30s 自动刷新</label>
+        <button class="btn ghost" onclick="loadSystem()">立即刷新</button>
+      </div>
+      <div id="sysOut" class="muted">加载中…</div>
+    </div>
+    <div class="card">
+      <div class="row"><h2>🕓 最近任务</h2><span style="flex:1"></span><button class="btn ghost" onclick="loadRecentTasks()">刷新</button></div>
+      <div id="recentTasks" class="muted">加载中…</div>
+    </div>
+  </section>
+
+  <section id="log" class="hide">
+    <div class="card">
+      <div class="row" style="margin-bottom:8px">
+        <div style="display:inline-flex;gap:2px;background:#0b0f17;border-radius:8px;padding:3px">
+          <button class="btn ghost" id="logSubTabOps" onclick="logSwitchTab('ops')" style="padding:5px 12px;font-size:13px">📜 操作日志</button>
+          <button class="btn ghost" id="logSubTabUndo" onclick="logSwitchTab('undo')" style="padding:5px 12px;font-size:13px">↩️ Undo 记录</button>
+        </div>
+        <span style="flex:1"></span>
+        <input id="logFilter" placeholder="过滤…" style="width:160px" oninput="renderLogList()">
+        <button class="btn ghost" onclick="logRefresh()">刷新</button>
+        <button class="btn ghost" onclick="logDownload()">📥 下载 .log</button>
+      </div>
+      <div id="logOut" class="log">…</div>
+    </div>
+  </section>
+
+  <section id="users" class="hide">
+    <div class="card">
+      <div class="row">
+        <h2>👥 Emby 用户</h2>
+        <span style="flex:1"></span>
+        <button class="btn ok" onclick="addUserDlg()">➕ 新建用户</button>
+        <button class="btn ghost" onclick="loadUsers()">刷新</button>
+      </div>
+      <p class="muted">⚠️ 「同时串流上限」需 Emby Premiere 才会真生效;0 = 不限。</p>
+      <div id="userList" style="margin-top:8px"></div></div>
+  </section>
+
+  <section id="settings" class="hide">
+    <div class="card"><h2>⚙️ 设置</h2><div style="max-width:540px">
+      <h2 style="font-size:14px;margin-top:6px">工具登录密码</h2>
+      <div class="row"><input id="setPw" type="password" placeholder="新登录密码" style="flex:1"><button class="btn" onclick="saveConfig('pw')">改密码</button></div>
+      <h2 style="font-size:14px;margin-top:18px">Emby 连接</h2>
+      <div class="row" style="margin-bottom:8px"><span class="muted" style="width:80px">地址</span><input id="setUrl" style="flex:1" placeholder="http://127.0.0.1:8096/emby"></div>
+      <div class="row" style="margin-bottom:8px"><span class="muted" style="width:80px">API Key</span><input id="setKey" style="flex:1"></div>
+      <div class="row" style="margin-bottom:18px"><button class="btn" onclick="saveConfig('emby')">保存并测试</button><span id="setOut" class="muted"></span></div>
+
+      <h2 style="font-size:14px;margin-top:6px">115 网盘 Cookie</h2>
+      <div class="muted" style="font-size:12px;margin:2px 0 6px">浏览器登录 <a href="https://115.com" target="_blank" style="color:#0ea5e9">115.com</a> → F12 → Network → 任一 webapi 请求 → Headers → 复制整条 <code>Cookie:</code>(必须包含 UID/CID/SEID)粘进来。当前: <span id="setC115State">…</span></div>
+      <div class="row" style="margin-bottom:14px">
+        <input id="setC115Ck" placeholder="UID=...; CID=...; SEID=...; KID=..." style="flex:1">
+        <button class="btn" onclick="saveConfig('c115')">保存</button>
+        <button class="btn ghost" onclick="testC115()">测连接</button>
+      </div>
+
+      <h2 style="font-size:14px">115 库目录 cid 映射</h2>
+      <div class="muted" style="font-size:12px;margin:2px 0 6px">Cookie 填好后点「🔍 自动检测」按 emby 库名扫 115 目录前两层填入;手动备选:115.com 进入目录 → URL 里 <code>?cid=XXXXXXXX</code>。</div>
+      <div id="setC115Cids" style="margin-top:6px"><span class="muted">加载中…</span></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn ghost" onclick="autoCid()">🔍 自动检测</button>
+        <button class="btn" onclick="saveConfig('c115cids')">保存映射</button>
+        <span id="setCidOut" class="muted" style="margin-left:6px"></span>
+      </div>
+    </div></div>
+  </section>
+
+</div></div>
+<div id="toast" class="toast hide"></div>
+
+<script>
+/* ============================================================================
+   v3.0 UI 组件库 (window.UI) — 纯 vanilla,无依赖
+   ----------------------------------------------------------------------------
+   挂在 window.UI 上的:
+     modal.{confirm, alert, form}  toast  loading.{spinner, wrap}  empty
+     skeleton.{rows, grid, card}   banner                          tasks (单例)
+     Drawer (class)                Pagination (class)
+     VirtualList (class)           Combobox (class)
+     esc / $h (工具)
+   注意:老 window.toast() 与 window.esc() 保留不动,C 阶段再迁移业务代码。
+   ============================================================================ */
+window.UI = (() => {
+  /* ---- 工具 ---- */
+  function $h(tag, attrs, ...children) {
+    const el = document.createElement(tag);
+    if (attrs) for (const k in attrs) {
+      const v = attrs[k];
+      if (v == null || v === false) continue;
+      if (k === 'class') el.className = v;
+      else if (k === 'style') el.style.cssText = v;
+      else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2).toLowerCase(), v);
+      else if (k.startsWith('data-') || k.startsWith('aria-')) el.setAttribute(k, v);
+      else el[k] = v;
+    }
+    children.flat().forEach(c => {
+      if (c == null || c === false) return;
+      if (c instanceof Node) el.appendChild(c);
+      else el.appendChild(document.createTextNode(String(c)));
+    });
+    return el;
+  }
+  function esc(s) {
+    return (s == null ? '' : String(s)).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  /* ============================================================
+     Modal:.confirm / .alert / .form,内部维护 modalStack(支持嵌套)
+     ============================================================ */
+  const modalStack = [];
+  function _topMost() { return modalStack[modalStack.length - 1] || null; }
+  function _closeTop(result) {
+    const m = modalStack.pop();
+    if (!m) return;
+    try { m.mask.remove(); } catch (e) {}
+    m._resolve(result);
+    if (modalStack.length === 0) document.body.style.overflow = '';
+  }
+  // 全局 Esc:关最顶层 modal
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape') return;
+    const top = _topMost();
+    if (top && top.escClose !== false) { ev.preventDefault(); _closeTop(top.cancelResult); }
+  });
+
+  function _makeModal({ title, bodyNode, footerBtns, danger, escClose, onMount }) {
+    return new Promise((resolve) => {
+      const mask = $h('div', { class: 'ui-modal-mask' });
+      const dialog = $h('div', { class: 'ui-modal' + (danger ? ' danger' : ''), role: 'dialog', 'aria-modal': 'true' });
+      const head = $h('div', { class: 'ui-modal-head' }, title || '');
+      const body = $h('div', { class: 'ui-modal-body' });
+      if (bodyNode instanceof Node) body.appendChild(bodyNode);
+      else if (typeof bodyNode === 'string') body.innerHTML = bodyNode;  // 调用方负责 esc
+      const foot = $h('div', { class: 'ui-modal-foot' });
+      (footerBtns || []).forEach(b => foot.appendChild(b));
+      dialog.appendChild(head); dialog.appendChild(body); dialog.appendChild(foot);
+      mask.appendChild(dialog);
+      mask.addEventListener('click', (e) => {
+        if (e.target === mask && escClose !== false) _closeTop(undefined);
+      });
+      document.body.appendChild(mask);
+      document.body.style.overflow = 'hidden';
+      const entry = { mask, _resolve: resolve, escClose, cancelResult: undefined };
+      modalStack.push(entry);
+      if (typeof onMount === 'function') onMount({ mask, dialog, body, head, foot });
+      // 自动聚焦第一个按钮或输入
+      setTimeout(() => {
+        const focusEl = dialog.querySelector('input,textarea,select,button.primary,button');
+        if (focusEl) try { focusEl.focus(); } catch (e) {}
+      }, 30);
+    });
+  }
+
+  function modalConfirm({ title = '确认操作', body = '', danger = false, okText = '确认', cancelText = '取消', requireType = null } = {}) {
+    const bodyWrap = $h('div');
+    if (typeof body === 'string') bodyWrap.innerHTML = body;  // 允许 HTML(调用者负责安全)
+    else if (body instanceof Node) bodyWrap.appendChild(body);
+    let typeInput = null;
+    if (requireType) {
+      const hint = $h('div', { style: 'margin-top:14px;font-size:12px;color:var(--sub)' },
+        `请打字「${requireType}」确认:`);
+      typeInput = $h('input', { type: 'text', placeholder: requireType, style: 'width:100%;margin-top:6px' });
+      bodyWrap.appendChild(hint);
+      bodyWrap.appendChild(typeInput);
+    }
+    const okBtn = $h('button', { class: 'btn primary ' + (danger ? 'danger' : ''), disabled: !!requireType }, okText);
+    const cancelBtn = $h('button', { class: 'btn ghost' }, cancelText);
+    if (typeInput) {
+      typeInput.addEventListener('input', () => {
+        okBtn.disabled = typeInput.value.trim() !== requireType;
+      });
+    }
+    cancelBtn.addEventListener('click', () => _closeTop(false));
+    okBtn.addEventListener('click', () => _closeTop(true));
+    return _makeModal({
+      title, danger, bodyNode: bodyWrap,
+      footerBtns: [cancelBtn, okBtn],
+    }).then(v => v === true);
+  }
+
+  function modalAlert({ title = '提示', body = '', copyable = false, okText = '知道了' } = {}) {
+    const bodyWrap = $h('div');
+    if (typeof body === 'string') {
+      if (copyable) {
+        const ta = $h('textarea', {
+          readOnly: true, rows: Math.min(12, Math.max(3, body.split('\n').length + 1)),
+          style: 'width:100%;font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#0b0f17;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:8px'
+        });
+        ta.value = body;
+        bodyWrap.appendChild(ta);
+        const cpBtn = $h('button', { class: 'btn ghost', style: 'margin-top:8px;font-size:12px' }, '📋 复制');
+        cpBtn.addEventListener('click', () => {
+          ta.select();
+          try { document.execCommand('copy'); cpBtn.textContent = '✓ 已复制'; } catch (e) {}
+          setTimeout(() => cpBtn.textContent = '📋 复制', 1500);
+        });
+        bodyWrap.appendChild(cpBtn);
+      } else {
+        bodyWrap.innerHTML = body;
+      }
+    } else if (body instanceof Node) bodyWrap.appendChild(body);
+    const okBtn = $h('button', { class: 'btn primary' }, okText);
+    okBtn.addEventListener('click', () => _closeTop(true));
+    return _makeModal({ title, bodyNode: bodyWrap, footerBtns: [okBtn] });
+  }
+
+  function modalForm({ title = '请填写', fields = [], onOk, okText = '保存', cancelText = '取消' } = {}) {
+    // fields: [{key, label, type='text'|'password'|'textarea'|'select'|'number'|'checkbox', placeholder, value, required, options:[{value,label}], hint}]
+    const bodyWrap = $h('div');
+    const inputs = {};
+    fields.forEach(f => {
+      const row = $h('div', { style: 'margin-bottom:12px' });
+      if (f.label) row.appendChild($h('label', {}, f.label + (f.required ? ' *' : '')));
+      let inp;
+      if (f.type === 'textarea') {
+        inp = $h('textarea', { placeholder: f.placeholder || '', rows: f.rows || 4, style: 'width:100%' });
+        if (f.value != null) inp.value = f.value;
+      } else if (f.type === 'select') {
+        inp = $h('select', { style: 'width:100%' });
+        (f.options || []).forEach(o => {
+          const opt = document.createElement('option');
+          opt.value = o.value; opt.textContent = o.label;
+          if (f.value === o.value) opt.selected = true;
+          inp.appendChild(opt);
+        });
+      } else if (f.type === 'checkbox') {
+        inp = $h('input', { type: 'checkbox' });
+        if (f.value) inp.checked = true;
+      } else {
+        inp = $h('input', { type: f.type || 'text', placeholder: f.placeholder || '', style: 'width:100%' });
+        if (f.value != null) inp.value = f.value;
+      }
+      inputs[f.key] = { inp, field: f };
+      row.appendChild(inp);
+      if (f.hint) row.appendChild($h('div', { style: 'font-size:11px;color:var(--sub);margin-top:3px' }, f.hint));
+      bodyWrap.appendChild(row);
+    });
+    const errBox = $h('div', { style: 'color:var(--red);font-size:12px;margin-top:6px;display:none' });
+    bodyWrap.appendChild(errBox);
+    const okBtn = $h('button', { class: 'btn primary' }, okText);
+    const cancelBtn = $h('button', { class: 'btn ghost' }, cancelText);
+    cancelBtn.addEventListener('click', () => _closeTop(null));
+    okBtn.addEventListener('click', async () => {
+      const values = {};
+      for (const k in inputs) {
+        const { inp, field } = inputs[k];
+        let v;
+        if (field.type === 'checkbox') v = !!inp.checked;
+        else v = inp.value;
+        if (field.required && !(field.type === 'checkbox') && (v == null || String(v).trim() === '')) {
+          errBox.textContent = (field.label || k) + ' 必填';
+          errBox.style.display = 'block';
+          try { inp.focus(); } catch (e) {}
+          return;
+        }
+        values[k] = v;
+      }
+      errBox.style.display = 'none';
+      if (typeof onOk === 'function') {
+        okBtn.disabled = true; okBtn.innerHTML = '处理中…';
+        try {
+          const ret = await onOk(values);
+          if (ret === false) {  // hook 返 false 视为校验失败,不关
+            okBtn.disabled = false; okBtn.textContent = okText;
+            return;
+          }
+          _closeTop(values);
+        } catch (e) {
+          errBox.textContent = '出错: ' + (e.message || e);
+          errBox.style.display = 'block';
+          okBtn.disabled = false; okBtn.textContent = okText;
+        }
+      } else {
+        _closeTop(values);
+      }
+    });
+    return _makeModal({ title, bodyNode: bodyWrap, footerBtns: [cancelBtn, okBtn] });
+  }
+
+  const modal = { confirm: modalConfirm, alert: modalAlert, form: modalForm };
+
+  /* ============================================================
+     Toast:UI.toast(msg,{type,ms,action,persistent}) → id;UI.toast.dismiss(id)
+     ============================================================ */
+  let _toastStack = null;
+  function _toastRoot() {
+    if (!_toastStack) {
+      _toastStack = $h('div', { class: 'ui-toast-stack', id: 'uiToastStack' });
+      document.body.appendChild(_toastStack);
+    }
+    return _toastStack;
+  }
+  let _toastSeq = 0;
+  const _toastMap = {};
+  function toast(msg, opts = {}) {
+    const id = ++_toastSeq;
+    const type = opts.type || 'info';
+    const ms = opts.persistent ? 0 : (opts.ms != null ? opts.ms : 2800);
+    const el = $h('div', { class: 'ui-toast ' + type });
+    el.appendChild($h('span', { style: 'flex:1' }, msg));
+    if (opts.action && opts.action.label) {
+      const btn = $h('button', { class: 'action' }, opts.action.label);
+      btn.addEventListener('click', () => {
+        try { opts.action.fn && opts.action.fn(); } catch (e) {}
+        toastDismiss(id);
+      });
+      el.appendChild(btn);
+    }
+    const x = $h('button', { class: 'action', style: 'border:none;padding:0 4px;font-size:14px;line-height:1' }, '×');
+    x.addEventListener('click', () => toastDismiss(id));
+    el.appendChild(x);
+    _toastRoot().appendChild(el);
+    _toastMap[id] = el;
+    if (ms > 0) setTimeout(() => toastDismiss(id), ms);
+    return id;
+  }
+  function toastDismiss(id) {
+    const el = _toastMap[id];
+    if (!el) return;
+    try { el.style.opacity = '0'; el.style.transform = 'translateY(8px)'; el.style.transition = 'all .18s'; } catch (e) {}
+    setTimeout(() => { try { el.remove(); } catch (e) {} delete _toastMap[id]; }, 200);
+  }
+  toast.dismiss = toastDismiss;
+
+  /* ============================================================
+     Loading:.spinner / .wrap
+     ============================================================ */
+  function loadingSpinner(el, label) {
+    if (!el) return;
+    el.innerHTML = `<div class="muted" style="padding:18px;text-align:center"><span class="spin"></span> ${esc(label || '加载中…')}</div>`;
+  }
+  async function loadingWrap(el, asyncFn, opts = {}) {
+    if (el) {
+      const skType = opts.skeleton || 'text';
+      if (skType === 'rows') el.innerHTML = skeletonRows(opts.skeletonN || 6);
+      else if (skType === 'grid') el.innerHTML = skeletonGrid(opts.skeletonN || 8);
+      else if (skType === 'card') el.innerHTML = skeletonCard();
+      else loadingSpinner(el, opts.label);
+    }
+    try {
+      return await asyncFn();
+    } catch (e) {
+      if (el) el.innerHTML = `<div class="ui-banner danger">加载失败: ${esc(e.message || e)}</div>`;
+      throw e;
+    }
+  }
+  const loading = { spinner: loadingSpinner, wrap: loadingWrap };
+
+  /* ============================================================
+     EmptyState:UI.empty(el,{icon,title,hint,action})
+     ============================================================ */
+  function empty(el, { icon = '🗂️', title = '暂无内容', hint = '', action = null } = {}) {
+    if (!el) return;
+    el.innerHTML = '';
+    const wrap = $h('div', { class: 'ui-empty' },
+      $h('div', { class: 'icon' }, icon),
+      $h('div', { class: 'title' }, title),
+      hint ? $h('div', { class: 'hint' }, hint) : null,
+    );
+    if (action && action.label) {
+      const btn = $h('button', { class: 'btn' }, action.label);
+      btn.addEventListener('click', () => { try { action.fn && action.fn(); } catch (e) {} });
+      wrap.appendChild(btn);
+    }
+    el.appendChild(wrap);
+  }
+
+  /* ============================================================
+     Skeleton:返字符串 HTML(直接 innerHTML 即可)
+     ============================================================ */
+  function skeletonRows(n = 5) {
+    let h = '';
+    for (let i = 0; i < n; i++) {
+      h += `<div style="display:flex;gap:10px;padding:10px 2px;border-bottom:1px solid var(--line);align-items:center">
+        <span class="ui-skeleton" style="width:40px;height:14px"></span>
+        <span class="ui-skeleton" style="flex:1;height:14px"></span>
+        <span class="ui-skeleton" style="width:80px;height:24px"></span>
+      </div>`;
+    }
+    return h;
+  }
+  function skeletonGrid(n = 6) {
+    let h = '<div class="grid">';
+    for (let i = 0; i < n; i++) {
+      h += `<div class="lib"><span class="ui-skeleton" style="width:60%;height:16px;margin-bottom:8px"></span>
+        <span class="ui-skeleton" style="width:40%;height:28px;margin-bottom:6px"></span>
+        <span class="ui-skeleton" style="width:80%;height:12px"></span></div>`;
+    }
+    return h + '</div>';
+  }
+  function skeletonCard() {
+    return `<div class="card"><span class="ui-skeleton" style="width:40%;height:16px;margin-bottom:10px"></span>
+      <span class="ui-skeleton" style="width:100%;height:12px;margin-bottom:6px"></span>
+      <span class="ui-skeleton" style="width:80%;height:12px"></span></div>`;
+  }
+  const skeleton = { rows: skeletonRows, grid: skeletonGrid, card: skeletonCard };
+
+  /* ============================================================
+     Banner:UI.banner(el,{kind,msg,action})
+     ============================================================ */
+  function banner(el, { kind = 'info', msg = '', action = null } = {}) {
+    if (!el) return;
+    const b = $h('div', { class: 'ui-banner ' + kind });
+    b.appendChild($h('span', { style: 'flex:1' }, msg));
+    if (action && action.label) {
+      const btn = $h('button', { class: 'btn ghost action' }, action.label);
+      btn.addEventListener('click', () => { try { action.fn && action.fn(); } catch (e) {} });
+      b.appendChild(btn);
+    }
+    // 替换或追加
+    if (el.firstChild && el.firstChild.classList && el.firstChild.classList.contains('ui-banner')) {
+      el.replaceChild(b, el.firstChild);
+    } else {
+      el.insertBefore(b, el.firstChild);
+    }
+    return b;
+  }
+
+  /* ============================================================
+     Drawer (class):UI.Drawer
+     ============================================================ */
+  class Drawer {
+    constructor({ title = '', content = null, side = 'right', width = 380, onClose = null } = {}) {
+      this.title = title; this.content = content; this.side = side; this.width = width; this.onClose = onClose;
+      this._mask = null; this._drawer = null; this._body = null;
+    }
+    open() {
+      if (this._mask) return;
+      const mask = $h('div', { class: 'ui-modal-mask', style: 'background:rgba(0,0,0,.35)' });
+      const drawer = $h('div', { class: 'ui-drawer', role: 'dialog' });
+      drawer.style.width = this.width + 'px';
+      if (this.side === 'left') {
+        drawer.style.left = '0'; drawer.style.right = 'auto'; drawer.style.borderLeft = 'none';
+        drawer.style.borderRight = '1px solid var(--line)';
+        drawer.style.animation = 'ui-fade .2s';
+      }
+      const head = $h('div', { class: 'ui-drawer-head' });
+      head.appendChild($h('span', {}, this.title));
+      const closeBtn = $h('button', { class: 'btn ghost', style: 'padding:4px 10px;font-size:14px', 'aria-label': '关闭' }, '×');
+      closeBtn.addEventListener('click', () => this.close());
+      head.appendChild(closeBtn);
+      const body = $h('div', { class: 'ui-drawer-body' });
+      if (this.content instanceof Node) body.appendChild(this.content);
+      else if (typeof this.content === 'string') body.innerHTML = this.content;
+      drawer.appendChild(head); drawer.appendChild(body); mask.appendChild(drawer);
+      mask.addEventListener('click', (e) => { if (e.target === mask) this.close(); });
+      document.body.appendChild(mask);
+      this._mask = mask; this._drawer = drawer; this._body = body;
+    }
+    close() {
+      if (!this._mask) return;
+      try { this._mask.remove(); } catch (e) {}
+      this._mask = null;
+      if (typeof this.onClose === 'function') try { this.onClose(); } catch (e) {}
+    }
+    setContent(c) {
+      if (!this._body) { this.content = c; return; }
+      this._body.innerHTML = '';
+      if (c instanceof Node) this._body.appendChild(c);
+      else if (typeof c === 'string') this._body.innerHTML = c;
+    }
+  }
+
+  /* ============================================================
+     TaskCenter (单例):UI.tasks
+       自动 poll /api/task?tid=,bell 数字=活跃数,启动调 /api/tasks/list 恢复
+     ============================================================ */
+  const tasks = (() => {
+    const T = {};  // tid -> {label, onCancel, onDone, status, progress, total, status_text, _timer}
+    let bellEl = null, bellCountEl = null, progBarEl = null, progRootEl = null, drawer = null;
+    let drawerListEl = null;
+
+    function _activeCount() {
+      return Object.values(T).filter(t => t.status === 'running' || t.status === 'pending').length;
+    }
+    function _updateBell() {
+      const n = _activeCount();
+      if (bellCountEl) {
+        bellCountEl.textContent = String(n);
+        bellCountEl.style.display = n > 0 ? '' : 'none';
+      }
+      _updateProgress();
+      _renderDrawerList();
+    }
+    function _updateProgress() {
+      if (!progBarEl || !progRootEl) return;
+      const arr = Object.values(T).filter(t => t.status === 'running' || t.status === 'pending');
+      if (!arr.length) {
+        progRootEl.style.display = 'none';
+        progBarEl.style.width = '0%';
+        return;
+      }
+      let p = 0, tot = 0;
+      arr.forEach(t => { p += (t.progress || 0); tot += (t.total || 0); });
+      const pct = tot > 0 ? Math.min(100, Math.round(100 * p / tot)) : 5;
+      progRootEl.style.display = '';
+      progBarEl.style.width = pct + '%';
+    }
+    function _renderDrawerList() {
+      if (!drawerListEl) return;
+      const arr = Object.entries(T).sort((a, b) => (b[1]._started || 0) - (a[1]._started || 0));
+      if (!arr.length) {
+        drawerListEl.innerHTML = '<div class="ui-empty"><div class="icon">📭</div><div class="title">没有任务</div></div>';
+        return;
+      }
+      drawerListEl.innerHTML = arr.map(([tid, t]) => {
+        const pct = t.total ? Math.round(100 * (t.progress || 0) / t.total) : 0;
+        const statusBadge = ({
+          running: '<span class="badge">运行中</span>',
+          pending: '<span class="badge warn">排队</span>',
+          done: '<span class="badge g">完成</span>',
+          cancelled: '<span class="badge warn">已取消</span>',
+          error: '<span class="badge warn">出错</span>',
+        })[t.status] || '<span class="badge">?</span>';
+        const cancelBtn = (t.status === 'running' || t.status === 'pending')
+          ? `<button class="btn ghost" data-cancel-tid="${esc(tid)}" style="font-size:12px;padding:3px 8px">取消</button>` : '';
+        return `<div class="card" style="margin-bottom:8px">
+          <div class="row" style="justify-content:space-between;align-items:flex-start">
+            <div style="flex:1;min-width:0">
+              <div style="font-weight:600;font-size:13px">${esc(t.label || tid)}</div>
+              <div class="muted" style="font-size:11px;margin-top:2px">${statusBadge} ${esc(t.status_text || '')}</div>
+            </div>
+            ${cancelBtn}
+          </div>
+          ${t.status === 'running' || t.status === 'pending'
+            ? `<div style="background:#0b0f17;border-radius:4px;height:6px;margin-top:6px;overflow:hidden"><div style="width:${pct}%;height:100%;background:var(--blue);transition:width .3s"></div></div>
+              <div class="muted" style="font-size:11px;margin-top:2px">${t.progress || 0}/${t.total || '?'} · ${pct}%</div>`
+            : ''}
+          ${t.err ? `<div style="color:var(--red);font-size:11px;margin-top:4px">${esc(t.err)}</div>` : ''}
+        </div>`;
+      }).join('');
+      drawerListEl.querySelectorAll('[data-cancel-tid]').forEach(btn => {
+        btn.addEventListener('click', () => cancel(btn.getAttribute('data-cancel-tid')));
+      });
+    }
+
+    function bindBell(el) {
+      if (!el) return;
+      bellEl = el;
+      bellCountEl = el.querySelector('.count');
+      el.addEventListener('click', openDrawer);
+      _updateBell();
+    }
+    function bindProgress(rootEl) {
+      if (!rootEl) return;
+      progRootEl = rootEl;
+      progBarEl = rootEl.querySelector('.bar');
+      _updateProgress();
+    }
+
+    function _poll(tid) {
+      const t = T[tid];
+      if (!t || t.status !== 'running' && t.status !== 'pending') return;
+      // 通过 window.api(已存在)调用;若 api 未就绪,降级到 fetch
+      const fetchTask = async () => {
+        if (typeof window.api === 'function') {
+          try { return await window.api('/api/task?tid=' + encodeURIComponent(tid)); }
+          catch (e) { return { err: String(e) }; }
+        }
+        try {
+          const r = await fetch('/api/task?tid=' + encodeURIComponent(tid), { credentials: 'same-origin' });
+          return await r.json();
+        } catch (e) { return { err: String(e) }; }
+      };
+      fetchTask().then(r => {
+        if (!T[tid]) return;  // 已被移除
+        if (r.err) {
+          T[tid].status = 'error';
+          T[tid].err = r.err;
+          _updateBell();
+          try { t.onDone && t.onDone(T[tid]); } catch (e) {}
+          return;
+        }
+        T[tid].status = r.status;
+        T[tid].progress = r.progress;
+        T[tid].total = r.total;
+        T[tid].status_text = r.status_text;
+        T[tid].result = r.result;
+        T[tid].err = r.err;
+        _updateBell();
+        if (r.status === 'running' || r.status === 'pending') {
+          T[tid]._timer = setTimeout(() => _poll(tid), 900);
+        } else {
+          try { t.onDone && t.onDone(T[tid]); } catch (e) {}
+        }
+      });
+    }
+
+    function start(tid, { label = '', onCancel = null, onDone = null } = {}) {
+      if (!tid) return;
+      T[tid] = {
+        label, onCancel, onDone,
+        status: 'running', progress: 0, total: 0,
+        _started: Date.now(),
+      };
+      _updateBell();
+      _poll(tid);
+      return tid;
+    }
+    async function cancel(tid) {
+      const t = T[tid]; if (!t) return;
+      try { t.onCancel && t.onCancel(); } catch (e) {}
+      try {
+        if (typeof window.api === 'function') {
+          await window.api('/api/task/cancel', { method: 'POST', body: JSON.stringify({ tid }) });
+        } else {
+          await fetch('/api/task/cancel', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.CSRF || '') },
+            body: JSON.stringify({ tid })
+          });
+        }
+      } catch (e) {}
+      // 标记 cancelled(下次 poll 会被 server 同步覆盖)
+      if (T[tid]) T[tid].status = 'cancelled';
+      _updateBell();
+    }
+    function list() {
+      return Object.entries(T).map(([tid, t]) => ({ tid, ...t }));
+    }
+    function openDrawer() {
+      if (!drawer) {
+        drawerListEl = $h('div');
+        drawer = new Drawer({ title: '🔔 任务中心', content: drawerListEl, width: 420 });
+      } else {
+        // 重用同一 list 节点
+      }
+      drawer.open();
+      _renderDrawerList();
+    }
+    async function hydrate() {
+      // 启动时拉后端任务列表,把还在 running/pending 的恢复进来
+      try {
+        const r = (typeof window.api === 'function')
+          ? await window.api('/api/tasks/list?limit=20')
+          : await (await fetch('/api/tasks/list?limit=20', { credentials: 'same-origin' })).json();
+        if (!r || !Array.isArray(r.tasks)) return;
+        r.tasks.forEach(rt => {
+          if (!rt.tid) return;
+          if (T[rt.tid]) return;  // 已在
+          T[rt.tid] = {
+            label: rt.label || rt.kind || rt.tid,
+            status: rt.status, progress: rt.progress || 0, total: rt.total || 0,
+            status_text: rt.status_text || '', _started: rt.created_at ? rt.created_at * 1000 : Date.now(),
+          };
+          if (rt.status === 'running' || rt.status === 'pending') _poll(rt.tid);
+        });
+        _updateBell();
+      } catch (e) { /* 后端可能未实现 /api/tasks/list,静默 */ }
+    }
+    return { bindBell, bindProgress, start, cancel, list, openDrawer, hydrate };
+  })();
+
+  /* ============================================================
+     Pagination (class):UI.Pagination
+     ============================================================ */
+  class Pagination {
+    constructor({ total = 0, pageSize = 50, onPage = null, page = 1 } = {}) {
+      this.total = total; this.pageSize = pageSize; this.onPage = onPage;
+      this.page = page;
+      this._el = null;
+    }
+    mount(el) { this._el = el; this._render(); return this; }
+    setTotal(t) { this.total = t; if (this.page > this.pageCount()) this.page = Math.max(1, this.pageCount()); this._render(); }
+    pageCount() { return Math.max(1, Math.ceil(this.total / this.pageSize)); }
+    goto(p) {
+      const max = this.pageCount();
+      p = Math.max(1, Math.min(max, p|0));
+      if (p === this.page) return;
+      this.page = p;
+      this._render();
+      if (typeof this.onPage === 'function') this.onPage(p);
+    }
+    _render() {
+      if (!this._el) return;
+      const max = this.pageCount();
+      if (max <= 1) { this._el.innerHTML = ''; return; }
+      const wrap = $h('div', { class: 'ui-pagi' });
+      const mk = (label, p, opts = {}) => {
+        const b = $h('button', { disabled: !!opts.disabled, class: opts.on ? 'on' : '' }, label);
+        if (!opts.disabled && !opts.on) b.addEventListener('click', () => this.goto(p));
+        return b;
+      };
+      wrap.appendChild(mk('«', 1, { disabled: this.page === 1 }));
+      wrap.appendChild(mk('‹', this.page - 1, { disabled: this.page === 1 }));
+      // 窗口 ±2
+      const lo = Math.max(1, this.page - 2), hi = Math.min(max, this.page + 2);
+      if (lo > 1) wrap.appendChild($h('span', { class: 'info' }, '…'));
+      for (let i = lo; i <= hi; i++) wrap.appendChild(mk(String(i), i, { on: i === this.page }));
+      if (hi < max) wrap.appendChild($h('span', { class: 'info' }, '…'));
+      wrap.appendChild(mk('›', this.page + 1, { disabled: this.page === max }));
+      wrap.appendChild(mk('»', max, { disabled: this.page === max }));
+      wrap.appendChild($h('span', { class: 'info' }, `第 ${this.page}/${max} 页 · 共 ${this.total} 项`));
+      this._el.innerHTML = '';
+      this._el.appendChild(wrap);
+    }
+  }
+
+  /* ============================================================
+     VirtualList (class):UI.VirtualList
+       固定行高 + scrollTop 计算 visible 窗口 + transform translateY 偏移
+     ============================================================ */
+  class VirtualList {
+    constructor({ items = [], rowHeight = 64, render = null, overscan = 5 } = {}) {
+      this.items = items; this.rowHeight = rowHeight; this.render = render; this.overscan = overscan;
+      this._el = null; this._spacer = null; this._vp = null;
+      this._onScroll = null;
+    }
+    mount(el) {
+      this._el = el;
+      el.classList.add('ui-virt');
+      el.innerHTML = '';
+      this._spacer = $h('div', { class: 'spacer' });
+      this._vp = $h('div', { class: 'vp' });
+      this._spacer.appendChild(this._vp);
+      el.appendChild(this._spacer);
+      this._onScroll = () => this._render();
+      el.addEventListener('scroll', this._onScroll, { passive: true });
+      this.refresh();
+      return this;
+    }
+    setItems(items) {
+      this.items = items;
+      if (this._el) this._el.scrollTop = 0;
+      this.refresh();
+    }
+    refresh() { if (this._el) this._render(); }
+    _render() {
+      if (!this._el) return;
+      const total = this.items.length;
+      const h = total * this.rowHeight;
+      this._spacer.style.height = h + 'px';
+      const viewH = this._el.clientHeight || 400;
+      const scrollTop = this._el.scrollTop || 0;
+      let start = Math.floor(scrollTop / this.rowHeight) - this.overscan;
+      let end = Math.ceil((scrollTop + viewH) / this.rowHeight) + this.overscan;
+      start = Math.max(0, start);
+      end = Math.min(total, end);
+      this._vp.style.transform = `translateY(${start * this.rowHeight}px)`;
+      const slice = this.items.slice(start, end);
+      let html = '';
+      slice.forEach((it, i) => {
+        const realIdx = start + i;
+        const cell = this.render ? this.render(it, realIdx) : `<div>${esc(JSON.stringify(it))}</div>`;
+        html += `<div data-vi="${realIdx}" style="height:${this.rowHeight}px;box-sizing:border-box">${cell}</div>`;
+      });
+      this._vp.innerHTML = html;
+    }
+    destroy() {
+      if (this._el && this._onScroll) this._el.removeEventListener('scroll', this._onScroll);
+      this._el = null;
+    }
+  }
+
+  /* ============================================================
+     Combobox (class):UI.Combobox
+       input + 下拉过滤 + 键盘 ↑↓ Enter Esc
+     ============================================================ */
+  class Combobox {
+    constructor({ options = [], placeholder = '搜索…', onChange = null, value = null } = {}) {
+      this.options = options;  // [{value, label, sublabel}]
+      this.placeholder = placeholder;
+      this.onChange = onChange;
+      this.value = value;
+      this._root = null; this._input = null; this._dd = null;
+      this._focusIdx = -1; this._filtered = [];
+    }
+    mount(el) {
+      el.innerHTML = '';
+      el.classList.add('ui-combo');
+      this._root = el;
+      const cur = this.options.find(o => o.value === this.value);
+      this._input = $h('input', { type: 'text', placeholder: this.placeholder, autocomplete: 'off' });
+      if (cur) this._input.value = cur.label;
+      this._dd = $h('div', { class: 'dropdown' });
+      el.appendChild(this._input); el.appendChild(this._dd);
+
+      const open = () => { el.classList.add('open'); this._filter(this._input.value, true); };
+      const close = () => { el.classList.remove('open'); this._focusIdx = -1; };
+
+      this._input.addEventListener('focus', () => { this._input.select(); open(); });
+      this._input.addEventListener('input', () => { this._filter(this._input.value); el.classList.add('open'); });
+      this._input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); this._move(1); }
+        else if (ev.key === 'ArrowUp') { ev.preventDefault(); this._move(-1); }
+        else if (ev.key === 'Enter') {
+          ev.preventDefault();
+          if (this._focusIdx >= 0 && this._filtered[this._focusIdx]) this._select(this._filtered[this._focusIdx]);
+          else if (this._filtered.length === 1) this._select(this._filtered[0]);
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault(); ev.stopPropagation(); close();
+          if (cur) this._input.value = cur.label;
+        }
+      });
+      // 失焦 close (延迟以便点 dropdown 时不丢失)
+      this._input.addEventListener('blur', () => setTimeout(close, 160));
+      this._dd.addEventListener('mousedown', (ev) => ev.preventDefault());  // 防止 input 先 blur
+      return this;
+    }
+    setOptions(opts) {
+      this.options = opts || [];
+      if (this._input) this._filter(this._input.value);
+    }
+    setValue(v) {
+      this.value = v;
+      const cur = this.options.find(o => o.value === v);
+      if (cur && this._input) this._input.value = cur.label;
+    }
+    getValue() { return this.value; }
+    _filter(q, showAll) {
+      q = (q || '').toLowerCase().trim();
+      this._filtered = this.options.filter(o => {
+        if (!q || showAll) return true;
+        return (o.label || '').toLowerCase().includes(q) ||
+               (o.sublabel || '').toLowerCase().includes(q) ||
+               String(o.value || '').toLowerCase().includes(q);
+      });
+      this._focusIdx = this._filtered.length > 0 ? 0 : -1;
+      this._renderDD();
+    }
+    _move(delta) {
+      if (!this._filtered.length) return;
+      this._focusIdx = (this._focusIdx + delta + this._filtered.length) % this._filtered.length;
+      this._renderDD();
+      // 滚到可见
+      const node = this._dd.querySelector('.item.focus');
+      if (node) try { node.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+    }
+    _select(opt) {
+      this.value = opt.value;
+      if (this._input) this._input.value = opt.label;
+      this._root.classList.remove('open');
+      if (typeof this.onChange === 'function') {
+        try { this.onChange(opt.value, opt); } catch (e) {}
+      }
+    }
+    _renderDD() {
+      if (!this._dd) return;
+      if (!this._filtered.length) {
+        this._dd.innerHTML = '<div class="empty">无匹配项</div>';
+        return;
+      }
+      const max = Math.min(this._filtered.length, 200);  // 防 >200 项 DOM 爆
+      let html = '';
+      for (let i = 0; i < max; i++) {
+        const o = this._filtered[i];
+        html += `<div class="item${i === this._focusIdx ? ' focus' : ''}" data-idx="${i}">
+          <div>${esc(o.label)}</div>
+          ${o.sublabel ? `<div class="sub">${esc(o.sublabel)}</div>` : ''}
+        </div>`;
+      }
+      if (this._filtered.length > max) html += `<div class="empty">仅显示前 ${max} 项,继续输入缩小</div>`;
+      this._dd.innerHTML = html;
+      this._dd.querySelectorAll('.item').forEach(node => {
+        node.addEventListener('click', () => {
+          const idx = parseInt(node.getAttribute('data-idx'));
+          this._select(this._filtered[idx]);
+        });
+        node.addEventListener('mouseenter', () => {
+          const idx = parseInt(node.getAttribute('data-idx'));
+          this._focusIdx = idx;
+          this._dd.querySelectorAll('.item').forEach(n => n.classList.remove('focus'));
+          node.classList.add('focus');
+        });
+      });
+    }
+  }
+
+  return {
+    modal, toast, loading, empty, skeleton, banner, tasks,
+    Drawer, Pagination, VirtualList, Combobox,
+    esc, $h,
+  };
+})();
+
+// auth:cookie(emby_tok)由后端 set HttpOnly,JS 偷不到;csrf 在 sessionStorage,关浏览器即清。
+let CSRF = sessionStorage.getItem("emby_csrf") || "";
+let LIBS = [], NOPOSTER = [], ITEMS = [];
+// 一次性清掉老版 localStorage 残留(v1.x 把 token 放 localStorage,XSS 风险大)
+try{ localStorage.removeItem("emby_tok"); }catch(e){}
+const $ = s => document.querySelector(s);
+function toast(m,ms=2800){const t=$("#toast");t.textContent=m;t.classList.remove("hide");clearTimeout(t._t);t._t=setTimeout(()=>t.classList.add("hide"),ms);}
+async function api(path, opt={}){
+  opt.credentials = 'same-origin';
+  opt.headers = Object.assign({"Content-Type":"application/json"}, opt.headers||{});
+  const m = (opt.method||"GET").toUpperCase();
+  if(m !== "GET" && m !== "HEAD") opt.headers["X-CSRF-Token"] = CSRF;
+  let r = await fetch(path, opt);
+  if(r.status === 401){ logout(); throw new Error("未登录"); }
+  if(r.status === 403){
+    // csrf 可能过期(刷页后 sessionStorage 没了)— 用 /api/me 续一次再重试
+    const j = await r.clone().json().catch(()=>({}));
+    if(/CSRF/.test(j.err||"")){
+      try{
+        const me = await fetch("/api/me",{credentials:'same-origin'}).then(x=>x.ok?x.json():null);
+        if(me && me.csrf){ CSRF = me.csrf; sessionStorage.setItem("emby_csrf", CSRF);
+          opt.headers["X-CSRF-Token"] = CSRF;
+          r = await fetch(path, opt);
+          if(r.status === 401){ logout(); throw new Error("未登录"); }
+        }
+      }catch(e){}
+    }
+  }
+  return r.json();
+}
+async function login(){
+  const pw=$("#pw").value;
+  const r=await(await fetch("/api/login",{method:"POST",credentials:'same-origin',headers:{"Content-Type":"application/json"},body:JSON.stringify({pw})})).json();
+  if(r.ok && r.csrf){ CSRF = r.csrf; sessionStorage.setItem("emby_csrf", CSRF); start(); }
+  else $("#loginErr").textContent = r.err || "登录失败";
+}
+async function logout(){
+  try{ await fetch("/api/logout",{method:"POST",credentials:'same-origin',headers:{"X-CSRF-Token":CSRF}}); }catch(e){}
+  CSRF=""; sessionStorage.removeItem("emby_csrf");
+  $("#app").classList.add("hide"); $("#login").classList.remove("hide");
+}
+function tab(name){
+  document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.tab===name));
+  document.querySelectorAll("section").forEach(s=>s.classList.toggle("hide",s.id!==name));
+  if(name==="poster"&&!NOPOSTER.length) loadNoposter();
+  if(name==="system") loadSystem();
+  if(name==="log") loadLog();
+  if(name==="users") loadUsers();
+  if(name==="settings") loadConfig();
+  if(name==="zhuigeng") loadZhuigeng();
+  if(name==="gaps") fillGapLibs();
+  if(name==="c115") loadC115();
+}
+async function start(){
+  $("#login").classList.add("hide");$("#app").classList.remove("hide");
+  const d=await api("/api/libraries");LIBS=d.libs;
+  $("#embyStat").textContent=d.emby.online?`● Emby 在线 · ${d.emby.name} · v${d.emby.version}`:"○ Emby 离线";
+  // v3:库卡片加 type icon + 点击跳管理
+  $("#libGrid").innerHTML=LIBS.map(l=>{
+    const icon = l.type === 'tvshows' ? '📺' : l.type === 'movies' ? '🎬' : '📁';
+    return `<div class="lib" style="cursor:pointer" onclick="tab('manage');setTimeout(()=>{const sel=document.querySelector('#mgLib');if(sel){sel.value=${JSON.stringify(l.name)};loadItems();}},80)" title="点击跳到管理"><div class="n">${icon} ${esc(l.name)}</div><div class="c">${l.count}</div><div class="s">${l.sub}</div></div>`;
+  }).join("");
+  // v3:excluded 库列表
+  if (d.excluded && d.excluded.length){
+    $("#libGrid").insertAdjacentHTML('afterend',
+      `<p class="muted" style="margin-top:10px;text-align:center"><a href="#" onclick="event.preventDefault();showExcluded()" style="color:var(--blue)">ℹ️ ${d.excluded.length} 个库被忽略 →</a></p>`);
+    window._excluded = d.excluded;
+  }
+  const opts=LIBS.map(l=>`<option>${esc(l.name)}</option>`).join("");
+  $("#scanLib").innerHTML=opts;$("#mgLib").innerHTML=opts;
+  // v3:一次性 init B4 shell + TaskCenter + health 卡
+  if (!window._v3Init){
+    window._v3Init = true;
+    initShell();
+    loadHealthCard();
+  }
+}
+
+function showExcluded(){
+  const list = window._excluded || [];
+  const node = document.createElement('div');
+  node.innerHTML = list.length ? list.map(x=>`<div style="padding:8px 0;border-bottom:1px solid var(--line)"><b>${UI.esc(x.name)}</b><div class="muted" style="font-size:12px;margin-top:2px">${UI.esc(x.reason)}</div></div>`).join('') : '<p class="muted">无</p>';
+  new UI.Drawer({title:'被忽略的库', content:node}).open();
+}
+
+async function loadHealthCard(){
+  try {
+    const r = await fetch('/health',{credentials:'same-origin'}).then(x=>x.json());
+    const dot = (b) => b ? '<span style="color:var(--green)">●</span>' : '<span style="color:var(--red)">○</span>';
+    const hrs = Math.floor((r.uptime||0)/3600), mins = Math.floor(((r.uptime||0)%3600)/60);
+    const card = `<div class="card" id="healthCard" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:13px">
+      <span>${dot(r.emby_online)} Emby</span>
+      <span>${dot(r.c115_cookie_set)} 115 cookie</span>
+      <span>${dot(r.cd_mounted)} CloudDrive 挂载</span>
+      <span class="muted">v${UI.esc(r.version||'?')} · 已运行 ${hrs}h${mins}m</span>
+    </div>`;
+    const dash = document.querySelector('#dash');
+    if (dash && !document.querySelector('#healthCard')) dash.insertAdjacentHTML('afterbegin', card);
+  } catch (e) {}
+}
+
+// ===== B4 Shell init =====
+function initShell(){
+  // 主题
+  const applyTheme = (t)=>{ document.body.dataset.theme = t==='light'?'light':'dark'; localStorage.setItem('theme',t); };
+  applyTheme(localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'));
+  const themeBtn = document.querySelector('#hdrTheme');
+  if (themeBtn) themeBtn.addEventListener('click', ()=>applyTheme(document.body.dataset.theme==='light'?'dark':'light'));
+
+  // TaskCenter 绑定
+  const bellBtn = document.querySelector('#hdrBell');
+  const progBar = document.querySelector('#globalProg');
+  if (bellBtn && UI.tasks.bindBell) UI.tasks.bindBell(bellBtn);
+  if (progBar && UI.tasks.bindProgress) UI.tasks.bindProgress(progBar);
+  if (bellBtn) bellBtn.addEventListener('click', ()=>UI.tasks.openDrawer && UI.tasks.openDrawer());
+  if (UI.tasks.hydrate) UI.tasks.hydrate();
+
+  // 用户菜单
+  const userBtn = document.querySelector('#hdrUser');
+  if (userBtn) userBtn.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    document.querySelectorAll('.ui-menu').forEach(x=>x.remove());
+    const menu = document.createElement('div'); menu.className='ui-menu';
+    const r = e.currentTarget.getBoundingClientRect();
+    menu.style.position='fixed';
+    menu.style.top=(r.bottom+4)+'px'; menu.style.right='12px';
+    menu.innerHTML = '<div class="item" data-act="chpw">🔑 修改密码</div><div class="sep"></div><div class="item" data-act="logout">🚪 退出登录</div>';
+    document.body.appendChild(menu);
+    setTimeout(()=>document.addEventListener('click', ()=>menu.remove(), {once:true}), 0);
+    menu.addEventListener('click', async (e2)=>{
+      const act = e2.target.dataset.act; menu.remove();
+      if (act==='logout') await logout();
+      else if (act==='chpw') chPwModal();
+    });
+  });
+
+  // 搜索
+  const searchBtn = document.querySelector('#hdrSearch');
+  if (searchBtn) searchBtn.addEventListener('click', openGlobalSearch);
+
+  // 全局快捷键
+  let lastG = 0;
+  document.addEventListener('keydown', (e)=>{
+    if (e.target.matches('input, textarea, [contenteditable]')){
+      if (e.key === 'Escape') e.target.blur();
+      return;
+    }
+    if (e.key === '?'){ e.preventDefault(); helpModal(); }
+    else if (e.key === '/' || (e.key==='k' && (e.metaKey||e.ctrlKey))){ e.preventDefault(); openGlobalSearch(); }
+    else if (e.key === 'g'){ lastG = Date.now(); }
+    else if (Date.now() - lastG < 1500){
+      const map = {'d':'dash','s':'scan','c':'c115','z':'zhuigeng','g':'gaps','p':'poster','r':'dedup','m':'manage','y':'system','l':'log','u':'users',',':'settings'};
+      if (map[e.key]){ e.preventDefault(); tab(map[e.key]); lastG = 0; }
+    }
+  });
+
+  // hash 路由
+  const origTab = window.tab;
+  window.tab = function(name){
+    origTab(name);
+    try { history.replaceState(null,'','#tab='+encodeURIComponent(name)); } catch(e){}
+  };
+  if (location.hash){
+    const m = location.hash.match(/tab=([^&]+)/);
+    if (m) setTimeout(()=>tab(decodeURIComponent(m[1])), 50);
+  }
+}
+
+async function chPwModal(){
+  await UI.modal.form({title:'🔑 修改登录密码', okText:'保存', fields:[
+    {name:'old_password', label:'当前密码(首次升级可留空)', type:'password'},
+    {name:'password', label:'新密码(≥6 位 + 非弱密码)', type:'password'},
+    {name:'confirm', label:'再次输入新密码', type:'password'}
+  ], onOk: async (v)=>{
+    if (v.password !== v.confirm){ UI.toast('两次输入不一致', {type:'warn'}); return false; }
+    if ((v.password||'').length < 6){ UI.toast('密码至少 6 位', {type:'warn'}); return false; }
+    const r = await api('/api/config', {method:'POST', body:JSON.stringify({password:v.password, old_password:v.old_password||''})});
+    if (r.err){ UI.toast('改密失败:'+r.err, {type:'error'}); return false; }
+    UI.toast('密码已改,下次登录用新密码', {type:'ok'});
+  }});
+}
+
+async function openGlobalSearch(){
+  const tabMap = {'dash':'dash','仪表':'dash','scan':'scan','扫':'scan','c115':'c115','115':'c115','转存':'c115',
+    'zhuigeng':'zhuigeng','追更':'zhuigeng','gaps':'gaps','缺集':'gaps','poster':'poster','海报':'poster',
+    'dedup':'dedup','去重':'dedup','manage':'manage','删':'manage','移动':'manage',
+    'system':'system','系统':'system','log':'log','日志':'log','users':'users','用户':'users',
+    'settings':'settings','设置':'settings'};
+  const v = await UI.modal.form({title:'🔍 跳转 / 搜索', okText:'跳转', fields:[
+    {name:'q', label:'输入 tab 名 / 库名 / 片名 (例: 扫描 · 海贼 · 动漫)', placeholder:''}
+  ]});
+  if (!v) return;
+  const q = (v.q||'').trim().toLowerCase();
+  if (!q) return;
+  for (const k in tabMap) if (q.includes(k)){ tab(tabMap[k]); return; }
+  tab('manage');
+  setTimeout(()=>{ const f = document.querySelector('#mgFilter'); if (f){ f.value = v.q; f.dispatchEvent(new Event('input')); } }, 100);
+}
+
+function helpModal(){
+  UI.modal.alert({title:'⌨️ 键盘快捷键', body:`
+    <div style="font-size:13px;line-height:2">
+      <span class="ui-help-kbd">/</span> 或 <span class="ui-help-kbd">Cmd+K</span> — 全局搜索/跳转<br>
+      <span class="ui-help-kbd">?</span> — 此帮助<br>
+      <span class="ui-help-kbd">Esc</span> — 关 Modal/Drawer<br>
+      <span class="ui-help-kbd">g</span> 然后 <span class="ui-help-kbd">d/s/c/z/g/p/r/m/y/l/u/,</span> — 跳 12 个 tab<br>
+      <div class="muted" style="font-size:11px;margin-top:6px">d=仪表 s=扫描 c=115 z=追更 g=缺集 p=海报 r=去重 m=管理 y=系统 l=日志 u=用户 ,=设置</div>
+    </div>`});
+}
+
+// 新建库
+async function createLib(){
+  const name=$("#newLibName").value.trim(),ctype=$("#newLibType").value;
+  if(!name){toast("填库名");return;}
+  $("#newLibOut").textContent="创建中…";
+  const r=await api("/api/createlib",{method:"POST",body:JSON.stringify({name,ctype})});
+  if(r.err){$("#newLibOut").textContent="出错: "+r.err;}
+  else{$("#newLibOut").textContent=`✓ 已建「${r.name}」(id ${r.id}),已建好 115+strm 文件夹,可往里放内容了`;$("#newLibName").value="";start();}
+}
+
+// 扫描
+async function doScan(){
+  const lib=$("#scanLib").value, kw=$("#scanKw").value.trim(), btn=$("#scanBtn"), out=$("#scanOut");
+  btn.disabled=true; btn.innerHTML='扫描中 <span class="spin"></span>';
+  out.classList.remove("hide");
+  out.innerHTML='<div>开始扫描 '+esc(lib)+(kw?(' / 关键词「'+esc(kw)+'」'):'(整库)') +'…</div><div id="scanProg" class="muted" style="margin-top:6px"></div>';
+  let success=false;
+  try{
+    const startResp = await api("/api/scan",{method:"POST",body:JSON.stringify({lib,keyword:kw,async:true})});
+    if(startResp.err){out.textContent="出错: "+startResp.err;}
+    else if(!startResp.tid){
+      // 后端没接 async(暂时回退到同步):startResp 就是 result
+      renderScanResult(startResp, out);
+      success = true;
+    }else{
+      // 轮询任务进度
+      const tid = startResp.tid;
+      while(true){
+        await new Promise(r=>setTimeout(r, 700));
+        const t = await api("/api/task?tid="+encodeURIComponent(tid));
+        if(t.err){out.innerHTML += '<div style="color:#ef4444">任务丢失: '+esc(t.err)+'</div>'; break;}
+        const pct = t.total ? Math.round(100*t.progress/t.total) : 0;
+        const prog = $("#scanProg");
+        if(prog) prog.innerHTML = `进度 ${t.progress||0}/${t.total||'?'} · ${pct}% · ${esc(t.status_text||'')}`;
+        if(t.status !== 'running'){
+          if(t.status === 'done'){ renderScanResult(t.result || {}, out); success = true; }
+          else if(t.status === 'cancelled') out.innerHTML += '<div style="color:#eab308">⚠️ 已取消</div>';
+          else if(t.status === 'error') out.innerHTML += '<div style="color:#ef4444">✗ '+esc(t.err||'未知错误')+'</div>';
+          break;
+        }
+      }
+    }
+  }catch(e){out.textContent="请求失败: "+e;}
+  btn.disabled=false; btn.textContent="开始扫描";
+  if(success) start();  // 老调用,扫成功后刷库列表
+}
+function renderScanResult(r, out){
+  if(r.err){ out.textContent = "出错: " + r.err; return; }
+  let s = `<div>【${esc(r.lib||'?')}】${r.keyword?'关键词「'+esc(r.keyword)+'」匹配 '+r.matched+' 个文件夹 · ':''}新生成 strm: ${r.new_count||0} 个</div>`;
+  for(const f in (r.new_folders||{})) s += `<div>   + ${esc(f)} (+${r.new_folders[f]})</div>`;
+  if(r.orphans_cleaned) s += `<div>🧹 清孤儿 strm: ${r.orphans_cleaned} 个</div>`;
+  if(r.keyword && r.matched === 0) s += '<div>⚠️ 没匹配该关键词的文件夹</div>';
+  else if((r.new_count||0) === 0 && !r.orphans_cleaned) s += '<div>没有新内容</div>';
+  if(r.refreshed) s += '<div>已通知 Emby 刮削</div>';
+  (r.attention||[]).forEach(a => s += '<div>⚠️ '+esc(a)+'</div>');
+  out.innerHTML = s;
+}
+async function scanAll(){
+  const btn=$("#scanAllBtn"), out=$("#scanAllOut");
+  btn.disabled=true; btn.innerHTML='启动中 <span class="spin"></span>';
+  try {
+    const r = await api("/api/scan_all", {method:"POST", body:JSON.stringify({})});
+    if (r.err){ out.textContent = "出错: " + r.err; btn.disabled=false; btn.textContent="➕ 一键扫全库(收新内容)"; return; }
+    if (!r.tid){ out.textContent = "后端未返 tid"; btn.disabled=false; btn.textContent="➕ 一键扫全库(收新内容)"; return; }
+    btn.innerHTML='扫描中(可取消)<span class="spin"></span>';
+    btn.disabled = false;
+    btn.onclick = ()=>UI.tasks.cancel(r.tid);
+    UI.tasks.start(r.tid, {
+      label: '扫全库',
+      onDone: (t)=>{
+        const result = t.result || {};
+        const cnt = result.new_count || 0, orph = result.orphans_cleaned || 0;
+        out.textContent = `✓ 扫完 · 新增 strm ${cnt} 个 · 清孤儿 ${orph} 个`;
+        btn.disabled=false; btn.onclick=scanAll; btn.textContent="➕ 一键扫全库(收新内容)";
+        if (cnt || orph){
+          UI.toast(`扫全库完成:新增 ${cnt}, 清孤儿 ${orph}`, {type:'ok', action:{label:'查看日志',fn:()=>tab('log')}});
+        }
+        start();
+      }
+    });
+  } catch(e){
+    out.textContent = "请求失败:" + e;
+    btn.disabled=false; btn.onclick=scanAll; btn.textContent="➕ 一键扫全库(收新内容)";
+  }
+}
+
+// 海报修复
+async function loadNoposter(){
+  $("#posterList").innerHTML='<span class="spin"></span> 扫描全库无海报条目…';
+  const d=await api("/api/noposter");NOPOSTER=d.items;
+  if(!NOPOSTER.length){$("#posterList").innerHTML='<p class="muted">🎉 全部条目都有海报</p>';return;}
+  $("#posterList").innerHTML=NOPOSTER.map((i,idx)=>`<div class="item"><div class="main"><div class="nm">${esc(i.name)}</div>
+    <div class="meta"><span class="badge">${esc(i.lib)}</span><span class="badge">${i.type}</span>tmdb:${i.tmdb||"无"} · 📁${esc(i.folder)}</div></div>
+    <button class="btn" onclick="fixPoster(${idx})">重搜+修复</button></div><div id="cand${idx}" class="hide" style="margin:4px 0 14px 0"></div>`).join("");
+}
+async function fixPoster(idx){
+  const i=NOPOSTER[idx],box=$("#cand"+idx),name=i.folder.replace(/[\(（\[].*$/,'').trim()||i.name;
+  box.classList.remove("hide");box.innerHTML='<span class="spin"></span> 按「'+esc(name)+'」重搜 TMDb…';
+  const d=await api(`/api/search?id=${i.id}&type=${i.type}&name=${encodeURIComponent(name)}`);
+  let h='<div class="muted" style="margin-bottom:4px">选正确的一条(点一下=绑定+拉海报):</div>';
+  h+=(d.candidates||[]).map(c=>`<div class="cand" onclick='applyPoster(${idx},${JSON.stringify(c.tmdb)})'>
+    ${c.img?`<img src="${c.img}">`:'<div style="width:46px;height:68px;background:#222;border-radius:4px"></div>'}
+    <div><div class="nm">${esc(c.name||"?")} ${c.year||""} ${c.img?'<span class="badge g">有海报</span>':'<span class="badge warn">无海报</span>'}</div>
+    <div class="meta">tmdb:${c.tmdb} · ${esc(c.overview||"")}</div></div></div>`).join("");
+  if(!(d.candidates||[]).length)h+='<p class="muted">没搜到候选</p>';
+  h+=`<div class="row" style="margin-top:8px">或手动填 tmdbid: <input id="mtmdb${idx}" style="width:130px" placeholder="如 252135"><button class="btn" onclick="applyPoster(${idx},document.getElementById('mtmdb${idx}').value.trim())">绑定</button></div>`;
+  box.innerHTML=h;
+}
+async function applyPoster(idx,tmdb){
+  if(!tmdb){toast("没有 tmdbid");return;}
+  const i=NOPOSTER[idx],box=$("#cand"+idx);
+  box.innerHTML='<span class="spin"></span> 绑定 tmdb '+tmdb+' 并拉海报(约 10-20 秒)…';
+  const r=await api("/api/fixposter",{method:"POST",body:JSON.stringify({id:i.id,tmdb,type:i.type,name:i.name})});
+  box.innerHTML=r.poster?`<span class="badge g">✓ 已修复</span> ${esc(r.name)} — 海报已出`:`<span class="badge warn">已绑定 ${esc(r.name||"")} 但海报仍未拉到(可换个 tmdbid 或稍后再试)</span>`;
+  if(r.poster)setTimeout(loadNoposter,1200);
+}
+
+// 去重
+async function loadDups(){
+  $("#dupList").innerHTML='<span class="spin"></span> 读 strm 分析全库重复…';
+  const d=await api("/api/dups");let h="";
+  if(!d.dups.length)h+='<p class="muted">✅ 没发现可去重的重复</p>';
+  d.dups.forEach((g,idx)=>{h+=`<div class="card"><div class="row"><b>tmdb ${g.tmdb}</b><span class="badge g">留</span> ${esc(g.keep.folder)} <span class="muted">[画质${g.keep.score}·${g.keep.n}文件·${esc(g.keep.lib)}]</span></div>`;
+    g.remove.forEach(r=>h+=`<div class="row" style="margin-top:4px"><span class="badge warn">删</span> ${esc(r.folder)} <span class="muted">[画质${r.score}·${r.n}文件·${esc(r.lib)}]</span></div>`);
+    h+=`<div style="margin-top:8px"><button class="btn danger" onclick='execDedup(${idx})'>确认去重</button></div></div>`;});
+  if(d.review.length){h+='<h2 style="margin-top:14px">需人工确认(不自动删) <span class="muted" style="font-weight:normal">点哪行删哪行</span></h2>';
+    d.review.forEach((g,gi)=>{h+=`<div class="card"><div class="muted">tmdb ${g.tmdb} — ${g.why}</div>`
+      + g.rows.map((r,ri)=>{
+        let diff="";
+        if(r.total_eps!==undefined){
+          if(r.uniq_count>0) diff=`<div style="font-size:11px;margin-left:14px;margin-top:2px;color:#f59e0b">🔻 此版独有 ${r.uniq_count} 集: ${esc(r.uniq)} <span class="muted">(共 ${r.total_eps} 集 · ${r.shared_count} 集两边都有)</span></div>`;
+          else diff=`<div style="font-size:11px;margin-left:14px;margin-top:2px;color:#10b981">✓ 全 ${r.total_eps} 集已被其他版本覆盖,删此安全</div>`;
+        }
+        return `<div class="row" style="margin-top:6px;justify-content:space-between;align-items:flex-start"><div style="flex:1">· ${esc(r.folder)} <span class="muted">[画质${r.score}·${r.n}文件·${esc(r.lib)}]</span>${diff}</div><button class="btn danger" onclick='delReview(${gi},${ri})'>删这个</button></div>`;
+      }).join("")
+      + `</div>`;});}
+  $("#dupList").innerHTML=h;window._dups=d.dups;window._review=d.review;
+}
+async function execDedup(idx){const g=window._dups[idx];
+  const body = `<div>tmdb <b>${UI.esc(g.tmdb)}</b> 删 <b>${g.remove.length}</b> 个版本(<b>留</b>:${UI.esc(g.keep.folder)})</div><div style="margin-top:8px;font-size:12px;color:var(--sub)">${g.remove.map(r=>'· '+UI.esc(r.folder)+'  ['+r.lib+'/'+r.n+'文件]').join('<br>')}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 文件夹进回收站(可还原),strm + Emby 条目同步删</div>`;
+  if(!(await UI.modal.confirm({danger:true,title:'确认去重',body,okText:'确认删除',requireType: g.remove.length>=3 ? '删除' : null})))return;
+  const r=await api("/api/dedup",{method:"POST",body:JSON.stringify({tmdb:g.tmdb,remove:g.remove.map(x=>({lib:x.lib,folder:x.folder}))})});
+  toast("已删 "+(r.removed||[]).length+" 个");loadDups();}
+async function delReview(gi,ri){const g=window._review[gi];const r=g.rows[ri];
+  const body = `<div>删除 <b>${UI.esc(r.folder)}</b></div><div class="muted" style="font-size:12px;margin-top:4px">库:${UI.esc(r.lib)} · ${r.n} 文件 · 画质 ${r.score}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 → 回收站(可还原)+ strm 同步删</div>`;
+  if(!(await UI.modal.confirm({danger:true,title:'删除版本',body,okText:'删除',requireType:'删除'})))return;
+  const x=await api("/api/dedup",{method:"POST",body:JSON.stringify({tmdb:g.tmdb,remove:[{lib:r.lib,folder:r.folder}]})});
+  toast("已删 "+(x.removed||[]).length+" 个");loadDups();}
+
+// 删除/移动
+async function loadItems(){const lib=$("#mgLib").value;$("#itemList").innerHTML='<span class="spin"></span> 加载…';
+  const others=LIBS.map(l=>l.name).filter(n=>n!==lib);
+  $("#mgBatchTo").innerHTML='<option value="">移到…</option>'+others.map(n=>`<option>${esc(n)}</option>`).join("");
+  const d=await api("/api/items?lib="+encodeURIComponent(lib));ITEMS=d.items||[];$("#mgCount").textContent=`共 ${ITEMS.length} 部`;renderItems();}
+function renderItems(){
+  const kw=($("#mgFilter").value||"").trim();const list=kw?ITEMS.filter(i=>i.name.includes(kw)||i.folder.includes(kw)):ITEMS;
+  const others=LIBS.map(l=>l.name).filter(n=>n!==$("#mgLib").value);
+  $("#itemList").innerHTML=list.slice(0,500).map(i=>{const gi=ITEMS.indexOf(i);
+    return `<div class="item"><input type="checkbox" class="ck" data-gi="${gi}" onchange="updateSel()" style="margin-right:8px;width:16px;height:16px;flex-shrink:0"><div class="main"><div class="nm">${esc(i.name)} <span class="muted">${i.year||""}</span></div><div class="meta">tmdb:${i.tmdb||"无"} · 📁${esc(i.folder)}</div></div>
+      <select id="mv${gi}"><option value="">移到…</option>${others.map(o=>`<option>${esc(o)}</option>`).join("")}</select>
+      <button class="btn ghost" onclick="doMove(${gi})">移动</button><button class="btn danger" onclick="doDelete(${gi})">删除</button></div>`;
+  }).join("")+(list.length>500?'<p class="muted">仅显示前 500,用过滤缩小</p>':"");
+  if($("#ckAll"))$("#ckAll").checked=false;updateSel();
+}
+function updateSel(){const n=document.querySelectorAll(".ck:checked").length;$("#selCnt").textContent=`选中 ${n}`;}
+function toggleAll(){const on=$("#ckAll").checked;document.querySelectorAll(".ck").forEach(c=>c.checked=on);updateSel();}
+function selectedGis(){return Array.from(document.querySelectorAll(".ck:checked")).map(c=>parseInt(c.dataset.gi));}
+async function doDelete(gi){const i=ITEMS[gi];
+  const body = `<div>删除 <b>${UI.esc(i.name)}</b> ${i.year||''}</div><div class="muted" style="font-size:12px;margin-top:4px">tmdb:${i.tmdb||'无'} · 📁${UI.esc(i.folder)} · 库 ${UI.esc($("#mgLib").value)}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 → 回收站(可还原)+ strm + Emby 同步删</div>`;
+  if(!(await UI.modal.confirm({danger:true,title:'删除',body,okText:'删除'})))return;
+  const r=await api("/api/item",{method:"DELETE",body:JSON.stringify({lib:$("#mgLib").value,folder:i.folder,id:i.id})});
+  if(r.err)toast("出错: "+r.err);else{toast(`已删「${i.name}」`);loadItems();start();}}
+async function doMove(gi){const i=ITEMS[gi],to=$("#mv"+gi).value;if(!to){toast("先选目标库");return;}
+  if(!(await UI.modal.confirm({title:'跨库移动',body:`<div>把 <b>${UI.esc(i.name)}</b></div><div class="muted" style="font-size:12px;margin-top:4px">从 <b>${UI.esc($("#mgLib").value)}</b> → <b>${UI.esc(to)}</b></div>`,okText:'移动'})))return;
+  const r=await api("/api/move",{method:"POST",body:JSON.stringify({from:$("#mgLib").value,folder:i.folder,to,id:i.id})});
+  if(r.err)toast("出错: "+r.err);else{toast(`已移动「${i.name}」→ ${to}(${r.strm}集)`);loadItems();start();}}
+async function doDeleteBatch(){
+  const gis=selectedGis();if(!gis.length){toast("先勾选要删的");return;}
+  const lib=$("#mgLib").value;
+  const names=gis.slice(0,5).map(g=>ITEMS[g].name).join("、")+(gis.length>5?` 等 ${gis.length} 部`:"");
+  const body = `<div>删除 <b>${gis.length}</b> 部</div><div class="muted" style="font-size:12px;margin-top:4px">${UI.esc(names)}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 → 回收站(可还原)+ strm + Emby 同步删</div>`;
+  if(!(await UI.modal.confirm({danger:true,title:'批量删除',body,okText:'确认批量删',requireType: gis.length >= 5 ? '删除' : null})))return;
+  let ok=0,fail=0,failNames=[];
+  for(const gi of gis){
+    const i=ITEMS[gi];
+    try{const r=await api("/api/item",{method:"DELETE",body:JSON.stringify({lib,folder:i.folder,id:i.id})});
+        if(r.err){fail++;failNames.push(i.name+":"+r.err);}else ok++;}
+    catch(e){fail++;failNames.push(i.name+":"+e);}
+    toast(`删除中 ${ok+fail}/${gis.length}…`);
+  }
+  toast(`完成: ✓ ${ok}${fail?` ✗ ${fail}`:""}`,4500);
+  if(failNames.length)console.warn("删除失败:",failNames);
+  loadItems();start();
+}
+async function doMoveBatch(){
+  const gis=selectedGis();if(!gis.length){toast("先勾选");return;}
+  const to=$("#mgBatchTo").value;if(!to){toast("先在工具栏选目标库");return;}
+  const lib=$("#mgLib").value;
+  if(!(await UI.modal.confirm({title:'批量移动',body:`<div>把 <b>${gis.length}</b> 部从 <b>${UI.esc(lib)}</b> → <b>${UI.esc(to)}</b></div>`,okText:'移动'})))return;
+  let ok=0,fail=0,failNames=[];
+  for(const gi of gis){
+    const i=ITEMS[gi];
+    try{const r=await api("/api/move",{method:"POST",body:JSON.stringify({from:lib,folder:i.folder,to,id:i.id})});
+        if(r.err){fail++;failNames.push(i.name+":"+r.err);}else ok++;}
+    catch(e){fail++;failNames.push(i.name+":"+e);}
+    toast(`移动中 ${ok+fail}/${gis.length}…`);
+  }
+  toast(`完成: ✓ ${ok}${fail?` ✗ ${fail}`:""}`,4500);
+  if(failNames.length)console.warn("移动失败:",failNames);
+  loadItems();start();
+}
+
+// 系统
+async function loadSystem(){
+  const o=$("#sysOut");o.innerHTML='<span class="spin"></span> 读取 NAS 状态…';
+  let d;try{d=await api("/api/system");}catch(e){o.textContent="出错: "+e;return;}
+  const bar=(p,c)=>`<div style="background:#0b0f17;border-radius:6px;height:10px;overflow:hidden;margin-top:4px"><div style="width:${Math.min(p,100)}%;height:100%;background:${c}"></div></div>`;
+  const mc=d.mem.pct>85?'var(--red)':d.mem.pct>65?'var(--gold)':'var(--green)';
+  let h=`<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
+    <div class="lib"><div class="n">内存</div><div class="s">${d.mem.used}/${d.mem.total} GB · 可用 ${d.mem.avail}G</div>${bar(d.mem.pct,mc)}<div class="s" style="margin-top:4px">已用 ${d.mem.pct}%</div></div>
+    <div class="lib"><div class="n">Swap</div><div class="s">${d.swap.used}/${d.swap.total} GB</div>${bar(d.swap.pct,'var(--blue)')}<div class="s" style="margin-top:4px">已用 ${d.swap.pct}%</div></div>
+    <div class="lib"><div class="n">磁盘 /volume1</div><div class="s">空闲 ${d.disk.free_tb}/${d.disk.total_tb} TB</div>${bar(d.disk.pct,d.disk.pct>90?'var(--red)':'var(--green)')}<div class="s" style="margin-top:4px">已用 ${d.disk.pct}%</div></div>
+    <div class="lib"><div class="n">115 挂载</div><div class="c" style="font-size:20px;color:${d.cd_ok?'var(--green)':'var(--red)'}">${d.cd_ok?'● 正常':'○ 异常'}</div></div></div>`;
+  h+=`<div class="card" style="margin-top:12px"><h2>Docker 容器</h2>`+d.containers.map(c=>`<div class="row" style="padding:4px 0"><span class="badge ${c.up?'g':'warn'}">${c.up?'运行':'停止'}</span>${esc(c.name)} <span class="muted">${esc(c.status)}</span></div>`).join("")+`</div>`;
+  h+=`<div class="card"><h2>占内存最多的进程</h2>`+d.procs.map(p=>`<div class="row" style="padding:3px 0"><span class="badge">${p.rss_mb} MB</span><span class="muted">${p.mem}%</span> ${esc(p.cmd)}</div>`).join("")+`</div>`;
+  o.innerHTML=h;
+}
+// 日志
+async function loadLog(){const o=$("#logOut");o.textContent="加载…";const d=await api("/api/log");o.textContent=(d.logs||[]).join("\n")||"(暂无操作记录)";}
+
+// 用户管理
+async function loadUsers(){
+  const o=$("#userList");o.innerHTML='<span class="spin"></span> 加载…';
+  const d=await api("/api/users");
+  o.innerHTML=(d.users||[]).map(u=>`<div class="item"><div class="main">
+    <div class="nm">${esc(u.name)} ${u.admin?'<span class="badge">管理员</span>':''} ${u.disabled?'<span class="badge warn">已停用</span>':''}</div>
+    <div class="meta">同时串流上限: ${u.maxsessions?u.maxsessions:'不限'}</div></div>
+    <input id="ms${u.id}" type="number" min="0" value="${u.maxsessions}" style="width:64px" title="0=不限">
+    <button class="btn ghost" onclick="updateUser('${u.id}')">存上限</button>
+    <button class="btn ghost" onclick="updateUser('${u.id}',${u.disabled?0:1})">${u.disabled?'启用':'停用'}</button>
+    ${u.admin?'':`<button class="btn danger" onclick="delUser('${u.id}','${esc(u.name)}')">删</button>`}</div>`).join("");
+}
+async function addUser(){
+  const name=$("#nuName").value.trim(),pw=$("#nuPw").value;
+  if(!name){toast("填用户名");return;}
+  const r=await api("/api/users/new",{method:"POST",body:JSON.stringify({name,pw})});
+  if(r.err)toast("出错: "+r.err);else{toast("已加用户 "+r.name);$("#nuName").value="";$("#nuPw").value="";loadUsers();}
+}
+async function updateUser(id,toggleDisabled){
+  const body={id};
+  if(toggleDisabled!==undefined) body.disabled=(toggleDisabled===1);
+  else{const el=$("#ms"+id); if(el) body.maxsessions=el.value;}
+  const r=await api("/api/users/update",{method:"POST",body:JSON.stringify(body)});
+  toast(r.ok?"已更新":"失败");loadUsers();
+}
+async function delUser(id,name){
+  if(!(await UI.modal.confirm({danger:true,title:'删除 Emby 用户',body:`<div>删除用户 <b>${UI.esc(name)}</b>?</div><div style="margin-top:8px;font-size:12px;color:var(--warn)">⚠️ 不可恢复 — 用户的播放记录、收藏全消失</div>`,okText:'删除用户',requireType:name})))return;
+  const r=await api("/api/user",{method:"DELETE",body:JSON.stringify({id})});
+  toast(r.ok?"已删用户":"失败");loadUsers();
+}
+// 设置
+async function loadConfig(){
+  const d=await api("/api/config");
+  $("#setUrl").value=d.emby_url||"";$("#setKey").value=d.api_key||"";$("#setOut").textContent="";
+  $("#setC115State").innerHTML=d.c115_cookie_set?`<span class="badge g">已设置</span> <span style="font-family:monospace;font-size:11px">${esc(d.c115_cookie_mask)}</span>`:'<span class="badge warn">未设置</span>';
+  if(!LIBS.length){const x=await api("/api/libraries");LIBS=x.libs;}
+  const m=d.c115_cid_map||{};
+  $("#setC115Cids").innerHTML=LIBS.map(l=>`<div class="row" style="margin-bottom:4px"><span class="muted" style="width:120px">${esc(l.name)}</span><input class="cidInp" data-lib="${esc(l.name)}" placeholder="115 cid (纯数字)" value="${esc(m[l.name]||'')}" style="flex:1"></div>`).join("");
+}
+async function saveConfig(which){
+  const body={};
+  if(which==='pw'){if(!$("#setPw").value){toast("填新密码");return;}body.password=$("#setPw").value;}
+  else if(which==='c115'){const v=$("#setC115Ck").value.trim();if(!v){toast("贴 cookie");return;}body.c115_cookie=v;}
+  else if(which==='c115cids'){const m={};document.querySelectorAll(".cidInp").forEach(i=>{if(i.value.trim())m[i.dataset.lib]=i.value.trim();});body.c115_cid_map=m;}
+  else{body.emby_url=$("#setUrl").value.trim();body.api_key=$("#setKey").value.trim();}
+  const r=await api("/api/config",{method:"POST",body:JSON.stringify(body)});
+  if(which==='pw'){toast("登录密码已改,下次登录用新密码");$("#setPw").value="";}
+  else if(which==='c115'){$("#setC115Ck").value="";toast("115 Cookie 已保存");loadConfig();}
+  else if(which==='c115cids'){toast("库 cid 映射已保存");}
+  else{$("#setOut").textContent=(r.emby&&r.emby.online)?`✓ 已保存,Emby 在线(${esc(r.emby.name)})`:"已保存,但 Emby 连接测试失败,检查地址/Key";start();}
+}
+async function autoCid(){
+  $("#setCidOut").innerHTML='<span class="spin"></span> 扫 115 目录…';
+  const r=await api("/api/c115/auto_cid");
+  if(!r.ok){$("#setCidOut").innerHTML=`<span class="badge warn">${esc(r.err)}</span>`;return;}
+  const m=r.matches||{};let filled=0,empty=0,multi=0;
+  document.querySelectorAll(".cidInp").forEach(i=>{
+    const lib=i.dataset.lib,hits=m[lib]||[];
+    if(hits.length===1){if(!i.value.trim()){i.value=hits[0].cid;i.style.background="#064e3b";filled++;}}
+    else if(hits.length>1){multi++;i.placeholder="多匹配,自选:"+hits.map(h=>h.path+'='+h.cid).join(' | ');i.style.background="#78350f";}
+    else{empty++;}
+  });
+  $("#setCidOut").innerHTML=`扫了 ${r.scanned} 个目录 · 自动填 <b>${filled}</b> 个 · 多匹配需手填 ${multi} · 未找到 ${empty}。<b>记得点「保存映射」</b>。`;
+}
+async function testC115(){
+  const v=$("#setC115Ck").value.trim();
+  if(v){await api("/api/config",{method:"POST",body:JSON.stringify({c115_cookie:v})});$("#setC115Ck").value="";}
+  const r=await api("/api/c115/test");
+  $("#setC115State").innerHTML=r.ok?`<span class="badge g">✓ 已连</span> UID ${esc(r.uid)} ${r.used?'· 已用 '+esc(r.used):''}`:`<span class="badge warn">✗ ${esc(r.err)}</span>`;
+}
+
+// 115 转存
+function humanSize(n){if(!n)return"";const u=["B","K","M","G","T"];let i=0;while(n>=1024&&i<4){n/=1024;i++;}return n.toFixed(1)+u[i];}
+async function loadC115(){
+  if(!LIBS.length){const x=await api("/api/libraries");LIBS=x.libs;}
+  $("#cShareLib").innerHTML=LIBS.map(l=>`<option value="${esc(l.name)}">${esc(l.name)}</option>`).join("");
+  const t=await api("/api/c115/test");
+  $("#c115Status").innerHTML=t.ok?`<span class="badge g">● 115 在线</span> UID ${esc(t.uid)}${t.used?' · 已用 '+esc(t.used):''}`:`<span class="badge warn">○ ${esc(t.err)}</span> 去 ⚙️ 设置 填 cookie`;
+}
+function parseLines(t){
+  return t.split(/\r?\n/).map(s=>s.trim()).filter(Boolean).map(line=>{
+    const parts = line.split(/[\s,，\t]+/).filter(Boolean);
+    return {url: parts[0], pwd: parts[1] || ""};
+  });
+}
+async function parseShare(){
+  const text=$("#cShareUrl").value.trim(),pwd=$("#cSharePwd").value.trim();
+  const items=parseLines(text);
+  if(!items.length){toast("贴分享链接");return;}
+  if(items.length===1){
+    $("#cShareOut").innerHTML='<span class="spin"></span> 解析中…';$("#cShareList").innerHTML="";
+    const r=await api("/api/c115/snap",{method:"POST",body:JSON.stringify({url:items[0].url,pwd:items[0].pwd||pwd})});
+    if(!r.ok){$("#cShareOut").innerHTML=`<span class="badge warn">${esc(r.err)}</span>`;return;}
+    $("#cShareOut").innerHTML=`<span class="badge g">${esc(r.share_title||r.share)}</span> · ${r.files.length} 项`;
+    $("#cShareList").innerHTML='<div style="margin-top:10px;padding:10px;background:#0f172a;border-radius:6px;max-height:260px;overflow:auto">'
+      +r.files.map(f=>`<div class="muted" style="font-size:12px;margin:2px 0">${f.is_dir?'📁':'📄'} ${esc(f.name)}${f.size?' <span style="opacity:.6">· '+humanSize(f.size)+'</span>':''}</div>`).join("")+'</div>';
+    return;
+  }
+  $("#cShareOut").innerHTML=`<span class="spin"></span> 批量预览 ${items.length} 个(约 ${Math.ceil(items.length*0.9)}s)…`;
+  $("#cShareList").innerHTML="";
+  const r=await api("/api/c115/snap",{method:"POST",body:JSON.stringify({items,pwd})});
+  $("#cShareOut").innerHTML=`预览: <span class="badge g">✓ ${r.ok_count}</span> ${r.total-r.ok_count?`<span class="badge warn">✗ ${r.total-r.ok_count}</span>`:''}`;
+  $("#cShareList").innerHTML='<div style="margin-top:10px;padding:10px;background:#0f172a;border-radius:6px;max-height:320px;overflow:auto">'
+    +r.items.map(x=>x.ok
+      ? `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge g">✓</span> ${esc(x.title||x.share)} <span style="opacity:.6">· ${x.count} 项${x.size?' · '+humanSize(x.size):''}</span></div>`
+      : `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge warn">✗</span> <span style="font-family:monospace">${esc(x.url.slice(0,60))}</span> <span style="opacity:.6">— ${esc(x.err||'')}</span></div>`
+    ).join("")+'</div>';
+}
+async function saveShare(){
+  const text=$("#cShareUrl").value.trim(),pwd=$("#cSharePwd").value.trim(),lib=$("#cShareLib").value,doScan2=$("#cShareScan").checked;
+  const items=parseLines(text);
+  if(!items.length){toast("贴分享链接");return;}
+  if(!(await UI.modal.confirm({title:'批量转存',body:`<div>把 <b>${items.length}</b> 个分享转存到 115「<b>${UI.esc(lib)}</b>」</div><div class="muted" style="font-size:12px;margin-top:4px">转完${doScan2?'会':'不会'}自动扫库</div>`,okText:'开始转存'})))return;
+  $("#cShareOut").innerHTML=`<span class="spin"></span> 批量转存 ${items.length} 项(~${Math.ceil(items.length*1.5)}s)…`;
+  $("#cShareList").innerHTML="";
+  const r=await api("/api/c115/save",{method:"POST",body:JSON.stringify({items,lib,pwd})});
+  const ok=r.ok_count||0,fail=(r.total||0)-ok;
+  $("#cShareOut").innerHTML=ok?`<span class="badge g">✓ 成功 ${ok}</span>${fail?` <span class="badge warn">✗ 失败 ${fail}</span>`:''}`:`<span class="badge warn">✗ 全部失败</span>`;
+  $("#cShareList").innerHTML='<div style="margin-top:10px;padding:10px;background:#0f172a;border-radius:6px;max-height:320px;overflow:auto">'
+    +(r.results||[]).map(x=>x.ok
+      ? `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge g">✓</span> ${esc(x.title||x.share||x.url.slice(0,40))} <span style="opacity:.6">· ${x.count} 项</span></div>`
+      : `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge warn">✗</span> <span style="font-family:monospace">${esc(x.url.slice(0,60))}</span> <span style="opacity:.6">— ${esc(x.msg||'')}</span></div>`
+    ).join("")+'</div>';
+  if(doScan2&&ok){
+    toast("转存完成,扫库中…");
+    api("/api/scan",{method:"POST",body:JSON.stringify({lib})}).then(s=>toast(`扫库完成: 新 ${s.new_count||0}, 清孤儿 ${s.orphans_cleaned||0}`,4500));
+  }
+}
+
+// 追更检查
+async function loadZhuigeng(){
+  const o=$("#zgOut");o.innerHTML='<span class="spin"></span> 查各追更剧状态(几十秒)…';
+  let d;try{d=await api("/api/zhuigeng");}catch(e){o.textContent="出错: "+e;return;}
+  const airing=d.items.filter(i=>i.airing),ended=d.items.filter(i=>!i.airing);
+  let h=`<h2>🔄 还在更新中(${airing.length})— 重点盯,去源站看新集</h2>`;
+  if(!airing.length)h+='<p class="muted">追更库里没有还在更新中的剧(都完结了)</p>';
+  h+=airing.map(i=>`<div class="item"><div class="main">
+    <div class="nm">${esc(i.name)} ${i.count<=10?'<span class="badge warn">才 '+i.count+' 集 · 八成有新</span>':''}</div>
+    <div class="meta"><span class="badge">${esc(i.lib)}</span>已有 ${i.count} 集${i.latest?' · 最新播出 '+i.latest:''}</div></div>
+    <button class="btn ghost" onclick="goScan('${esc(i.lib)}')">去扫这个库</button></div>`).join("");
+  h+=`<h2 style="margin-top:18px">✅ 已完结(${ended.length})</h2><div class="muted" style="line-height:1.9">`+ended.map(i=>esc(i.name)+`<span style="opacity:.6">(${i.count})</span>`).join(" · ")+`</div>`;
+  o.innerHTML=h;
+}
+function goScan(lib){tab('scan');const sel=$("#scanLib");if(sel)sel.value=lib;}
+
+// 缺集检查
+function fillGapLibs(){
+  const tv=LIBS.filter(l=>l.type==="tvshows");
+  $("#gapLib").innerHTML=tv.map(l=>`<option>${esc(l.name)}</option>`).join("");
+  if(tv.length) loadGapSeries();
+}
+async function loadGapSeries(){
+  const lib=$("#gapLib").value; $("#gapSeries").innerHTML='<option>加载中…</option>';
+  const d=await api("/api/items?lib="+encodeURIComponent(lib));
+  $("#gapSeries").innerHTML=(d.items||[]).map(i=>`<option value="${i.id}">${esc(i.name)}</option>`).join("")||'<option value="">(空)</option>';
+  $("#gapOut").innerHTML="";
+}
+async function checkGaps(){
+  const id=$("#gapSeries").value; if(!id){toast("先选一部剧");return;}
+  const o=$("#gapOut"); o.innerHTML='<span class="spin"></span> 分析…';
+  const d=await api("/api/gaps?id="+encodeURIComponent(id));
+  const behind=(d.tmdb_max>d.max_ep)?(d.tmdb_max-d.max_ep):0;
+  let h=`<div class="card"><b>你有 ${d.have} 集 · 你的最新 E${d.max_ep}`;
+  if(d.tmdb_max>d.max_ep) h+=` · TMDb 已知最新 E${d.tmdb_max}`;
+  h+=` · 缺 ${d.gaps} 集</b> ${d.gaps===0?'<span class="badge g">无缺口</span>':'<span class="badge warn">有缺口</span>'}`;
+  if(behind) h+=`<div style="margin-top:6px;color:var(--gold)">⚠️ 落后最新 ${behind} 集(缺 E${d.max_ep+1}–E${d.tmdb_max})</div>`;
+  h+='</div>';
+  if(d.mode==="absolute"){
+    h+=`<div class="card"><span class="badge">动漫·绝对集号</span> 按 1–最新 连续统计`;
+    if(d.gaps) h+=`<div style="margin-top:6px"><span class="badge warn">缺这些集</span> ${d.gap_list.join(", ")}</div>`;
+    else h+=` <span class="badge g">1–E${d.max_ep} 全</span>`;
+    h+='</div>';
+  } else {
+    h+=d.seasons.map(s=>`<div class="row" style="padding:4px 0"><span class="badge">第${s.season}季</span>${s.count}集 · E${s.lo}–E${s.hi} ${s.gapcount?`<span class="badge warn">缺 ${s.gapcount}: ${s.gaps.join(", ")}</span>`:'<span class="badge g">全</span>'}</div>`).join("");
+  }
+  if(d.noidx) h+=`<p class="muted">另有 ${d.noidx} 个无集号项(特典/SP/剧场版)</p>`;
+  h+='<p class="muted" style="margin-top:8px">注:动漫绝对集号按 1–最新 连续统计;"落后最新"靠 Emby 元数据,国产网剧 TMDb 常不记分集。</p>';
+  o.innerHTML=h;
+}
+async function refreshSeries(){
+  const id=$("#gapSeries").value; if(!id){toast("先选一部剧");return;}
+  toast("正在从 TMDb 刷新该剧元数据(拉最新集列表),稍等十几秒再点「检查」…",5000);
+  await api("/api/refreshseries?id="+encodeURIComponent(id));
+}
+
+function esc(s){return(s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+// 入口:cookie 是 HttpOnly JS 看不到,只能盲打 /api/me 试一下;200 = 已登录,401 = 显示登录页
+(async () => {
+  try{
+    const r = await fetch("/api/me",{credentials:'same-origin'});
+    if(r.ok){
+      const j = await r.json();
+      if(j.csrf){ CSRF = j.csrf; sessionStorage.setItem("emby_csrf", CSRF); start(); return; }
+    }
+  }catch(e){}
+  $("#login").classList.remove("hide");
+})();
+</script>
+</body></html>

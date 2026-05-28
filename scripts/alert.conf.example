@@ -1,0 +1,39 @@
+# emby-manager 告警配置 (POSIX sh 变量,会被 alert.sh 用 . 加载)
+# 用法: cp alert.conf.example alert.conf  然后填写下面的字段
+#
+# 安全提示: alert.conf 里会有密码和 Bark/Server酱 的 key,建议:
+#   chmod 600 alert.conf
+# 这样只有自己能读。
+
+# =====================================================================
+# 1) 推送通道 —— 至少配一个,全留空就只写日志不推送
+# =====================================================================
+
+# Bark (iOS 推送, https://github.com/Finb/Bark)
+# 从 Bark App 复制服务器地址(含 key)。结尾带不带 / 都行,脚本会自己处理。
+# 例: https://api.day.app/AbCdEf123456
+BARK_URL=""
+
+# Server 酱 Turbo (微信推送, https://sct.ftqq.com/)
+# 注册后复制 SendKey,拼成完整 URL:
+# 例: https://sctapi.ftqq.com/SCT123abc.send
+SCT_URL=""
+
+# Telegram bot (可选, https://core.telegram.org/bots)
+# 1. @BotFather 创建 bot 拿 token
+# 2. 给 bot 发一条消息,然后访问 https://api.telegram.org/bot<TOKEN>/getUpdates 拿 chat_id
+# 3. 拼: https://api.telegram.org/bot<TOKEN>/sendMessage?chat_id=<CHATID>
+# 脚本会自动追加 &text=...
+TG_URL=""
+
+# =====================================================================
+# 2) 工具登录 —— 用来调 /api/c115/test 测 115 cookie
+# =====================================================================
+# 这是你在 emby-manager 网页登录用的密码。留空就跳过 115 cookie 检测。
+EMBYMGR_PW=""
+
+# =====================================================================
+# 3) 服务地址(默认值通常不用改)
+# =====================================================================
+EMBYMGR_URL="http://127.0.0.1:8097"
+EMBY_URL="http://127.0.0.1:8096/emby"

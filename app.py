@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Emby 管理工具 v3 — 跑在 NAS,纯标准库,零依赖,以 root 运行。
+功能:仪表盘 / 扫描加新内容 / 一键扫全库 / 海报修复(候选或手填tmdbid) / 去重 / 删除+跨库移动 / 新建库 / 操作日志 / 系统健康
+库列表从 Emby 动态读取(新建/外部加的库自动出现)。危险操作先返回清单,前端确认后才执行。
+启动: 用 /usr/local/etc/rc.d/emby_manager.sh start   (或 sudo python3 app.py)
+
+模块拆分:配置/日志/鉴权/任务/Emby/c115/业务/Undo 全部在 lib/ 下,本文件只剩 HTTP handler 和入口。
+**re-export 段是必须的**(末尾的 `from lib.* import ...`)—— 测试用 `import app; app.qscore` 这样的方式。
+"""
+import hmac, json, os, sys, threading, time, urllib.parse, uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
+
+# 顺序敏感:config 先(其它 import 时 CFG 已 load)、logger 次、其余按需
+from lib.config import (CFG, CFG_LOCK, WEAK_PWS, HERE, CD, STRM, DOCKER, CONFIG_FILE,
+                        VE, CURRENT_SCHEMA, MIGRATIONS, _DEFAULTS,
+                        _mig_to_v2, load_cfg, save_cfg, migrate_cfg)
+from lib.logger import logger, log, LOGS, AppError, START_TIME
+from lib.safe import _safe_under
+from lib.auth import (TOKENS, TOKENS_LOCK, TOKEN_TTL, LOGIN_FAIL, LOGIN_FAIL_LOCK,
+                      LOGIN_WINDOW, LOGIN_MAX_FAIL, SAFE_METHODS,
+                      _hash_password, _verify_password,
+                      _token_new, _token_drop, _token_csrf, _token_valid,
+                      _login_allowed, _login_record_fail, _token_reaper)
+from lib.tasks import (TASKS, TASKS_LOCK, TASKS_MAX,
+                       task_new, task_set, task_get, task_cancel, task_is_cancelled,
+                       list_tasks, run_async)
+from lib.emby import (eget, epost, edelete, _url,
+                      emby_online, lib_count, fetch_libs, fetch_libs_full,
+                      remote_search, apply_match, refresh_series, list_noposter,
+                      list_users, create_user, update_user, delete_user)
+from lib import c115 as _c115
+from lib.c115 import C115_UA, C115_API, _c115_uid, c115_parse_url
+from lib.business import (LIB_LOCKS, LIB_LOCKS_GUARD, _lib_lock,
+                          qscore, all_libraries, scan_lib, _scan_lib_locked,
+                          analyze_dups, _del_folder, exec_dedup, delete_item,
+                          move_item, _move_item_locked,
+                          create_library, list_items, zhuigeng_status, series_gaps,
+                          _gb, system_info, get_config, set_config,
+                          export_config, import_config, list_strm,
+                          scan_all_async, zhuigeng_status_async,
+                          fix_poster_batch_async, delete_batch_async,
+                          move_batch_async, dedup_exec_batch_async)
+from lib import business as _biz
+from lib.undo import UNDO_FILE, UNDO_MAX, UNDO_LOCK, _undo_record, list_undo, exec_undo
+
+
+# ===== 版本缓存:_version() 读 VERSION 文件并缓存到模块级(每次 do_GET 不要 fs hit) =====
+_VERSION_CACHE = None
+def _version():
+    global _VERSION_CACHE
+    if _VERSION_CACHE is None:
+        try:
+            with open(os.path.join(HERE, "VERSION")) as f:
+                _VERSION_CACHE = f.read().strip()
+        except Exception:
+            _VERSION_CACHE = "unknown"
+    return _VERSION_CACHE
+
+
+# ===== c115 HTTP 包装:_c115_req 留在 app 模块作用域,测试 patch.object(app, "_c115_req", ...) 才能命中 =====
+_c115_req = _c115._c115_req
+
+
+def c115_test(cookie_override=None):
+    return _c115.c115_test(_c115_req, cookie_override)
+
+
+def c115_snap(share_code, receive_code):
+    return _c115.c115_snap(_c115_req, share_code, receive_code)
+
+
+def c115_receive_api(share_code, receive_code, file_ids, target_cid):
+    return _c115.c115_receive_api(_c115_req, share_code, receive_code, file_ids, target_cid)
+
+
+def c115_snap_full(url, pwd):
+    return _c115.c115_snap_full(_c115_req, url, pwd)
+
+
+def c115_list_dirs(cid="0"):
+    return _c115.c115_list_dirs(_c115_req, cid)
+
+
+def c115_auto_cid(max_depth=2):
+    return _c115.c115_auto_cid(_c115_req, fetch_libs, max_depth)
+
+
+def c115_save_to_lib(url, pwd, lib, file_ids=None):
+    return _c115.c115_save_to_lib(_c115_req, url, pwd, lib, file_ids)
+
+
+# business 里的 c115 批处理也走本模块的 c115_snap_full / c115_save_to_lib(让 patch 链能贯穿)
+def c115_snap_batch(items, default_pwd=""):
+    return _biz.c115_snap_batch(c115_snap_full, items, default_pwd)
+
+
+def c115_save_batch(items, lib, default_pwd=""):
+    return _biz.c115_save_batch(c115_save_to_lib, items, lib, default_pwd)
+
+
+def c115_snap_batch_async(tid, items, default_pwd=""):
+    return _biz.c115_snap_batch_async(tid, c115_snap_full, items, default_pwd)
+
+
+def c115_save_batch_async(tid, items, lib, default_pwd=""):
+    return _biz.c115_save_batch_async(tid, c115_save_to_lib, items, lib, default_pwd)
+
+
+# ===== HTTP =====
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Server-Version", _version())
+        # CSP:项目用了大量 inline,允许 'unsafe-inline';禁外部、frame、object;img 允许 data:/https:(海报来自 TMDb)
+        self.send_header("Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data: https:; "
+            "script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
+            "connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+    def _send(self, code, ctype, body, extra_headers=None):
+        if isinstance(body, str): body = body.encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(body)))
+        self._security_headers()
+        for k, v in (extra_headers or []):
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+    def _json(self, obj, code=200, extra_headers=None):
+        self._send(code, "application/json; charset=utf-8", json.dumps(obj, ensure_ascii=False), extra_headers)
+    def _cookie_token(self):
+        raw = self.headers.get("Cookie", "")
+        if not raw: return None
+        try:
+            c = SimpleCookie(); c.load(raw)
+            m = c.get("emby_tok")
+            return m.value if m else None
+        except Exception:
+            return None
+    def _auth(self):
+        # 优先 cookie(HttpOnly),向后兼容 X-Token header(老版前端过渡)
+        t = self._cookie_token() or self.headers.get("X-Token")
+        return _token_valid(t)
+    def _csrf_ok(self):
+        """非 safe method:校验 X-CSRF-Token 匹配 token 对应的 csrf。"""
+        if self.command in SAFE_METHODS: return True
+        t = self._cookie_token() or self.headers.get("X-Token")
+        if not t: return False
+        sent = self.headers.get("X-CSRF-Token", "")
+        expected = _token_csrf(t)
+        return bool(expected) and hmac.compare_digest(sent, expected)
+    def _body(self):
+        ln = int(self.headers.get("Content-Length", 0) or 0)
+        try: return json.loads(self.rfile.read(ln).decode("utf-8")) if ln else {}
+        except Exception: return {}
+    def do_GET(self):
+        u = urllib.parse.urlparse(self.path); path = u.path
+        if path in ("/", "/index.html"):
+            try: html = open(os.path.join(HERE, "index.html"), encoding="utf-8").read()
+            except Exception: html = "<h1>缺少 index.html</h1>"
+            return self._send(200, "text/html; charset=utf-8", html)
+        if path == "/health":
+            # 公开,不要 auth — 给外部探活(uptime kuma 之类)用
+            emb = emby_online()
+            return self._json({"status": "ok", "version": _version(), "uptime": int(time.time() - START_TIME),
+                               "emby_online": emb.get("online", False),
+                               "c115_cookie_set": bool(CFG.get("c115_cookie")),
+                               "cd_mounted": os.path.isdir(CD) and bool(os.listdir(CD) if os.path.isdir(CD) else [])})
+        if path.startswith("/api/"):
+            if not self._auth(): return self._json({"err": "未登录"}, 401)
+            q = urllib.parse.parse_qs(u.query)
+            if path == "/api/libraries":
+                _, excluded = fetch_libs_full()
+                return self._json({"emby": emby_online(), "libs": all_libraries(), "excluded": excluded})
+            if path == "/api/system": return self._json(system_info())
+            if path == "/api/noposter": return self._json({"items": list_noposter()})
+            if path == "/api/dups": return self._json(analyze_dups())
+            if path == "/api/items": return self._json(list_items(q.get("lib", [""])[0]))
+            if path == "/api/zhuigeng": return self._json(zhuigeng_status())
+            if path == "/api/gaps": return self._json(series_gaps(q.get("id", [""])[0]))
+            if path == "/api/refreshseries": return self._json(refresh_series(q.get("id", [""])[0]))
+            if path == "/api/log": return self._json({"logs": list(LOGS)[:200]})
+            if path == "/api/users":
+                with_act = q.get("withActivity", ["0"])[0] in ("1", "true", "True")
+                return self._json({"users": list_users(with_act)})
+            if path == "/api/config": return self._json(get_config())
+            if path == "/api/search": return self._json({"candidates": remote_search(q.get("id", [""])[0], q.get("name", [""])[0], q.get("type", ["Series"])[0])})
+            if path == "/api/c115/test": return self._json(c115_test())
+            if path == "/api/c115/auto_cid": return self._json(c115_auto_cid())
+            if path == "/api/task":
+                t = task_get(q.get("tid", [""])[0])
+                return self._json(t or {"err": "未知任务"}, 200 if t else 404)
+            if path == "/api/tasks/list":
+                try: lim = max(1, min(200, int(q.get("limit", ["20"])[0])))
+                except Exception: lim = 20
+                return self._json(list_tasks(lim))
+            if path == "/api/strm_list":
+                try:
+                    return self._json(list_strm(q.get("lib", [""])[0], q.get("folder", [""])[0]))
+                except ValueError as e:
+                    return self._json({"err": str(e)}, 400)
+                except AppError as e:
+                    return self._json({"err": e.user_msg}, e.status)
+            if path == "/api/config/export":
+                cfg = export_config()
+                return self._json(cfg, extra_headers=[("Content-Disposition", 'attachment; filename="emby-manager-config.json"')])
+            if path == "/api/undo_log": return self._json(list_undo())
+            if path == "/api/me":
+                # 已登录(cookie 通过 _auth) → 返当前 csrf token 给前端 sessionStorage(刷页恢复用)
+                t = self._cookie_token() or self.headers.get("X-Token")
+                return self._json({"csrf": _token_csrf(t) or "",
+                                   "username": CFG.get("username") or "admin"})
+            return self._json({"err": "未知接口"}, 404)
+        return self._send(404, "text/plain", "404")
+    def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path; b = self._body()
+        if path == "/api/login":
+            # 反代场景:client_address[0] 是反代 IP,真客户端 IP 走 X-Forwarded-For 但只在 client_address 在 trusted_proxies 时才信
+            from lib.auth import client_ip_for_login
+            remote = self.client_address[0] if self.client_address else ""
+            ip = client_ip_for_login(remote, self.headers.get("X-Forwarded-For", ""), CFG.get("trusted_proxies") or [])
+            if not _login_allowed(ip):
+                return self._json({"err": "登录失败次数过多,5 分钟后再试"}, 429)
+            pw = b.get("pw", "") or ""
+            stored = CFG.get("password_hash", "")
+            if stored and _verify_password(pw, stored):
+                t, csrf = _token_new(ip)
+                # HttpOnly + SameSite=Strict + Max-Age 7d。Secure 没设(NAS 内网/反代场景,加了 http 反而不工作);走 HTTPS 反代时建议反代加 Secure
+                cookie = "emby_tok=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d" % (t, TOKEN_TTL)
+                return self._json({"ok": True, "csrf": csrf}, extra_headers=[("Set-Cookie", cookie)])
+            _login_record_fail(ip)
+            log("登录失败 from %s" % ip)
+            return self._json({"err": "密码错误"}, 403)
+        if path == "/api/logout":
+            t = self._cookie_token() or self.headers.get("X-Token")
+            if t: _token_drop(t)
+            return self._json({"ok": True}, extra_headers=[("Set-Cookie", "emby_tok=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")])
+        if not self._auth(): return self._json({"err": "未登录"}, 401)
+        if not self._csrf_ok(): return self._json({"err": "CSRF 校验失败,刷新页面重试"}, 403)
+        try:
+            if path == "/api/scan":
+                if b.get("async"):
+                    from lib.business import scan_lib_async
+                    return self._json({"tid": run_async("scan_lib", scan_lib_async, b.get("lib"), b.get("keyword"))})
+                return self._json(scan_lib(b.get("lib"), b.get("keyword")))
+            if path == "/api/fixposter": return self._json(apply_match(b.get("id"), b.get("tmdb"), b.get("type", "Series"), b.get("name", "")))
+            if path == "/api/dedup": return self._json(exec_dedup(b.get("tmdb"), b.get("remove", [])))
+            if path == "/api/move": return self._json(move_item(b.get("from"), b.get("folder"), b.get("to"), b.get("id")))
+            if path == "/api/createlib": return self._json(create_library(b.get("name"), b.get("ctype")))
+            if path == "/api/users/new": return self._json(create_user(b.get("name"), b.get("pw")))
+            if path == "/api/users/update": return self._json(update_user(b.get("id"), b.get("maxsessions"), b.get("disabled")))
+            if path == "/api/config": return self._json(set_config(b))
+            if path == "/api/c115/snap":
+                items = b.get("items")
+                if items and b.get("async"):
+                    return self._json({"tid": run_async("c115_snap_batch", c115_snap_batch_async, items, b.get("pwd", ""))})
+                return self._json(c115_snap_batch(items, b.get("pwd", "")) if items else c115_snap_full(b.get("url", ""), b.get("pwd", "")))
+            if path == "/api/c115/save":
+                items = b.get("items")
+                if items and b.get("async"):
+                    return self._json({"tid": run_async("c115_save_batch", c115_save_batch_async, items, b.get("lib", ""), b.get("pwd", ""))})
+                return self._json(c115_save_batch(items, b.get("lib", ""), b.get("pwd", "")) if items else c115_save_to_lib(b.get("url", ""), b.get("pwd", ""), b.get("lib", ""), b.get("file_ids")))
+            if path == "/api/scan_all":
+                return self._json({"tid": run_async("scan_all", scan_all_async)})
+            # /api/zhuigeng POST async 路由暂时去除(前端未接,v3.0.x follow-up 时同步接上;
+            # 同步 GET 版仍在,zhuigeng_status_async 业务函数保留供 follow-up 直接接路由)
+            if path == "/api/fixposter_batch":
+                return self._json({"tid": run_async("fixposter_batch", fix_poster_batch_async,
+                                                   b.get("ids") or [], b.get("type", "Series"))})
+            if path == "/api/manage/delete_batch":
+                return self._json({"tid": run_async("delete_batch", delete_batch_async,
+                                                   b.get("lib", ""), b.get("items") or [])})
+            if path == "/api/manage/move_batch":
+                return self._json({"tid": run_async("move_batch", move_batch_async,
+                                                   b.get("from", ""), b.get("to", ""), b.get("items") or [])})
+            if path == "/api/dedup/exec_batch":
+                return self._json({"tid": run_async("dedup_exec_batch", dedup_exec_batch_async,
+                                                   b.get("groups") or [])})
+            if path == "/api/c115/test_candidate":
+                return self._json(c115_test(b.get("cookie")))
+            if path == "/api/c115/auto_cid":
+                return self._json({"tid": run_async("c115_auto_cid",
+                                                   lambda tid, depth=2: c115_auto_cid(depth),
+                                                   b.get("max_depth", 2))})
+            if path == "/api/config/import":
+                return self._json(import_config(b))
+            if path == "/api/task/cancel":
+                return self._json({"ok": task_cancel(b.get("tid", ""))})
+            if path == "/api/undo":
+                return self._json(exec_undo(b.get("id", "")))
+            return self._json({"err": "未知接口"}, 404)
+        except ValueError as e:  # path traversal / 参数非法
+            logger.warning("用户错误 POST %s: %s", path, e)
+            return self._json({"err": str(e)}, 400)
+        except AppError as e:
+            logger.warning("业务错误 POST %s: %s", path, e.user_msg)
+            return self._json({"err": e.user_msg}, e.status)
+        except Exception as e:
+            err_id = uuid.uuid4().hex[:8]
+            logger.exception("内部错误 POST %s [errid=%s]", path, err_id)
+            return self._json({"err": "内部错误,请把 errid 给运维: " + err_id}, 500)
+    def do_DELETE(self):
+        if not self._auth(): return self._json({"err": "未登录"}, 401)
+        if not self._csrf_ok(): return self._json({"err": "CSRF 校验失败,刷新页面重试"}, 403)
+        b = self._body()
+        p = urllib.parse.urlparse(self.path).path
+        if p == "/api/item":
+            try: return self._json(delete_item(b.get("lib"), b.get("folder"), b.get("id")))
+            except Exception as e: return self._json({"err": "%s" % e}, 500)
+        if p == "/api/user":
+            try: return self._json(delete_user(b.get("id")))
+            except Exception as e: return self._json({"err": "%s" % e}, 500)
+        return self._json({"err": "未知接口"}, 404)
+
+
+if __name__ == "__main__":
+    migrate_cfg()
+    threading.Thread(target=_token_reaper, daemon=True, name="token-reaper").start()
+    host = CFG.get("host", "127.0.0.1"); port = CFG["port"]
+    log("服务启动 @ %s:%d" % (host, port))
+    print("Emby 管理工具: http://%s:%d  (schema v%d)" % (host, port, CFG.get("schema_version", 1)), file=sys.stderr)
+    ThreadingHTTPServer((host, port), H).serve_forever()
