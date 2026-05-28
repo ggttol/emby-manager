@@ -350,6 +350,22 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
         <button class="btn" onclick="saveConfig('c115cids')">保存映射</button>
         <span id="setCidOut" class="muted" style="margin-left:6px"></span>
       </div>
+
+      <h2 style="font-size:14px;margin-top:18px">反代信任 IP（trusted_proxies)</h2>
+      <div class="muted" style="font-size:12px;margin:2px 0 6px">如果本工具跑在 Nginx/Caddy 后,需要把反代 IP 加这里,登录失败计数才会按真实客户端 IP 计(而不是反代 IP)。逗号分隔多个,留空 = 不读 X-Forwarded-For。</div>
+      <div class="row">
+        <input id="setTrustedProxies" placeholder="192.168.2.1, 10.0.0.1" style="flex:1">
+        <button class="btn" onclick="saveTrustedProxies()">保存</button>
+        <span id="setTPOut" class="muted" style="margin-left:6px"></span>
+      </div>
+
+      <h2 style="font-size:14px;margin-top:18px">配置导出 / 导入</h2>
+      <div class="muted" style="font-size:12px;margin:2px 0 6px">备份当前配置(密码 hash 和 cookie 会被替换为 <code>&lt;redacted&gt;</code>)或从 JSON 导入。schema 不匹配会被拒。</div>
+      <div class="row">
+        <button class="btn ghost" onclick="exportConfig()">📤 导出 .json</button>
+        <input type="file" id="importCfgFile" accept=".json" style="flex:1" onchange="importConfigFromFile(event)">
+        <span id="setExpImpOut" class="muted" style="margin-left:6px"></span>
+      </div>
     </div></div>
   </section>
 
@@ -1477,6 +1493,8 @@ async function scanAll(){
 async function loadNoposter(){
   $("#posterList").innerHTML='<span class="spin"></span> 扫描全库无海报条目…';
   const d=await api("/api/noposter");NOPOSTER=d.items;
+  const cnt=$("#posterCount"); if (cnt) cnt.textContent = NOPOSTER.length ? `(共 ${NOPOSTER.length})` : '';
+  const autoBtn=$("#posterAutoAll"); if (autoBtn) autoBtn.style.display = NOPOSTER.length ? '' : 'none';
   if(!NOPOSTER.length){$("#posterList").innerHTML='<p class="muted">🎉 全部条目都有海报</p>';return;}
   $("#posterList").innerHTML=NOPOSTER.map((i,idx)=>`<div class="item"><div class="main"><div class="nm">${esc(i.name)}</div>
     <div class="meta"><span class="badge">${esc(i.lib)}</span><span class="badge">${i.type}</span>tmdb:${i.tmdb||"无"} · 📁${esc(i.folder)}</div></div>
@@ -1487,13 +1505,45 @@ async function fixPoster(idx){
   box.classList.remove("hide");box.innerHTML='<span class="spin"></span> 按「'+esc(name)+'」重搜 TMDb…';
   const d=await api(`/api/search?id=${i.id}&type=${i.type}&name=${encodeURIComponent(name)}`);
   let h='<div class="muted" style="margin-bottom:4px">选正确的一条(点一下=绑定+拉海报):</div>';
+  // 92×138 大缩略图(默认 46×68 太小,候选海报常常细节看不清)
   h+=(d.candidates||[]).map(c=>`<div class="cand" onclick='applyPoster(${idx},${JSON.stringify(c.tmdb)})'>
-    ${c.img?`<img src="${c.img}">`:'<div style="width:46px;height:68px;background:#222;border-radius:4px"></div>'}
+    ${c.img?`<img src="${esc(c.img)}" style="width:92px;height:138px;object-fit:cover;border-radius:4px;background:#222" loading="lazy">`:'<div style="width:92px;height:138px;background:#222;border-radius:4px"></div>'}
     <div><div class="nm">${esc(c.name||"?")} ${c.year||""} ${c.img?'<span class="badge g">有海报</span>':'<span class="badge warn">无海报</span>'}</div>
     <div class="meta">tmdb:${c.tmdb} · ${esc(c.overview||"")}</div></div></div>`).join("");
   if(!(d.candidates||[]).length)h+='<p class="muted">没搜到候选</p>';
   h+=`<div class="row" style="margin-top:8px">或手动填 tmdbid: <input id="mtmdb${idx}" style="width:130px" placeholder="如 252135"><button class="btn" onclick="applyPoster(${idx},document.getElementById('mtmdb${idx}').value.trim())">绑定</button></div>`;
   box.innerHTML=h;
+}
+// 全部自动匹配:按 type 分组(Series/Movie)各起一个 async 任务
+async function posterAutoAll(){
+  if (!NOPOSTER.length) return;
+  const series = NOPOSTER.filter(i=>i.type==='Series');
+  const movies = NOPOSTER.filter(i=>i.type==='Movie');
+  const body = `<div>把 <b>${NOPOSTER.length}</b> 个无海报条目交给后端自动匹配:</div>
+    <div class="muted" style="font-size:12px;margin-top:6px">· 剧集 ${series.length} 个 / 电影 ${movies.length} 个</div>
+    <div class="muted" style="font-size:12px;margin-top:4px">后端按文件夹名搜 TMDb,只接受名字匹配且带海报的候选;失败的进 results。</div>
+    <div class="muted" style="font-size:12px;margin-top:4px;color:var(--warn)">⚠️ 后端对每个 item sleep 0.5s 防频控,总耗时约 ${Math.ceil(NOPOSTER.length*0.6)} 秒。</div>`;
+  if(!(await UI.modal.confirm({title:'批量自动修海报',body,okText:'开始'}))) return;
+  const launch = async (ids, typ, lbl)=>{
+    if (!ids.length) return;
+    const r = await api('/api/fixposter_batch', {method:'POST', body:JSON.stringify({ids, type:typ, async:true})});
+    if (r && r.tid){
+      UI.tasks.start(r.tid, {
+        label: lbl,
+        onDone: (t)=>{
+          const res = t.result || {};
+          const ok = res.ok_count||0, fail = (res.total||0)-ok;
+          UI.toast(`${lbl}: ✓ ${ok}${fail?` ✗ ${fail}`:''}`, {
+            type: fail ? 'warn' : 'ok', ms: 7000,
+            action: fail ? {label:'失败详情', fn:()=>UI.modal.alert({title:'未匹配条目',body:(res.results||[]).filter(x=>!x.ok).map(x=>'· '+UI.esc(x.name||x.id)+': '+UI.esc(x.err||'')).join('<br>'), copyable:true})} : null
+          });
+          loadNoposter();
+        }
+      });
+    } else UI.toast(lbl+' 启动失败: '+ (r&&r.err||'未知'), {type:'error'});
+  };
+  await launch(series.map(i=>i.id), 'Series', '剧集海报');
+  await launch(movies.map(i=>i.id), 'Movie', '电影海报');
 }
 async function applyPoster(idx,tmdb){
   if(!tmdb){toast("没有 tmdbid");return;}
@@ -1700,6 +1750,12 @@ async function loadConfig(){
   if(!LIBS.length){const x=await api("/api/libraries");LIBS=x.libs;}
   const m=d.c115_cid_map||{};
   $("#setC115Cids").innerHTML=LIBS.map(l=>`<div class="row" style="margin-bottom:4px"><span class="muted" style="width:120px">${esc(l.name)}</span><input class="cidInp" data-lib="${esc(l.name)}" placeholder="115 cid (纯数字)" value="${esc(m[l.name]||'')}" style="flex:1"></div>`).join("");
+  // 反代信任 IP — 后端可能不返该字段,fallback 空
+  const tpEl = $("#setTrustedProxies");
+  if (tpEl){
+    const tp = d.trusted_proxies;
+    tpEl.value = Array.isArray(tp) ? tp.join(', ') : (typeof tp === 'string' ? tp : '');
+  }
   // 粘 cookie → 立即(不写 CFG)调 test_candidate 校验
   const ck = $("#setC115Ck");
   if (ck && !ck._pasteWired){
@@ -1732,10 +1788,8 @@ async function saveConfig(which){
   else if(which==='c115cids'){toast("库 cid 映射已保存");}
   else{$("#setOut").textContent=(r.emby&&r.emby.online)?`✓ 已保存,Emby 在线(${esc(r.emby.name)})`:"已保存,但 Emby 连接测试失败,检查地址/Key";start();}
 }
-async function autoCid(){
-  $("#setCidOut").innerHTML='<span class="spin"></span> 扫 115 目录…';
-  const r=await api("/api/c115/auto_cid");
-  if(!r.ok){$("#setCidOut").innerHTML=`<span class="badge warn">${esc(r.err)}</span>`;return;}
+function _autoCidApply(r){
+  if(!r.ok){$("#setCidOut").innerHTML=`<span class="badge warn">${esc(r.err||'失败')}</span>`;return;}
   const m=r.matches||{};let filled=0,empty=0,multi=0;
   document.querySelectorAll(".cidInp").forEach(i=>{
     const lib=i.dataset.lib,hits=m[lib]||[];
@@ -1745,11 +1799,111 @@ async function autoCid(){
   });
   $("#setCidOut").innerHTML=`扫了 ${r.scanned} 个目录 · 自动填 <b>${filled}</b> 个 · 多匹配需手填 ${multi} · 未找到 ${empty}。<b>记得点「保存映射」</b>。`;
 }
+async function autoCid(){
+  $("#setCidOut").innerHTML='<span class="spin"></span> 启动后端扫 115 目录…';
+  // 优先走 async(POST + async:true → {tid}),失败降级到老 GET 同步
+  let r;
+  try { r = await api('/api/c115/auto_cid', {method:'POST', body:JSON.stringify({async:true})}); }
+  catch(e){ r = null; }
+  if (r && r.tid){
+    UI.tasks.start(r.tid, {
+      label: '自动检测 115 cid',
+      onDone: (t)=>{
+        const res = t.result || {};
+        if (!res.ok){ $("#setCidOut").innerHTML = `<span class="badge warn">${esc(res.err||'失败')}</span>`; return; }
+        _autoCidApply(res);
+      }
+    });
+    $("#setCidOut").innerHTML = '<span class="spin"></span> 后台扫描中…(完成自动填表)';
+    return;
+  }
+  // 同步降级
+  const r2 = await api("/api/c115/auto_cid");
+  _autoCidApply(r2);
+}
 async function testC115(){
   const v=$("#setC115Ck").value.trim();
   if(v){await api("/api/config",{method:"POST",body:JSON.stringify({c115_cookie:v})});$("#setC115Ck").value="";}
   const r=await api("/api/c115/test");
   $("#setC115State").innerHTML=r.ok?`<span class="badge g">✓ 已连</span> UID ${esc(r.uid)} ${r.used?'· 已用 '+esc(r.used):''}`:`<span class="badge warn">✗ ${esc(r.err)}</span>`;
+}
+
+async function saveTrustedProxies(){
+  const raw = ($("#setTrustedProxies").value||'').trim();
+  const out = $("#setTPOut");
+  // 逗号 / 空格 / 中文逗号 都允许
+  const list = raw ? raw.split(/[,，\s]+/).filter(Boolean) : [];
+  out.innerHTML = '<span class="spin"></span> 保存…';
+  try {
+    const r = await api('/api/config', {method:'POST', body:JSON.stringify({trusted_proxies:list})});
+    if (r && r.err){ out.innerHTML = `<span class="badge warn">${esc(r.err)}</span>`; return; }
+    // 后端 set_config 当前不接 trusted_proxies — changed 数组里就不会有它
+    const changed = (r && r.changed) || [];
+    const hit = changed.some(x => /反代|trusted|代理/.test(x));
+    if (!hit){
+      // 后端没认 — 提示手编 config.json
+      out.innerHTML = `<span class="badge warn">后端未接此字段</span>`;
+      UI.toast('后端 set_config 当前不接 trusted_proxies — 请手动编辑 config.json 后重启服务', {type:'warn', ms:6000});
+    } else {
+      out.innerHTML = `<span class="badge g">✓ 已存 ${list.length} 个</span>`;
+      UI.toast('已保存 trusted_proxies', {type:'ok'});
+    }
+  } catch(e){ out.innerHTML = `<span class="badge warn">${esc(String(e))}</span>`; }
+}
+
+async function exportConfig(){
+  const out = $("#setExpImpOut");
+  out.innerHTML = '<span class="spin"></span> 导出中…';
+  try {
+    const r = await fetch('/api/config/export', {credentials:'same-origin'});
+    if (!r.ok){ out.innerHTML = `<span class="badge warn">HTTP ${r.status}</span>`; return; }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `emby-manager-config-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+    out.innerHTML = `<span class="badge g">✓ 已下载</span>`;
+    UI.toast('配置已导出(敏感字段已 redacted)', {type:'ok'});
+  } catch(e){ out.innerHTML = `<span class="badge warn">${esc(String(e))}</span>`; }
+}
+
+async function importConfigFromFile(ev){
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  const out = $("#setExpImpOut");
+  out.innerHTML = '<span class="spin"></span> 读文件…';
+  let cfg;
+  try {
+    const text = await file.text();
+    cfg = JSON.parse(text);
+  } catch(e){
+    out.innerHTML = `<span class="badge warn">JSON 解析失败</span>`;
+    UI.toast('文件不是合法 JSON', {type:'error'}); ev.target.value=''; return;
+  }
+  // 预览(截前 60 行 / 1.5K 字符以避撑爆 modal)
+  let preview = JSON.stringify(cfg, null, 2);
+  if (preview.length > 1500) preview = preview.slice(0, 1500) + '\n…(还有 ' + (preview.length - 1500) + ' 字符)';
+  const ok = await UI.modal.confirm({
+    danger: true,
+    title: '导入配置',
+    body: `<div>即将合并以下字段到当前 config:</div>
+      <pre style="margin-top:8px;padding:8px;background:#0b0f17;border:1px solid var(--line);border-radius:6px;max-height:300px;overflow:auto;font-size:11px;white-space:pre-wrap">${esc(preview)}</pre>
+      <div class="muted" style="font-size:11px;margin-top:6px">受保护字段(password_hash / c115_cookie / schema_version / username / last_password_change_at)会被跳过。</div>`,
+    okText: '导入',
+    requireType: '导入'
+  });
+  ev.target.value = '';
+  if (!ok){ out.innerHTML = ''; return; }
+  out.innerHTML = '<span class="spin"></span> 导入…';
+  try {
+    const r = await api('/api/config/import', {method:'POST', body:JSON.stringify({cfg, confirm:true})});
+    if (r && r.err){ out.innerHTML = `<span class="badge warn">${esc(r.err)}</span>`; return; }
+    const applied = (r.applied||[]).length, skipped = (r.skipped_protected||[]).length;
+    out.innerHTML = `<span class="badge g">✓ 应用 ${applied}</span>${skipped?` <span class="badge warn">跳过保护 ${skipped}</span>`:''}`;
+    UI.toast(`已导入 ${applied} 字段${skipped?` · 跳过 ${skipped} 受保护`:''}`, {type:'ok', ms:5000});
+    loadConfig();
+  } catch(e){ out.innerHTML = `<span class="badge warn">${esc(String(e))}</span>`; }
 }
 
 // 115 转存
@@ -1775,8 +1929,20 @@ async function parseShare(){
     const r=await api("/api/c115/snap",{method:"POST",body:JSON.stringify({url:items[0].url,pwd:items[0].pwd||pwd})});
     if(!r.ok){$("#cShareOut").innerHTML=`<span class="badge warn">${esc(r.err)}</span>`;return;}
     $("#cShareOut").innerHTML=`<span class="badge g">${esc(r.share_title||r.share)}</span> · ${r.files.length} 项`;
-    $("#cShareList").innerHTML='<div style="margin-top:10px;padding:10px;background:#0f172a;border-radius:6px;max-height:260px;overflow:auto">'
-      +r.files.map(f=>`<div class="muted" style="font-size:12px;margin:2px 0">${f.is_dir?'📁':'📄'} ${esc(f.name)}${f.size?' <span style="opacity:.6">· '+humanSize(f.size)+'</span>':''}</div>`).join("")+'</div>';
+    // 单链接:文件前加 checkbox,顶部全选/反选;saveShare 单链接走 file_ids 子集
+    const fileRows = r.files.map((f,fi)=>{
+      const fid = f.id || f.fid || f.file_id || '';
+      const ck = fid ? `<input type="checkbox" class="cFileCk" data-id="${esc(String(fid))}" checked style="margin-right:6px;vertical-align:middle">` : '<span style="display:inline-block;width:18px"></span>';
+      return `<div class="muted" style="font-size:12px;margin:2px 0">${ck}${f.is_dir?'📁':'📄'} ${esc(f.name)}${f.size?' <span style="opacity:.6">· '+humanSize(f.size)+'</span>':''}</div>`;
+    }).join("");
+    const tools = `<div class="row" style="margin-bottom:6px;font-size:12px"><button class="btn ghost" style="padding:3px 10px;font-size:12px" onclick="cShareToggleAll(true)">全选</button>
+      <button class="btn ghost" style="padding:3px 10px;font-size:12px" onclick="cShareToggleAll(false)">全不选</button>
+      <button class="btn ghost" style="padding:3px 10px;font-size:12px" onclick="cShareToggleAll('invert')">反选</button>
+      <span class="muted" id="cShareSelCnt">已选 ${r.files.filter(f=>f.id||f.fid||f.file_id).length}/${r.files.length}</span></div>`;
+    $("#cShareList").innerHTML='<div style="margin-top:10px;padding:10px;background:#0f172a;border-radius:6px;max-height:320px;overflow:auto">'
+      +tools+fileRows+'</div>';
+    // 选中数计数
+    document.querySelectorAll('.cFileCk').forEach(c=>c.addEventListener('change', cShareUpdateSelCnt));
     return;
   }
   $("#cShareOut").innerHTML=`<span class="spin"></span> 批量预览 ${items.length} 个(约 ${Math.ceil(items.length*0.9)}s)…`;
@@ -1789,10 +1955,45 @@ async function parseShare(){
       : `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge warn">✗</span> <span style="font-family:monospace">${esc(x.url.slice(0,60))}</span> <span style="opacity:.6">— ${esc(x.err||'')}</span></div>`
     ).join("")+'</div>';
 }
+function cShareToggleAll(mode){
+  document.querySelectorAll('.cFileCk').forEach(c=>{
+    if (mode === 'invert') c.checked = !c.checked;
+    else c.checked = !!mode;
+  });
+  cShareUpdateSelCnt();
+}
+function cShareUpdateSelCnt(){
+  const all = document.querySelectorAll('.cFileCk');
+  const on = document.querySelectorAll('.cFileCk:checked');
+  const el = document.querySelector('#cShareSelCnt');
+  if (el) el.textContent = `已选 ${on.length}/${all.length}`;
+}
 async function saveShare(){
   const text=$("#cShareUrl").value.trim(),pwd=$("#cSharePwd").value.trim(),lib=$("#cShareLib").value,doScan2=$("#cShareScan").checked;
   const items=parseLines(text);
   if(!items.length){toast("贴分享链接");return;}
+  // 单链接 + 用户已勾选了部分文件 → 走单链接 file_ids API
+  if (items.length === 1){
+    const cks = document.querySelectorAll('.cFileCk');
+    if (cks.length){
+      const selected = Array.from(document.querySelectorAll('.cFileCk:checked')).map(c=>c.dataset.id);
+      if (!selected.length){ toast('至少勾一个文件'); return; }
+      if (selected.length < cks.length){
+        // 子集模式:走单链接 + file_ids
+        if(!(await UI.modal.confirm({title:'转存选中文件',body:`<div>把选中的 <b>${selected.length}</b>/${cks.length} 个文件转到 115「<b>${UI.esc(lib)}</b>」</div><div class="muted" style="font-size:12px;margin-top:4px">转完${doScan2?'会':'不会'}自动扫库</div>`,okText:'开始转存'})))return;
+        $("#cShareOut").innerHTML=`<span class="spin"></span> 转存 ${selected.length} 个文件…`;
+        const r1 = await api('/api/c115/save', {method:'POST', body:JSON.stringify({url:items[0].url, pwd:items[0].pwd||pwd, lib, file_ids:selected})});
+        if (r1 && r1.err){ $("#cShareOut").innerHTML = `<span class="badge warn">✗ ${esc(r1.err)}</span>`; return; }
+        $("#cShareOut").innerHTML = r1 && r1.ok!==false ? `<span class="badge g">✓ 已转 ${r1.count||selected.length} 项</span>` : `<span class="badge warn">${esc((r1&&r1.msg)||'转存失败')}</span>`;
+        if(doScan2 && r1 && r1.ok!==false){
+          toast('转存完成,扫库中…');
+          api("/api/scan",{method:"POST",body:JSON.stringify({lib})}).then(s=>toast(`扫库完成: 新 ${s.new_count||0}, 清孤儿 ${s.orphans_cleaned||0}`,4500));
+        }
+        return;
+      }
+      // 全选 → 走原批量(等效)
+    }
+  }
   if(!(await UI.modal.confirm({title:'批量转存',body:`<div>把 <b>${items.length}</b> 个分享转存到 115「<b>${UI.esc(lib)}</b>」</div><div class="muted" style="font-size:12px;margin-top:4px">转完${doScan2?'会':'不会'}自动扫库</div>`,okText:'开始转存'})))return;
   $("#cShareOut").innerHTML=`<span class="spin"></span> 批量转存 ${items.length} 项(~${Math.ceil(items.length*1.5)}s)…`;
   $("#cShareList").innerHTML="";
