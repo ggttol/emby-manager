@@ -192,21 +192,22 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   <section id="dash">
     <div id="dashHealth"></div>
     <div class="card">
-      <div class="row">
-        <button class="btn" id="scanAllBtn" onclick="scanAll()">➕ 一键扫全库(收新内容)</button>
-        <button class="btn ok" onclick="createLibDlg()">🆕 新建库</button>
-        <span id="scanAllOut" class="muted"></span>
+      <div class="row"><button class="btn" id="scanAllBtn" onclick="scanAll()">➕ 一键扫全库(收新内容)</button><span id="scanAllOut" class="muted"></span></div>
+      <div class="row" style="margin-top:12px">
+        <input id="newLibName" placeholder="新库名(= 115/strm 文件夹名)" style="flex:1;min-width:170px">
+        <select id="newLibType"><option value="tvshows">剧集类(tvshows)</option><option value="movies">电影类(movies)</option></select>
+        <button class="btn ok" onclick="createLib()">🆕 新建库</button>
       </div>
+      <div id="newLibOut" class="muted" style="margin-top:6px"></div>
     </div>
     <div class="grid" id="libGrid"></div>
-    <div id="dashExcluded" style="margin-top:8px"></div>
   </section>
 
   <section id="scan" class="hide">
     <div class="card"><h2>扫描某个库的新内容</h2>
       <p class="muted" style="margin-bottom:10px">往 115 对应文件夹放好带 <code>[tmdbid-XXX]</code> 的内容后,选库扫描 → 自动生成 strm + 刷新刮削。</p>
       <div class="row" style="align-items:flex-start">
-        <div id="scanLibCombo" style="width:240px"></div>
+        <select id="scanLib" style="min-width:160px"></select>
         <input id="scanKw" placeholder="片名关键词(留空=扫整库;动漫等大库建议填)" style="flex:1;min-width:160px" onkeydown="if(event.key=='Enter')doScan()">
         <button class="btn" id="scanBtn" onclick="doScan()">开始扫描</button>
       </div>
@@ -265,7 +266,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   <section id="manage" class="hide">
     <div class="card"><h2>删除 / 跨库移动</h2>
       <div class="row" style="align-items:flex-start">
-        <div id="mgLibCombo" style="width:240px"></div>
+        <select id="mgLib" onchange="loadItems()" style="min-width:160px"></select>
         <span class="muted" id="mgCount"></span>
       </div>
       <input id="mgFilter" placeholder="过滤(支持 tmdb:123 / 年:2024 / 路径:S01,默认搜片名+文件夹)" style="width:100%;margin-top:10px" oninput="renderItems()">
@@ -273,7 +274,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
         <label class="muted" style="white-space:nowrap"><input type="checkbox" id="ckAll" onchange="toggleAll()"> 全选(当前过滤结果)</label>
         <span class="muted" id="selCnt">选中 0</span>
         <span style="flex:1"></span>
-        <div id="mgBatchToCombo" style="width:200px"></div>
+        <select id="mgBatchTo" style="min-width:140px"></select>
         <button class="btn ghost" onclick="doMoveBatch()">批量移动</button>
         <button class="btn danger" onclick="doDeleteBatch()">批量删除</button>
       </div>
@@ -315,12 +316,11 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   </section>
 
   <section id="users" class="hide">
-    <div class="card">
-      <div class="row">
-        <h2>👥 Emby 用户</h2>
-        <span style="flex:1"></span>
-        <button class="btn ok" onclick="addUserDlg()">➕ 新建用户</button>
-        <button class="btn ghost" onclick="loadUsers()">刷新</button>
+    <div class="card"><h2>👥 Emby 用户 <button class="btn ghost" onclick="loadUsers()">刷新</button></h2>
+      <div class="row" style="margin:8px 0">
+        <input id="nuName" placeholder="新用户名" style="flex:1;min-width:120px">
+        <input id="nuPw" type="password" placeholder="密码(可留空)" style="min-width:130px">
+        <button class="btn ok" onclick="addUser()">添加用户</button>
       </div>
       <p class="muted">⚠️ 「同时串流上限」需 Emby Premiere 才会真生效;0 = 不限。</p>
       <div id="userList" style="margin-top:8px"></div></div>
