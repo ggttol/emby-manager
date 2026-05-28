@@ -750,6 +750,94 @@ def dedup_exec_batch_async(tid, groups):
     return {"results": results, "ok_count": ok_n, "total": len(results)}
 
 
+def add_new_pipeline_async(tid, items, default_lib, save_to_lib_fn):
+    """一条龙加新资源 pipeline:批量 receive → scan 涉及库 → 等刮削 → 海报+重复检查 → 聚合 report。
+
+    items: [{url, pwd, lib?}]  默认 lib = default_lib
+    save_to_lib_fn: 注入 app 模块的 c115_save_to_lib(让 patch 链能贯穿测试 / 走 app._c115_req)
+    返:{shares, libs_scanned, noposter, dups}
+    """
+    report = {"shares": [], "libs_scanned": {}, "noposter": [], "dups": [], "dups_review": []}
+    affected_libs = set()
+    # 总步数:N 个分享 + M 个库扫 + 1 刮削等待 + 1 海报 + 1 重复 — 但实时只知道前 N+1,后面边走边更
+    task_set(tid, total=len(items) + 1, status_text="开始一条龙…")
+    # Phase 1:逐个 receive
+    for i, it in enumerate(items):
+        if task_is_cancelled(tid): break
+        url = (it.get("url") or "").strip()
+        pwd = (it.get("pwd") or "").strip()
+        lib = it.get("lib") or default_lib
+        if not url:
+            continue
+        affected_libs.add(lib)
+        task_set(tid, progress=i, status_text="转存 " + url[-40:])
+        try:
+            r = save_to_lib_fn(url, pwd, lib)
+            report["shares"].append({
+                "url": url, "lib": lib,
+                "ok": bool(r.get("ok")),
+                "title": r.get("title") or r.get("share") or url[-30:],
+                "count": r.get("count", 0),
+                "msg": r.get("msg") or r.get("err") or ""
+            })
+        except Exception as e:
+            report["shares"].append({"url": url, "lib": lib, "ok": False, "title": url[-30:], "count": 0, "msg": str(e)})
+        time.sleep(0.8)  # anti-115-rate-limit
+    # 更新 total 现在能算了
+    libs_list = sorted(affected_libs)
+    new_total = len(items) + len(libs_list) + 3  # +刮削等待+海报+重复
+    task_set(tid, total=new_total)
+    # Phase 2:扫各涉及 lib
+    for j, lib in enumerate(libs_list):
+        if task_is_cancelled(tid): break
+        task_set(tid, progress=len(items) + j, status_text="扫库 " + lib)
+        try:
+            r = scan_lib(lib)
+            report["libs_scanned"][lib] = {
+                "new_count": r.get("new_count", 0),
+                "orphans_cleaned": r.get("orphans_cleaned", 0),
+                "matched": r.get("matched", 0),
+                "attention": r.get("attention") or [],
+            }
+        except Exception as e:
+            report["libs_scanned"][lib] = {"err": str(e)}
+    # Phase 3:等 Emby 刮削(给海报检查时间)
+    if libs_list and not task_is_cancelled(tid):
+        task_set(tid, progress=len(items) + len(libs_list), status_text="等 Emby 刮削 8s…")
+        for _ in range(8):
+            if task_is_cancelled(tid): break
+            time.sleep(1)
+    # Phase 4:海报检查(过滤涉及库)
+    if not task_is_cancelled(tid):
+        task_set(tid, progress=len(items) + len(libs_list) + 1, status_text="检查海报")
+        try:
+            np_all = list_noposter()
+            report["noposter"] = [x for x in np_all if x.get("lib") in affected_libs]
+        except Exception as e:
+            report["noposter_err"] = str(e)
+    # Phase 5:重复检查(只标涉及库的新 dup)
+    if not task_is_cancelled(tid):
+        task_set(tid, progress=len(items) + len(libs_list) + 2, status_text="检查重复")
+        try:
+            d = analyze_dups()
+            dups = d.get("dups") or []
+            review = d.get("review") or []
+            # 过滤:只显示涉及库的(keep 或 remove 任一在 affected_libs)
+            def involves(group):
+                rows = group.get("rows") or ([group.get("keep")] if group.get("keep") else []) + (group.get("remove") or [])
+                return any((r and r.get("lib") in affected_libs) for r in rows)
+            report["dups"] = [g for g in dups if involves(g)][:30]
+            report["dups_review"] = [g for g in review if involves(g)][:30]
+        except Exception as e:
+            report["dups_err"] = str(e)
+    task_set(tid, progress=new_total, status_text="完成")
+    ok_n = sum(1 for s in report["shares"] if s["ok"])
+    log("一条龙: 转存 ✓%d/共%d → 扫 %d 个库 → 无海报 %d → 重复 %d 组" % (
+        ok_n, len(report["shares"]), len(libs_list),
+        len(report["noposter"]), len(report["dups"]) + len(report["dups_review"])))
+    return report
+
+
 def scan_lib_async(tid, name, keyword=None):
     """scan_lib 的异步包装:进度通过 task_set,扫到一半可取消(checkpoint 在文件夹间)。"""
     L = fetch_libs()

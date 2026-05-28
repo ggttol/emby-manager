@@ -227,8 +227,10 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
         <select id="cShareLib" style="flex:1"></select>
         <label class="muted" style="white-space:nowrap"><input type="checkbox" id="cShareScan" checked> 转完立刻扫库</label></div>
       <div class="row"><button class="btn ghost" onclick="parseShare()">🔍 先看文件</button>
-        <button class="btn danger" onclick="saveShare()">⬇️ 全部转存</button>
+        <button class="btn" onclick="wizardAddNew()" style="background:#7c3aed">🪄 一条龙(转存+扫库+海报+查重)</button>
+        <button class="btn danger" onclick="saveShare()">⬇️ 只转存</button>
         <span id="cShareOut" class="muted" style="margin-left:6px"></span></div>
+      <div class="muted" style="font-size:12px;margin-top:6px">🪄 一条龙 = 转存所有分享 → 自动扫"转到库" → 等 8s Emby 刮削 → 检查涉及库的无海报项 / 跟现有库重复 → 弹出报告(可一键修海报/去重)。最适合"我从群里抓了一批新片"场景。</div>
       <div id="cShareList"></div>
     </div>
   </section>
@@ -2217,6 +2219,126 @@ async function saveShare(){
     toast("转存完成,扫库中…");
     api("/api/scan",{method:"POST",body:JSON.stringify({lib})}).then(s=>toast(`扫库完成: 新 ${s.new_count||0}, 清孤儿 ${s.orphans_cleaned||0}`,4500));
   }
+}
+
+// ===== 🪄 一条龙加新资源 =====
+async function wizardAddNew(){
+  const text=$("#cShareUrl").value.trim();
+  const pwd=$("#cSharePwd").value.trim();
+  const lib=$("#cShareLib").value;
+  const items=parseLines(text);
+  if(!items.length){UI.toast("贴分享链接",{type:'warn'});return;}
+  if(!lib){UI.toast("先选目标库",{type:'warn'});return;}
+  // 给每条 item 注入默认 lib 和 pwd
+  const payload = items.map(it=>({url:it.url, pwd:it.pwd||pwd, lib:lib}));
+  const ok = await UI.modal.confirm({
+    title:'🪄 一条龙加新资源',
+    body:`<div>将串行做这些事:</div>
+<ol style="margin:10px 0 10px 20px;line-height:1.8">
+  <li>批量转存 <b>${items.length}</b> 个分享到 115「<b>${UI.esc(lib)}</b>」</li>
+  <li>转完自动扫该库</li>
+  <li>等 8 秒 Emby 刮削</li>
+  <li>检查该库的无海报项</li>
+  <li>检查跟现有库的重复</li>
+  <li>弹出完整报告(可一键修海报/去重)</li>
+</ol>
+<div class="muted" style="font-size:12px">大约耗时 ${items.length*3+15}-${items.length*5+20} 秒,可在任务中心取消。</div>`,
+    okText:'🪄 开始一条龙'
+  });
+  if(!ok)return;
+  try{
+    const r = await api('/api/wizard/add_new', {method:'POST', body:JSON.stringify({items:payload, default_lib:lib, async:true})});
+    if(r.err){UI.toast('启动失败:'+r.err,{type:'error'});return;}
+    if(!r.tid){UI.toast('后端未返 tid',{type:'error'});return;}
+    UI.tasks.start(r.tid, {
+      label:'🪄 一条龙(转存+扫+海报+查重)',
+      onDone:(t)=>{
+        const rep = t.result || {};
+        showWizardReport(rep);
+        start();  // 刷库列表
+      }
+    });
+    UI.toast('已启动,看 🔔 任务中心进度;完成会弹报告',{type:'info', ms:4000});
+  }catch(e){UI.toast('请求失败:'+e,{type:'error'});}
+}
+
+function showWizardReport(rep){
+  const sh = rep.shares || [];
+  const okN = sh.filter(s=>s.ok).length, failN = sh.length - okN;
+  const libs = rep.libs_scanned || {};
+  const np = rep.noposter || [];
+  const dups = rep.dups || []; const review = rep.dups_review || [];
+  const dupsTotal = dups.length + review.length;
+
+  let html = '';
+
+  // 1. 转存结果
+  html += `<div class="card" style="margin-bottom:12px">
+    <h2 style="font-size:14px">📦 转存 <span class="badge g">✓ ${okN}</span>${failN?`<span class="badge warn">✗ ${failN}</span>`:''}</h2>`;
+  html += '<div style="margin-top:6px;font-size:12px">';
+  sh.forEach(s=>{
+    if(s.ok) html += `<div style="margin:3px 0"><span class="badge g">✓</span> ${UI.esc(s.title)} <span class="muted">→ ${UI.esc(s.lib)} · ${s.count} 项</span></div>`;
+    else html += `<div style="margin:3px 0"><span class="badge warn">✗</span> ${UI.esc(s.title)} <span class="muted">— ${UI.esc(s.msg||'')}</span></div>`;
+  });
+  html += '</div></div>';
+
+  // 2. 扫库结果
+  html += `<div class="card" style="margin-bottom:12px"><h2 style="font-size:14px">🔍 扫库</h2><div style="font-size:13px">`;
+  for (const lib in libs){
+    const x = libs[lib];
+    if (x.err) html += `<div style="margin:3px 0">⚠️ ${UI.esc(lib)} — ${UI.esc(x.err)}</div>`;
+    else html += `<div style="margin:3px 0"><b>${UI.esc(lib)}</b>: 新 ${x.new_count} strm${x.orphans_cleaned?`, 清孤儿 ${x.orphans_cleaned}`:''}${x.attention&&x.attention.length?`, ⚠️ ${x.attention.length} 个无 tmdbid 待看`:''}</div>`;
+  }
+  html += '</div></div>';
+
+  // 3. 海报检查
+  html += `<div class="card" style="margin-bottom:12px"><h2 style="font-size:14px">🖼️ 涉及库的无海报项 (${np.length})`;
+  if (np.length) html += ` <button class="btn ghost" onclick="UI.tasks.openDrawer&&UI.tasks.openDrawer();posterFromWizard(${JSON.stringify(np.map(x=>x.id)).replace(/"/g,'&quot;')})">一键全部自动修</button>`;
+  html += `</h2><div style="font-size:13px;max-height:200px;overflow:auto">`;
+  if (!np.length) html += '<p class="muted">✓ 涉及库的所有项目都有海报</p>';
+  else np.slice(0, 30).forEach(x=>{
+    html += `<div style="margin:3px 0"><span class="badge warn">无海报</span> ${UI.esc(x.name)} <span class="muted">[${UI.esc(x.lib)}]</span> <a href="#" style="color:var(--blue)" onclick="event.preventDefault();tab('poster');return false">→ 去海报修复</a></div>`;
+  });
+  if (np.length > 30) html += `<p class="muted">… 另有 ${np.length-30} 个未列</p>`;
+  html += '</div></div>';
+
+  // 4. 重复检查
+  html += `<div class="card" style="margin-bottom:12px"><h2 style="font-size:14px">♻️ 涉及库的重复 (${dupsTotal})`;
+  if (dupsTotal) html += ` <a href="#" style="color:var(--blue);margin-left:8px;font-weight:normal" onclick="event.preventDefault();tab('dedup');return false">→ 去去重 tab 处理</a>`;
+  html += `</h2><div style="font-size:13px;max-height:200px;overflow:auto">`;
+  if (!dupsTotal) html += '<p class="muted">✓ 涉及库无重复</p>';
+  else {
+    if (dups.length){
+      html += '<div class="muted" style="margin-top:6px">可自动去重:</div>';
+      dups.slice(0,10).forEach(g=>{
+        html += `<div style="margin:3px 0">tmdb <code>${UI.esc(g.tmdb)}</code> · 留 ${UI.esc(g.keep&&g.keep.folder||'?')} · 删 ${(g.remove||[]).length} 个</div>`;
+      });
+    }
+    if (review.length){
+      html += '<div class="muted" style="margin-top:6px">需人工确认:</div>';
+      review.slice(0,10).forEach(g=>{
+        html += `<div style="margin:3px 0">tmdb <code>${UI.esc(g.tmdb)}</code> — ${UI.esc(g.why||'')}</div>`;
+      });
+    }
+  }
+  html += '</div></div>';
+
+  const node = document.createElement('div');
+  node.innerHTML = html;
+  new UI.Drawer({title:'🪄 一条龙报告', side:'right', width:540, content:node}).open();
+}
+
+async function posterFromWizard(ids){
+  if (!ids || !ids.length){UI.toast('没有要修的',{type:'info'});return;}
+  // 分剧/电影两批(后端按 type)— 这里默认全 Series(已知偏 series 多)
+  if(!(await UI.modal.confirm({title:'批量自动修海报',body:`将对 <b>${ids.length}</b> 个项目按"名字含原文件夹关键词 + 有图"自动匹配 TMDb 候选。<br>不确定的项目跳过(不会乱绑)。约 ${Math.ceil(ids.length*0.7)} 秒。`,okText:'开始'})))return;
+  try{
+    const r = await api('/api/fixposter_batch',{method:'POST',body:JSON.stringify({ids,type:'Series',async:true})});
+    if(r.tid) UI.tasks.start(r.tid,{label:'海报批量自动('+ids.length+')',onDone:t=>{
+      const x = t.result || {};
+      UI.toast(`海报修复 ✓${x.ok_count||0}/共${x.total||0}`,{type:(x.ok_count||0)?'ok':'warn',ms:5000});
+    }});
+  }catch(e){UI.toast('启动失败:'+e,{type:'error'});}
 }
 
 // 追更检查
