@@ -9,7 +9,8 @@ from lib.config import CFG, CD, STRM, DOCKER, VE
 from lib.logger import logger, log, AppError
 from lib.safe import _safe_under
 from lib.emby import (eget, epost, edelete, emby_online, lib_count,
-                      fetch_libs, fetch_libs_full)
+                      fetch_libs, fetch_libs_full, list_noposter,
+                      remote_search, apply_match)
 from lib.tasks import task_set, task_is_cancelled
 from lib.undo import _undo_record
 
