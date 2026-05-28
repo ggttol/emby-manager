@@ -1161,6 +1161,45 @@ def dedup_auto_all_async(tid):
             "review_count": len(d.get("review") or [])}
 
 
+def refresh_no_rating_async(tid, lib):
+    """对该库所有 CommunityRating 为 0/null 的剧,串行触发 emby /Items/{id}/Refresh(FullRefresh)。
+    Emby 后台会拉 TMDb 补评分/海报/简介。完成后用户回 cleanup tab 重新分析,数据就准了。
+    几百剧可能 30-60 分钟(每剧 sleep 0.5s 防 emby 过载)。"""
+    L = fetch_libs()
+    if lib not in L:
+        return {"err": "未知库 " + str(lib)}
+    m = L[lib]
+    typ = "Series" if m["ctype"] == "tvshows" else "Movie"
+    try:
+        items = eget("/Items", {"ParentId": m["id"], "Recursive": "true",
+                                "IncludeItemTypes": typ,
+                                "Fields": "CommunityRating", "Limit": 30000}).get("Items", [])
+    except Exception as e:
+        return {"err": "拉 emby items 失败: " + str(e)}
+    no_rating = [i for i in items if not (i.get("CommunityRating") or 0) > 0]
+    task_set(tid, total=len(no_rating) or 1, status_text="找无评分剧…")
+    ok_n = 0
+    for idx, it in enumerate(no_rating):
+        if task_is_cancelled(tid): break
+        task_set(tid, progress=idx, status_text="刷新 " + (it.get("Name") or "?")[:30])
+        try:
+            code = epost("/Items/%s/Refresh" % it["Id"],
+                         {"MetadataRefreshMode": "FullRefresh",
+                          "ImageRefreshMode": "FullRefresh",
+                          "ReplaceAllMetadata": "false",
+                          "ReplaceAllImages": "false"})
+            if code in (200, 204): ok_n += 1
+        except Exception:
+            pass
+        time.sleep(0.5)  # 防 emby 后台任务挤爆
+    log("批量刷新无评分剧 [%s]: 共 %d / 已发起 %d" % (lib, len(no_rating), ok_n))
+    return {"lib": lib,
+            "no_rating_count": len(no_rating),
+            "scanned": len(items),
+            "refresh_triggered": ok_n,
+            "msg": "已对 %d 个无评分剧发起 emby 元数据刷新(全库共 %d 个)。Emby 后台会逐步拉 TMDb,几分钟到一小时(看 emby 负载)。**完成后回这 tab 重新分析,无评分剧会自动减少,差评剧浮现。**" % (ok_n, len(items))}
+
+
 def _folder_size_bytes(path):
     """递归算 folder 字节数。CloudDrive2 FUSE 上 stat 走 115 metadata cache,通常秒级。
     超大文件夹(>500 文件)可能慢几秒,任务异步无所谓。"""
@@ -1249,12 +1288,12 @@ def cleanup_suggest_async(tid, lib, top=80, min_score=20, dimensions=None):
         reasons = []
         rating_score = 0
         if "rating" in enabled:
+            # 只有真差评(<5)才扣分,无评分(=0/null)不参与评分维度
+            # —— 很多剧 emby 还没拉到 TMDb 评分,默认按"差"算会误伤;
+            # 想专门处理"无评分"用户应用「🔄 刷新无评分剧」批量补元数据
             if rating > 0 and rating < 5:
                 rating_score = int((5 - rating) * 20)
                 reasons.append("⭐ 评分 %.1f(差评)" % rating)
-            elif rating == 0:
-                rating_score = 10
-                reasons.append("⭐ 无评分(冷门)")
         age_score = 0
         if "age" in enabled:
             if days_in_lib > 365:

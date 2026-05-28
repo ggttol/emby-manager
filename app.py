@@ -48,7 +48,7 @@ from lib.business import (LIB_LOCKS, LIB_LOCKS_GUARD, _lib_lock,
                           cleanup_suggest_async, dash_todo,
                           cleanup_empty_folders_async, dedup_auto_all_async,
                           gaps_scan_lib_async, detect_mismatched_posters_async,
-                          system_health_summary)
+                          system_health_summary, refresh_no_rating_async)
 from lib import business as _biz
 from lib.undo import UNDO_FILE, UNDO_MAX, UNDO_LOCK, _undo_record, list_undo, exec_undo
 
@@ -324,6 +324,10 @@ class H(BaseHTTPRequestHandler):
                 # 扫某库的 115 上无视频文件的空 folder
                 return self._json({"tid": run_async("cleanup_empty_folders",
                     cleanup_empty_folders_async, b.get("lib", ""))})
+            if path == "/api/cleanup/refresh_no_rating":
+                # 对该库无评分剧触发 emby 元数据刷新(补 TMDb 评分)
+                return self._json({"tid": run_async("refresh_no_rating",
+                    refresh_no_rating_async, b.get("lib", ""))})
             if path == "/api/dedup/auto_all":
                 # 一键处理 analyze_dups 的所有 auto dups(不进 review)
                 return self._json({"tid": run_async("dedup_auto_all", dedup_auto_all_async)})
