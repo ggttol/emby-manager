@@ -1176,11 +1176,19 @@ def _folder_size_bytes(path):
     return total
 
 
-def cleanup_suggest_async(tid, lib, top=80, min_score=20):
+CLEANUP_DIMENSIONS = ("rating", "age", "idle", "size", "meta")
+
+def cleanup_suggest_async(tid, lib, top=80, min_score=20, dimensions=None):
     """多维度分析 lib 内可建议清理的资源。
-    维度:rating(TMDb 评分)/ age(入库久)/ idle(没人看)/ size(占空间)/ meta(元数据残缺)。
-    返 {items: [{id,name,...,scores:{},reasons:[],total_score}], total, lib}"""
+    维度(可选 subset):rating / age / idle / size / meta。不在 dimensions 里的维度不计分 + 不出 reason。
+    用户只勾「评分低」时,评分高但其他维度高的剧不会被列出。
+    返 {items: [{id,name,...,scores:{},reasons:[],total_score}], total, lib, dimensions}"""
     from datetime import datetime
+    enabled = set(dimensions) if dimensions else set(CLEANUP_DIMENSIONS)
+    # 安全:任何未知维度自动忽略
+    enabled = enabled & set(CLEANUP_DIMENSIONS)
+    if not enabled:
+        return {"err": "至少要勾一个维度"}
     L = fetch_libs()
     if lib not in L:
         return {"err": "未知库 " + str(lib)}
@@ -1199,6 +1207,8 @@ def cleanup_suggest_async(tid, lib, top=80, min_score=20):
     now = time.time()
     sep = "/" + m["folder"] + "/"
     cd_lib = os.path.join(CD, m["folder"])
+    # 只在 size 维度被启用时才算 size(否则跳过 _folder_size_bytes 走的 walk,大库快很多)
+    need_size = "size" in enabled
     for idx, i in enumerate(items):
         if task_is_cancelled(tid):
             break
@@ -1206,9 +1216,9 @@ def cleanup_suggest_async(tid, lib, top=80, min_score=20):
             task_set(tid, progress=idx, status_text="分析 %s (%d/%d)" % (lib, idx, len(items)))
         path = i.get("Path") or ""
         folder = path.split(sep, 1)[1].split("/", 1)[0] if sep in path else ""
-        # 文件夹大小(CloudDrive2 FUSE,quick metadata)
+        # 文件夹大小(只在需要时算)
         size_bytes = 0
-        if folder:
+        if need_size and folder:
             try:
                 size_bytes = _folder_size_bytes(os.path.join(cd_lib, folder))
             except Exception:
@@ -1235,48 +1245,48 @@ def cleanup_suggest_async(tid, lib, top=80, min_score=20):
                 days_since_play = int((now - lp) / 86400)
             except Exception:
                 pass
-        # === 各维度评分(每项 0-100)===
+        # === 各维度评分 — 只算 enabled 的,不在则跳过(reason 也不出)===
         reasons = []
-        # rating:< 5 = 差评,越低越高
         rating_score = 0
-        if rating > 0 and rating < 5:
-            rating_score = int((5 - rating) * 20)
-            reasons.append("⭐ 评分 %.1f(差评)" % rating)
-        elif rating == 0:
-            rating_score = 10
-            reasons.append("⭐ 无评分(冷门)")
-        # age:入库 > 365 天每 30 天 +1
+        if "rating" in enabled:
+            if rating > 0 and rating < 5:
+                rating_score = int((5 - rating) * 20)
+                reasons.append("⭐ 评分 %.1f(差评)" % rating)
+            elif rating == 0:
+                rating_score = 10
+                reasons.append("⭐ 无评分(冷门)")
         age_score = 0
-        if days_in_lib > 365:
-            age_score = min(50, int((days_in_lib - 365) / 30))
-            reasons.append("📅 入库 %d 天" % days_in_lib)
-        # idle:从未播过 / 长期未看
+        if "age" in enabled:
+            if days_in_lib > 365:
+                age_score = min(50, int((days_in_lib - 365) / 30))
+                reasons.append("📅 入库 %d 天" % days_in_lib)
         idle_score = 0
-        if play_count == 0:
-            if days_in_lib > 180:
-                idle_score = 40
-                reasons.append("👁️ 入库 %d 天从未播过" % days_in_lib)
-            elif days_in_lib > 60:
-                idle_score = 20
-                reasons.append("👁️ 入库 %d 天未播过" % days_in_lib)
-        elif days_since_play and days_since_play > 365:
-            idle_score = 30
-            reasons.append("👁️ %d 天未看" % days_since_play)
-        # size:> 50GB 大,> 20GB 中
+        if "idle" in enabled:
+            if play_count == 0:
+                if days_in_lib > 180:
+                    idle_score = 40
+                    reasons.append("👁️ 入库 %d 天从未播过" % days_in_lib)
+                elif days_in_lib > 60:
+                    idle_score = 20
+                    reasons.append("👁️ 入库 %d 天未播过" % days_in_lib)
+            elif days_since_play and days_since_play > 365:
+                idle_score = 30
+                reasons.append("👁️ %d 天未看" % days_since_play)
         size_gb = size_bytes / (1024.0 ** 3)
         size_score = 0
-        if size_gb > 50:
-            size_score = min(40, int(size_gb / 5))
-            reasons.append("💾 占 %.1f GB(大)" % size_gb)
-        elif size_gb > 20:
-            size_score = int(size_gb / 2)
-            reasons.append("💾 占 %.1f GB" % size_gb)
-        # meta:无海报 / 无简介
+        if "size" in enabled:
+            if size_gb > 50:
+                size_score = min(40, int(size_gb / 5))
+                reasons.append("💾 占 %.1f GB(大)" % size_gb)
+            elif size_gb > 20:
+                size_score = int(size_gb / 2)
+                reasons.append("💾 占 %.1f GB" % size_gb)
         meta_score = 0
-        if not (i.get("ImageTags") or {}).get("Primary"):
-            meta_score += 10; reasons.append("🖼️ 无海报")
-        if not i.get("Overview"):
-            meta_score += 5; reasons.append("📝 无简介")
+        if "meta" in enabled:
+            if not (i.get("ImageTags") or {}).get("Primary"):
+                meta_score += 10; reasons.append("🖼️ 无海报")
+            if not i.get("Overview"):
+                meta_score += 5; reasons.append("📝 无简介")
         total = rating_score + age_score + idle_score + size_score + meta_score
         if total < min_score:
             continue
@@ -1298,9 +1308,10 @@ def cleanup_suggest_async(tid, lib, top=80, min_score=20):
         })
     out.sort(key=lambda x: -x["total_score"])
     task_set(tid, progress=len(items))
-    log("智能清理分析 [%s]: %d 个项目 → 建议清理 %d 个" % (lib, len(items), len(out)))
+    log("智能清理分析 [%s] 维度=%s: %d 项 → 建议 %d 个" % (lib, ",".join(sorted(enabled)), len(items), len(out)))
     return {"lib": lib, "items": out[:top], "total": len(out),
-            "analyzed": len(items)}
+            "analyzed": len(items),
+            "dimensions": sorted(enabled)}
 
 
 def _airing_series_list():

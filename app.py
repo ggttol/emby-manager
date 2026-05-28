@@ -311,12 +311,15 @@ class H(BaseHTTPRequestHandler):
                 # 汇总所有在更剧的缺集 → 求资源清单
                 return self._json({"tid": run_async("zhuigeng_gaps_summary", zhuigeng_gaps_summary_async)})
             if path == "/api/cleanup/suggest":
-                # 智能清理建议:多维度分析某库,返候选 + 评分
+                # 智能清理建议:多维度分析某库;dimensions=[rating,age,idle,size,meta] 子集
                 lib = b.get("lib", "")
                 top = max(10, min(500, int(b.get("top", 80))))
                 min_score = max(0, min(200, int(b.get("min_score", 20))))
+                dims = b.get("dimensions")  # None = 全部维度
+                if dims is not None and not isinstance(dims, list):
+                    dims = None
                 return self._json({"tid": run_async("cleanup_suggest",
-                    cleanup_suggest_async, lib, top, min_score)})
+                    cleanup_suggest_async, lib, top, min_score, dims)})
             if path == "/api/cleanup/empty_folders":
                 # 扫某库的 115 上无视频文件的空 folder
                 return self._json({"tid": run_async("cleanup_empty_folders",

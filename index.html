@@ -298,7 +298,20 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
 
   <section id="cleanup" class="hide">
     <div class="card"><h2>🧹 智能清理建议</h2>
-      <p class="muted" style="margin-bottom:10px">多维度分析某库找"建议清理"候选:⭐ 评分低 · 📅 入库久 · 👁️ 没人看 · 💾 占空间 · 🖼️ 元数据残缺。综合分高的优先列。<b>建议</b>不是强删,你勾选后再批量执行。</p>
+      <p class="muted" style="margin-bottom:10px"><b>选维度</b>决定按哪些标准建议清理 — 只勾「评分低」就不会把"评分高但占空间大"的列出来。综合分 = 勾选维度的分数和。</p>
+
+      <div style="background:#0f172a;border-radius:8px;padding:10px 12px;margin-bottom:10px">
+        <div class="muted" style="font-size:12px;margin-bottom:6px">📐 评分维度(只算勾选的)</div>
+        <div class="row" style="gap:14px;flex-wrap:wrap;font-size:13px">
+          <label><input type="checkbox" class="cleanupDim" value="rating" checked> ⭐ 评分低<span class="muted" style="font-size:11px"> (<5 或无评分)</span></label>
+          <label><input type="checkbox" class="cleanupDim" value="age" checked> 📅 入库久<span class="muted" style="font-size:11px"> (>365 天)</span></label>
+          <label><input type="checkbox" class="cleanupDim" value="idle" checked> 👁️ 没人看<span class="muted" style="font-size:11px"> (0 播过或 1 年没看)</span></label>
+          <label><input type="checkbox" class="cleanupDim" value="size" checked> 💾 占空间<span class="muted" style="font-size:11px"> (>20GB)</span></label>
+          <label><input type="checkbox" class="cleanupDim" value="meta" checked> 🖼️ 元数据残缺<span class="muted" style="font-size:11px"> (无海报/无简介)</span></label>
+        </div>
+        <div class="muted" style="font-size:11px;margin-top:6px">💡 不勾「占空间」会快很多(跳过文件夹大小扫描)</div>
+      </div>
+
       <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
         <span class="muted">选库</span>
         <select id="cleanupLib" style="min-width:160px"></select>
@@ -2759,11 +2772,13 @@ async function runCleanupAnalysis(){
   const lib = document.querySelector('#cleanupLib').value;
   const top = parseInt(document.querySelector('#cleanupTop').value);
   const minScore = parseInt(document.querySelector('#cleanupMinScore').value);
+  const dimensions = Array.from(document.querySelectorAll('.cleanupDim:checked')).map(c=>c.value);
   if (!lib){ UI.toast('先选库',{type:'warn'}); return; }
+  if (!dimensions.length){ UI.toast('至少勾一个维度',{type:'warn'}); return; }
   const out = document.querySelector('#cleanupOut');
   out.innerHTML = UI.skeleton.rows(8);
   try {
-    const r = await api('/api/cleanup/suggest', {method:'POST', body:JSON.stringify({lib, top, min_score:minScore, async:true})});
+    const r = await api('/api/cleanup/suggest', {method:'POST', body:JSON.stringify({lib, top, min_score:minScore, dimensions, async:true})});
     if (r.err){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(r.err)}</div>`; return; }
     if (!r.tid){ out.innerHTML = '后端未返 tid'; return; }
     UI.tasks.start(r.tid, {
@@ -2790,8 +2805,11 @@ function renderCleanupResult(r){
   }
   // 头部:统计 + 工具栏
   const totalGB = items.reduce((s,i)=>s+(i.size_gb||0), 0);
+  const dimLabel = {rating:'⭐评分',age:'📅入库久',idle:'👁️没看',size:'💾占空间',meta:'🖼️元数据'};
+  const usedDims = (r.dimensions||[]).map(d=>dimLabel[d]||d).join(' · ');
   let h = `<div class="row" style="margin-bottom:10px;gap:10px;flex-wrap:wrap;align-items:center">
     <div><b>${items.length}</b> 个建议清理项 <span class="muted">(分析了 ${r.analyzed} 个,共 ${r.total} 个过门槛)</span> · 共占 <b>${totalGB.toFixed(1)} GB</b></div>
+    <span class="muted" style="font-size:12px;margin-left:auto">📐 当前维度:${usedDims}</span>
   </div>
   <div class="row" style="margin-bottom:10px;gap:6px;flex-wrap:wrap;align-items:center">
     <label class="muted"><input type="checkbox" id="ckAllCleanup" onchange="toggleAllCleanup()"> 全选</label>
