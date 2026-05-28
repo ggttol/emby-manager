@@ -750,6 +750,71 @@ def dedup_exec_batch_async(tid, groups):
     return {"results": results, "ok_count": ok_n, "total": len(results)}
 
 
+def replace_folder(lib, win_folder, lose_folder):
+    """全替换:删 lose folder(115 → 回收站)+ 如果 win 是「lose(1)」格式,把 win 改名为 lose 名(保留 emby 路径)。
+    场景:新分享 receive 后 115 自动加 (1) 后缀,新版完整旧版被废 → win=新(1) / lose=旧 → 删旧 + 新改名回原。
+    要求:win 和 lose 必须在同库(115 跨库 rename 不可靠)。"""
+    L = fetch_libs()
+    if lib not in L:
+        raise AppError("未知库 " + str(lib), status=404)
+    fol = L[lib]["folder"]
+    lose_cd = _safe_under(os.path.join(CD, fol), lose_folder)
+    win_cd = _safe_under(os.path.join(CD, fol), win_folder)
+    if not os.path.isdir(lose_cd):
+        raise AppError("源 folder 不存在: " + lose_folder, status=404)
+    if not os.path.isdir(win_cd):
+        raise AppError("新 folder 不存在: " + win_folder, status=404)
+    # 1. 删 lose (115 fuse → 回收站) + 同步删 strm
+    shutil.rmtree(lose_cd)
+    lose_strm = os.path.join(STRM, fol, lose_folder)
+    if os.path.isdir(lose_strm):
+        shutil.rmtree(lose_strm)
+    # 2. 判断 win 是否「lose(1)」或「lose(N)」格式 — 是则改名回 lose
+    renamed_to = win_folder
+    import re as _re
+    m = _re.match(r'^(.+?)(\(\d+\)|\(\d+\))$', win_folder)
+    base = m.group(1) if m else win_folder
+    if base == lose_folder:
+        # win 改名回原名(去掉 (1))
+        target_cd = os.path.join(CD, fol, lose_folder)
+        os.rename(win_cd, target_cd)
+        renamed_to = lose_folder
+        # 同步处理 strm:rename win strm 文件夹 + 改 strm content 里的 folder 名
+        win_strm = os.path.join(STRM, fol, win_folder)
+        target_strm = os.path.join(STRM, fol, lose_folder)
+        if os.path.isdir(win_strm):
+            if os.path.exists(target_strm):
+                shutil.rmtree(target_strm)
+            os.rename(win_strm, target_strm)
+            # strm 内容里 /media/<lib>/<win_folder>/... → /media/<lib>/<lose_folder>/...
+            for root, _ds, fs in os.walk(target_strm):
+                for f in fs:
+                    if not f.endswith(".strm"):
+                        continue
+                    p = os.path.join(root, f)
+                    try:
+                        content = open(p, encoding="utf-8").read()
+                        # 简单替换 first occurrence 即可(content 里 win_folder 通常只出现一次,在 /media/lib/folder/... 路径里)
+                        new_content = content.replace("/" + win_folder + "/", "/" + lose_folder + "/", 1)
+                        if new_content != content:
+                            with open(p, "w", encoding="utf-8") as w:
+                                w.write(new_content)
+                    except Exception:
+                        logger.exception("改 strm content 失败 %s", p)
+    # 3. 通知 emby 重扫该 folder(路径变化)
+    epost("/Library/Media/Updated", body={"Updates": [
+        {"Path": "/strm/%s/%s" % (fol, lose_folder), "UpdateType": "Modified"}
+    ]})
+    log("替换 [%s] 用 %s 替掉 %s%s" % (lib, win_folder, lose_folder,
+        " (并改名回原名)" if renamed_to == lose_folder else ""))
+    _undo_record("replace", {"lib": lib, "win_was": win_folder, "lose_was": lose_folder,
+                              "now_folder": renamed_to})
+    return {"ok": True, "lib": lib, "kept_as": renamed_to,
+            "dropped": lose_folder,
+            "msg": "已替换:删了「%s」%s" % (lose_folder,
+                "新 folder 改名回「%s」" % lose_folder if renamed_to == lose_folder else "")}
+
+
 def add_new_pipeline_async(tid, items, default_lib, save_to_lib_fn):
     """一条龙加新资源 pipeline:批量 receive → scan 涉及库 → 等刮削 → 海报+重复检查 → 聚合 report。
 

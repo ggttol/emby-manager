@@ -2302,30 +2302,78 @@ function showWizardReport(rep){
   if (np.length > 30) html += `<p class="muted">… 另有 ${np.length-30} 个未列</p>`;
   html += '</div></div>';
 
-  // 4. 重复检查
-  html += `<div class="card" style="margin-bottom:12px"><h2 style="font-size:14px">♻️ 涉及库的重复 (${dupsTotal})`;
-  if (dupsTotal) html += ` <a href="#" style="color:var(--blue);margin-left:8px;font-weight:normal" onclick="event.preventDefault();tab('dedup');return false">→ 去去重 tab 处理</a>`;
-  html += `</h2><div style="font-size:13px;max-height:200px;overflow:auto">`;
-  if (!dupsTotal) html += '<p class="muted">✓ 涉及库无重复</p>';
-  else {
-    if (dups.length){
-      html += '<div class="muted" style="margin-top:6px">可自动去重:</div>';
-      dups.slice(0,10).forEach(g=>{
-        html += `<div style="margin:3px 0">tmdb <code>${UI.esc(g.tmdb)}</code> · 留 ${UI.esc(g.keep&&g.keep.folder||'?')} · 删 ${(g.remove||[]).length} 个</div>`;
+  // 4. 重复检查 — 每条提供「用新替旧/保留两份/去去重 tab」3 选项
+  html += `<div class="card" style="margin-bottom:12px"><h2 style="font-size:14px">♻️ 涉及库的重复 (${dupsTotal})</h2>`;
+  if (!dupsTotal){
+    html += '<p class="muted">✓ 涉及库无重复</p>';
+  } else {
+    html += '<div class="muted" style="font-size:11px;margin-bottom:6px">💡 新转的分享 115 自动加 <code>(1)</code> 后缀。下面"新版"= 带 (1) 的;"旧版"= 不带 (1) 的。「用新替旧」会删旧 + 新改名去掉 (1)(emby 路径不破)。</div>';
+    const allGroups = [...(dups||[]), ...(review||[])];
+    allGroups.slice(0, 15).forEach((g, gi)=>{
+      const rows = g.rows || ([g.keep, ...(g.remove||[])].filter(Boolean));
+      if (rows.length < 2) return;
+      // 找带 (1) 的 vs 不带的 → 推荐 win=带(1), lose=不带
+      const withParen = rows.find(r=>/\(\d+\)$/.test(r.folder||''));
+      const withoutParen = rows.find(r=>r!==withParen && !/\(\d+\)$/.test(r.folder||''));
+      const cardId = 'wzDup' + gi;
+      html += `<div class="card" id="${cardId}" style="padding:10px;margin-bottom:8px;background:#0f172a">
+        <div><b>tmdb ${UI.esc(g.tmdb)}</b>${g.why?` · <span class="muted">${UI.esc(g.why)}</span>`:''}</div>`;
+      rows.forEach(r=>{
+        const isWithParen = /\(\d+\)$/.test(r.folder||'');
+        html += `<div style="font-size:12px;margin-top:3px;color:${isWithParen?'#86efac':'#e6eaf2'}">${isWithParen?'🆕':'  '} ${UI.esc(r.folder)} <span class="muted">[${UI.esc(r.lib)} · 画质 ${r.score} · ${r.n}文件${r.total_eps?' · '+r.total_eps+'集':''}]</span></div>`;
       });
-    }
-    if (review.length){
-      html += '<div class="muted" style="margin-top:6px">需人工确认:</div>';
-      review.slice(0,10).forEach(g=>{
-        html += `<div style="margin:3px 0">tmdb <code>${UI.esc(g.tmdb)}</code> — ${UI.esc(g.why||'')}</div>`;
-      });
-    }
+      if (withParen && withoutParen && withParen.lib === withoutParen.lib){
+        // 同库可替换
+        html += `<div class="row" style="margin-top:8px;gap:6px">
+          <button class="btn danger" style="padding:5px 12px;font-size:12px" onclick='wzReplace(${gi}, ${JSON.stringify(withParen.lib)}, ${JSON.stringify(withParen.folder)}, ${JSON.stringify(withoutParen.folder)})'>♻️ 用新替旧(删「${UI.esc(withoutParen.folder.slice(0,28))}」+ 新改名去 (1))</button>
+          <button class="btn ghost" style="padding:5px 12px;font-size:12px" onclick='wzSkipDup(${gi})'>保留两份</button>
+        </div>`;
+      } else {
+        html += `<div class="muted" style="margin-top:6px;font-size:11px">⚠️ 不能自动替换(跨库或非 (1) 后缀模式),去 <a href="#" style="color:var(--blue)" onclick="event.preventDefault();tab('dedup')">去重 tab</a> 手动处理</div>`;
+      }
+    });
+    if (allGroups.length > 15) html += `<p class="muted">… 另有 ${allGroups.length-15} 组未列,去 <a href="#" style="color:var(--blue)" onclick="event.preventDefault();tab('dedup')">去重 tab</a> 看全部</p>`;
   }
-  html += '</div></div>';
+  html += '</div>';
 
   const node = document.createElement('div');
   node.innerHTML = html;
   new UI.Drawer({title:'🪄 一条龙报告', side:'right', width:540, content:node}).open();
+}
+
+async function wzReplace(gi, lib, win_folder, lose_folder){
+  const ok = await UI.modal.confirm({
+    danger:true,
+    title:'用新替旧(全替换)',
+    body:`<div>库:<b>${UI.esc(lib)}</b></div>
+<div style="margin-top:6px"><span style="color:#fca5a5">删旧</span>:<code>${UI.esc(lose_folder)}</code><br><span class="muted" style="font-size:11px">→ 115 进回收站(可还原)+ strm 同步删</span></div>
+<div style="margin-top:6px"><span style="color:#86efac">留新</span>:<code>${UI.esc(win_folder)}</code><br><span class="muted" style="font-size:11px">→ 改名去掉 (1) 后缀,emby 路径不破</span></div>
+<div style="margin-top:8px;font-size:12px;color:var(--warn)">⚠️ Emby 该剧的播放历史 / 收藏 / 进度通常保留(同 tmdb id),但若有自定义元数据(覆盖海报、备注)可能需要重新设置。</div>`,
+    okText:'♻️ 用新替旧',
+    requireType:'替换'
+  });
+  if (!ok) return;
+  const card = document.getElementById('wzDup' + gi);
+  if (card) card.innerHTML = '<div class="muted"><span class="spin"></span> 替换中…</div>';
+  try {
+    const r = await api('/api/dedup/replace', {method:'POST', body:JSON.stringify({lib, win_folder, lose_folder})});
+    if (r.err){
+      if (card) card.innerHTML = '<div style="color:var(--red)">✗ '+UI.esc(r.err)+'</div>';
+      UI.toast('替换失败:'+r.err, {type:'error'});
+      return;
+    }
+    if (card) card.innerHTML = '<div style="color:var(--green)">✓ '+UI.esc(r.msg||'已替换')+'</div>';
+    UI.toast('✓ 已替换:'+r.msg, {type:'ok', ms:5000, action:{label:'查看撤销日志',fn:()=>tab('log')}});
+  } catch(e){
+    if (card) card.innerHTML = '<div style="color:var(--red)">✗ '+UI.esc(String(e))+'</div>';
+    UI.toast('请求失败:'+e, {type:'error'});
+  }
+}
+
+function wzSkipDup(gi){
+  const card = document.getElementById('wzDup' + gi);
+  if (card) card.style.opacity = '0.4';
+  UI.toast('保留两份(以后可在去重 tab 手动处理)', {type:'info'});
 }
 
 async function posterFromWizard(ids){
