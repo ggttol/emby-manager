@@ -194,6 +194,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
 
   <section id="dash">
     <div id="dashHealth"></div>
+    <div id="dashTodo"></div>
     <div class="card">
       <div class="row"><button class="btn" id="scanAllBtn" onclick="scanAll()">➕ 一键扫全库(收新内容)</button><span id="scanAllOut" class="muted"></span></div>
       <div class="row" style="margin-top:12px">
@@ -312,8 +313,10 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
           <option value="60">60</option>
         </select>
         <button class="btn" style="background:#7c3aed" onclick="runCleanupAnalysis()">🔍 分析</button>
+        <button class="btn ghost" onclick="runEmptyFoldersScan()" title="扫该库 115 上无视频文件的空 folder(只占元数据/缩略图位置的占位垃圾)">🗑️ 扫空文件夹</button>
       </div>
       <div id="cleanupOut" style="margin-top:14px"></div>
+      <div id="emptyOut" style="margin-top:14px"></div>
     </div>
   </section>
 
@@ -1292,6 +1295,60 @@ async function start(){
     initShell();
     loadHealthCard();
   }
+  // 仪表盘待办(每次 start 都刷,确保数据新)
+  loadDashTodo();
+}
+
+async function loadDashTodo(){
+  const el = document.querySelector('#dashTodo');
+  if (!el) return;
+  el.innerHTML = `<div class="card" style="background:#1e3a5f"><div class="muted"><span class="spin"></span> 📋 统计待办中(~3-5 秒,扫无海报+重复+在更剧)…</div></div>`;
+  try {
+    const r = await api('/api/dash/todo');
+    const np = r.noposter || 0, da = r.dups_auto || 0, dr = r.dups_review || 0, ac = r.airing_count || 0;
+    const totalAct = np + da + dr;
+    const items = [];
+    if (np > 0) items.push(`<a href="#" onclick="event.preventDefault();tab('poster');return false" style="color:#86efac;text-decoration:none">🖼️ <b>${np}</b> 个无海报项 →</a>`);
+    if (da > 0) items.push(`<a href="#" onclick="event.preventDefault();tab('dedup');return false" style="color:#86efac;text-decoration:none">♻️ <b>${da}</b> 组可自动去重 →</a>`);
+    if (dr > 0) items.push(`<a href="#" onclick="event.preventDefault();tab('dedup');return false" style="color:#fcd34d;text-decoration:none">⚠️ <b>${dr}</b> 组需人工去重 →</a>`);
+    items.push(`<a href="#" onclick="event.preventDefault();tab('zhuigeng');return false" style="color:#bfdbfe;text-decoration:none">🔄 <b>${ac}</b> 部在更剧 → 检查</a>`);
+    el.innerHTML = `<div class="card" style="background:#1e3a5f;border:1px solid var(--blue)">
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:14px">
+        <b style="color:#bfdbfe">📋 今日待办${totalAct?' ('+totalAct+')':' (全部清爽 ✓)'}</b>
+        ${items.join(' · ')}
+        ${r.dups_auto > 0 ? `<button class="btn" style="background:#7c3aed;padding:4px 12px;font-size:12px;margin-left:auto" onclick="dedupAutoAll()">⚡ 一键全部自动去重 (${r.dups_auto})</button>` : ''}
+      </div>
+    </div>`;
+  } catch(e) {
+    el.innerHTML = `<div class="card" style="background:#3a1f1f"><div class="muted">📋 待办统计失败: ${UI.esc(String(e))}</div></div>`;
+  }
+}
+
+async function dedupAutoAll(){
+  const ok = await UI.modal.confirm({
+    danger: true,
+    title: '⚡ 一键自动去重',
+    body: '执行所有「可自动去重」组(画质高+集数多优先留,删其他)。<br>每组都进 115 回收站(7 天可还原)。<br>"需人工"的组不动。',
+    okText: '开始',
+    requireType: '去重'
+  });
+  if (!ok) return;
+  try {
+    const r = await api('/api/dedup/auto_all', {method:'POST', body:JSON.stringify({async:true})});
+    if (r.err){ UI.toast('启动失败:'+r.err,{type:'error'}); return; }
+    UI.tasks.start(r.tid, {
+      label:'⚡ 一键自动去重',
+      onDone:(t)=>{
+        const rr = t.result || {};
+        const okN = rr.ok_count||0, failN = (rr.total||0) - okN;
+        UI.toast(`去重完成 ✓${okN}${failN?` ✗${failN}`:''} · 共删 ${rr.total_removed_folders||0} 个 folder · 剩 ${rr.review_count||0} 组待人工`, {
+          type: failN?'warn':'ok', ms:7000,
+          action: {label:'去 dedup 看', fn:()=>tab('dedup')}
+        });
+        loadDashTodo(); start();
+      }
+    });
+  } catch(e){ UI.toast('请求失败:'+e,{type:'error'}); }
 }
 
 function showExcluded(){
@@ -2768,6 +2825,102 @@ function cleanupSelectByScore(thresh){
     c.checked = (items[idx] && items[idx].total_score >= thresh);
   });
   updateCleanupSel();
+}
+
+async function runEmptyFoldersScan(){
+  const lib = document.querySelector('#cleanupLib').value;
+  if (!lib){ UI.toast('先选库',{type:'warn'}); return; }
+  const out = document.querySelector('#emptyOut');
+  out.innerHTML = UI.skeleton.rows(5);
+  try {
+    const r = await api('/api/cleanup/empty_folders', {method:'POST', body:JSON.stringify({lib, async:true})});
+    if (r.err){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(r.err)}</div>`; return; }
+    UI.tasks.start(r.tid, {
+      label:`🗑️ 扫空 folder ${lib}`,
+      onDone:(t)=>{
+        const result = t.result || {};
+        if (result.err){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(result.err)}</div>`; return; }
+        renderEmptyFolders(result);
+      }
+    });
+  } catch(e){ out.innerHTML = `<div style="color:var(--red)">${UI.esc(String(e))}</div>`; }
+}
+
+function renderEmptyFolders(r){
+  const out = document.querySelector('#emptyOut');
+  const items = r.items || [];
+  window._emptyItems = items;
+  window._emptyLib = r.lib;
+  if (!items.length){
+    out.innerHTML = `<div class="card"><h2 style="font-size:14px">🗑️ 空文件夹</h2><p class="muted">✨ 库「${UI.esc(r.lib)}」共 ${r.total_scanned} 个 top folder,没发现空的(都含视频)</p></div>`;
+    return;
+  }
+  let h = `<div class="card"><h2 style="font-size:14px">🗑️ 空文件夹 <span class="muted" style="font-weight:normal;font-size:12px">(扫了 ${r.total_scanned} 个 top folder,${items.length} 个无视频文件)</span></h2>`;
+  h += `<div class="row" style="margin:8px 0;gap:6px;align-items:center">
+    <label class="muted"><input type="checkbox" id="ckAllEmpty" onchange="toggleAllEmpty()"> 全选</label>
+    <span class="muted" id="emptySelCnt">选中 0</span>
+    <span style="flex:1"></span>
+    <button class="btn danger" onclick="cleanupDeleteEmpties()">🗑️ 批量删空 folder</button>
+  </div>
+  <div style="font-size:13px">`;
+  items.forEach((it, idx)=>{
+    h += `<div class="item" style="border-bottom:1px solid var(--line);padding:8px 2px">
+      <input type="checkbox" class="ckEmpty" data-idx="${idx}" onchange="updateEmptySel()" style="margin-right:10px;width:16px;height:16px">
+      <div class="main">
+        <div class="nm">${UI.esc(it.folder)}</div>
+        <div class="meta">${it.other_files} 个非视频文件 · ${it.size_kb} KB</div>
+      </div>
+    </div>`;
+  });
+  h += '</div></div>';
+  out.innerHTML = h;
+  updateEmptySel();
+}
+
+function updateEmptySel(){
+  const n = document.querySelectorAll('.ckEmpty:checked').length;
+  const el = document.querySelector('#emptySelCnt');
+  if (el) el.textContent = `选中 ${n}`;
+}
+
+function toggleAllEmpty(){
+  const on = document.querySelector('#ckAllEmpty').checked;
+  document.querySelectorAll('.ckEmpty').forEach(c=>c.checked = on);
+  updateEmptySel();
+}
+
+async function cleanupDeleteEmpties(){
+  const items = window._emptyItems || [];
+  const lib = window._emptyLib;
+  const cks = document.querySelectorAll('.ckEmpty:checked');
+  if (!cks.length){ UI.toast('先勾选要删的',{type:'warn'}); return; }
+  const selected = Array.from(cks).map(c => items[parseInt(c.dataset.idx)]).filter(Boolean);
+  const ok = await UI.modal.confirm({
+    danger: true,
+    title: `🗑️ 删除 ${selected.length} 个空 folder`,
+    body: `<div>从库 <b>${UI.esc(lib)}</b> 删除 <b>${selected.length}</b> 个无视频文件的 folder(只有 nfo/jpg 等占位):</div>
+<div style="margin-top:8px;font-size:11px;max-height:200px;overflow:auto;background:#0b0f17;padding:10px;border-radius:6px">${selected.slice(0,20).map(i=>'· '+UI.esc(i.folder)).join('<br>')}${selected.length>20?'<br>… 另 '+(selected.length-20)+' 个':''}</div>
+<div style="margin-top:8px;font-size:12px;color:var(--warn)">⚠️ 115 进回收站(可还原)。这些通常是元数据残留 / 失败的下载 / 删过视频忘删 folder。</div>`,
+    okText: `🗑️ 删除`,
+    requireType: '删空'
+  });
+  if (!ok) return;
+  try {
+    const r = await api('/api/manage/delete_batch', {method:'POST', body:JSON.stringify({
+      lib: lib,
+      items: selected.map(i=>({folder:i.folder, id:null})),
+      async: true
+    })});
+    if (r.err){ UI.toast('启动失败:'+r.err,{type:'error'}); return; }
+    UI.tasks.start(r.tid, {
+      label:`🗑️ 清空 folder ${selected.length} 个`,
+      onDone:(t)=>{
+        const rr = t.result || {};
+        UI.toast(`清空 folder 完成 ✓${rr.ok_count||0}${(rr.total||0) - (rr.ok_count||0) ? ' ✗'+((rr.total||0)-(rr.ok_count||0)) : ''}`, {type:'ok',ms:5000});
+        runEmptyFoldersScan(); start();
+      }
+    });
+  } catch(e){ UI.toast('请求失败:'+e,{type:'error'}); }
 }
 
 async function cleanupDeleteSelected(){

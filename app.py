@@ -45,7 +45,8 @@ from lib.business import (LIB_LOCKS, LIB_LOCKS_GUARD, _lib_lock,
                           move_batch_async, dedup_exec_batch_async,
                           add_new_pipeline_async, replace_folder, replace_batch_async,
                           zhuigeng_scan_airing_async, zhuigeng_gaps_summary_async,
-                          cleanup_suggest_async)
+                          cleanup_suggest_async, dash_todo,
+                          cleanup_empty_folders_async, dedup_auto_all_async)
 from lib import business as _biz
 from lib.undo import UNDO_FILE, UNDO_MAX, UNDO_LOCK, _undo_record, list_undo, exec_undo
 
@@ -213,6 +214,7 @@ class H(BaseHTTPRequestHandler):
                 cfg = export_config()
                 return self._json(cfg, extra_headers=[("Content-Disposition", 'attachment; filename="emby-manager-config.json"')])
             if path == "/api/undo_log": return self._json(list_undo())
+            if path == "/api/dash/todo": return self._json(dash_todo())
             if path == "/api/me":
                 # 已登录(cookie 通过 _auth) → 返当前 csrf token 给前端 sessionStorage(刷页恢复用)
                 t = self._cookie_token() or self.headers.get("X-Token")
@@ -312,6 +314,13 @@ class H(BaseHTTPRequestHandler):
                 min_score = max(0, min(200, int(b.get("min_score", 20))))
                 return self._json({"tid": run_async("cleanup_suggest",
                     cleanup_suggest_async, lib, top, min_score)})
+            if path == "/api/cleanup/empty_folders":
+                # 扫某库的 115 上无视频文件的空 folder
+                return self._json({"tid": run_async("cleanup_empty_folders",
+                    cleanup_empty_folders_async, b.get("lib", ""))})
+            if path == "/api/dedup/auto_all":
+                # 一键处理 analyze_dups 的所有 auto dups(不进 review)
+                return self._json({"tid": run_async("dedup_auto_all", dedup_auto_all_async)})
             if path == "/api/wizard/add_new":
                 # 一条龙加新资源:批量 receive → 扫涉及库 → 等刮削 → 海报+重复检查 → 报告
                 # 必须用 app 模块的 c115_save_to_lib(走 _c115_req 包装链)

@@ -887,6 +887,117 @@ def replace_folder(lib, win_folder, lose_folder):
                 "新 folder 改名回「%s」" % lose_folder if renamed_to == lose_folder else "")}
 
 
+def dash_todo():
+    """仪表盘待办:并行(逻辑串行,反正每个都快)拿 noposter / dups / 在更剧数。
+    每项点击跳对应 tab。返 {noposter, dups_auto, dups_review, airing_count, libs:[{name,noposter,...}]}"""
+    out = {"noposter": 0, "dups_auto": 0, "dups_review": 0, "airing_count": 0}
+    # 1. noposter
+    try:
+        np_items = list_noposter()
+        out["noposter"] = len(np_items)
+        # 按 lib 聚合(用户能看到哪个库无海报最多)
+        by_lib = {}
+        for x in np_items:
+            by_lib[x.get("lib", "?")] = by_lib.get(x.get("lib", "?"), 0) + 1
+        out["noposter_by_lib"] = by_lib
+    except Exception as e:
+        out["noposter_err"] = str(e)
+    # 2. dups
+    try:
+        d = analyze_dups()
+        out["dups_auto"] = len(d.get("dups") or [])
+        out["dups_review"] = len(d.get("review") or [])
+    except Exception as e:
+        out["dups_err"] = str(e)
+    # 3. 在更剧数(只数,不查每剧缺集,快)
+    try:
+        airing = _airing_series_list()
+        out["airing_count"] = len(airing)
+        # 按集数排:< 10 集的极可能有新(用户最关心)
+        out["airing_low_count"] = sum(1 for _ in airing)  # 占位,可以扩展
+    except Exception as e:
+        out["airing_err"] = str(e)
+    return out
+
+
+def cleanup_empty_folders_async(tid, lib):
+    """扫 lib 的 115 lib 下每个 top folder,没视频文件的列出来(可能是元数据/缩略图占位垃圾)。"""
+    L = fetch_libs()
+    if lib not in L:
+        return {"err": "未知库 " + str(lib)}
+    m = L[lib]
+    cd_base = os.path.join(CD, m["folder"])
+    if not os.path.isdir(cd_base):
+        return {"err": "115 库目录不存在: " + cd_base}
+    tops = []
+    try:
+        tops = sorted([t for t in os.listdir(cd_base) if os.path.isdir(os.path.join(cd_base, t))])
+    except Exception as e:
+        return {"err": "列 115 目录失败: " + str(e)}
+    task_set(tid, total=len(tops) or 1, status_text="扫 " + lib)
+    empties = []
+    for i, top in enumerate(tops):
+        if task_is_cancelled(tid): break
+        if i % 10 == 0:
+            task_set(tid, progress=i, status_text="扫 %s (%d/%d)" % (lib, i, len(tops)))
+        tp = os.path.join(cd_base, top)
+        # walk 找视频文件;一找到立即 break
+        has_video = False
+        total_size = 0
+        other_count = 0  # .nfo/.jpg 等
+        try:
+            for root, _ds, fs in os.walk(tp):
+                for f in fs:
+                    fl = f.lower()
+                    if fl.endswith(VE):
+                        has_video = True
+                        break
+                    else:
+                        other_count += 1
+                        try: total_size += os.path.getsize(os.path.join(root, f))
+                        except Exception: pass
+                if has_video: break
+        except Exception:
+            continue
+        if not has_video:
+            empties.append({
+                "folder": top,
+                "other_files": other_count,
+                "size_bytes": total_size,
+                "size_kb": round(total_size / 1024, 1),
+            })
+    task_set(tid, progress=len(tops))
+    log("空 folder 扫描 [%s]: 共 %d top folder,空 %d 个" % (lib, len(tops), len(empties)))
+    return {"lib": lib, "items": empties, "total_scanned": len(tops),
+            "total_size_kb": round(sum(e["size_bytes"] for e in empties) / 1024, 1)}
+
+
+def dedup_auto_all_async(tid):
+    """一键处理 analyze_dups 返的所有 auto dups(不进 review 的安全去重)。
+    复用 exec_dedup 单组逻辑 + 进度上报。"""
+    d = analyze_dups()
+    groups = d.get("dups") or []
+    task_set(tid, total=len(groups) or 1, status_text="开始…")
+    results = []
+    for i, g in enumerate(groups):
+        if task_is_cancelled(tid): break
+        task_set(tid, progress=i, status_text="去重 tmdb " + str(g.get("tmdb"))[:12])
+        try:
+            r = exec_dedup(g.get("tmdb"), g.get("remove", []))
+            results.append({"tmdb": g.get("tmdb"), "ok": True,
+                            "kept": g.get("keep", {}).get("folder", "?"),
+                            "removed": len(r.get("removed", []))})
+        except Exception as e:
+            results.append({"tmdb": g.get("tmdb"), "ok": False, "err": str(e)})
+        task_set(tid, progress=i + 1)
+    ok_n = sum(1 for r in results if r["ok"])
+    total_removed = sum(r.get("removed", 0) for r in results if r.get("ok"))
+    log("一键自动去重: %d 组,共删 %d 个 folder" % (ok_n, total_removed))
+    return {"results": results, "ok_count": ok_n, "total": len(results),
+            "total_removed_folders": total_removed,
+            "review_count": len(d.get("review") or [])}
+
+
 def _folder_size_bytes(path):
     """递归算 folder 字节数。CloudDrive2 FUSE 上 stat 走 115 metadata cache,通常秒级。
     超大文件夹(>500 文件)可能慢几秒,任务异步无所谓。"""
