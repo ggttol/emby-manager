@@ -298,7 +298,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
 
   <section id="cleanup" class="hide">
     <div class="card"><h2>🧹 智能清理建议</h2>
-      <p class="muted" style="margin-bottom:10px"><b>选维度</b>决定按哪些标准建议清理 — 只勾「评分低」就不会把"评分高但占空间大"的列出来。综合分 = 勾选维度的分数和。</p>
+      <p class="muted" style="margin-bottom:10px"><b>选维度</b>决定按哪些标准建议清理 — 只勾「评分低」就不会把"评分高但占空间大"的列出来。综合分 = 勾选维度的分数和。<a href="#" onclick="event.preventDefault();UI.modal.alert({title:'📐 综合分怎么算',body:'每个维度独立计分,综合分 = 勾选维度的分数和:<br><br><b>⭐ 评分</b>:(5 − 评分)×20 → 评分 1.0 = 80 / 2.0 = 60 / 3.0 = 40 / 4.0 = 20。无评分(=0)不算。<br><b>📅 入库久</b>:>365 天起算,每多 30 天 +1 分,封顶 50。<br><b>👁️ 没人看</b>:从未播过+入库>180天=40 / >60天=20;一年没看 = 30。<br><b>💾 占空间</b>:>50GB 每 5GB +1 封顶 40;20-50GB = 大小/2。<br><b>🖼️ 元数据</b>:无海报 +10,无简介 +5。<br><br>所以「评分 1.0 = 极烂」≈「⭐ 维度满格 80 分」是合理的。';})" style="color:var(--blue)">📐 评分细则</a></p>
 
       <div style="background:#0f172a;border-radius:8px;padding:10px 12px;margin-bottom:10px">
         <div class="muted" style="font-size:12px;margin-bottom:6px">📐 评分维度(只算勾选的)</div>

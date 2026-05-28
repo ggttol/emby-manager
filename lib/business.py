@@ -1288,44 +1288,43 @@ def cleanup_suggest_async(tid, lib, top=80, min_score=20, dimensions=None):
         reasons = []
         rating_score = 0
         if "rating" in enabled:
-            # 只有真差评(<5)才扣分,无评分(=0/null)不参与评分维度
-            # —— 很多剧 emby 还没拉到 TMDb 评分,默认按"差"算会误伤;
-            # 想专门处理"无评分"用户应用「🔄 刷新无评分剧」批量补元数据
             if rating > 0 and rating < 5:
                 rating_score = int((5 - rating) * 20)
-                reasons.append("⭐ 评分 %.1f(差评)" % rating)
+                reasons.append("⭐ 评分 %.1f(差评)+%d" % (rating, rating_score))
         age_score = 0
         if "age" in enabled:
             if days_in_lib > 365:
                 age_score = min(50, int((days_in_lib - 365) / 30))
-                reasons.append("📅 入库 %d 天" % days_in_lib)
+                reasons.append("📅 入库 %d 天 +%d" % (days_in_lib, age_score))
         idle_score = 0
         if "idle" in enabled:
             if play_count == 0:
                 if days_in_lib > 180:
                     idle_score = 40
-                    reasons.append("👁️ 入库 %d 天从未播过" % days_in_lib)
+                    reasons.append("👁️ 入库 %d 天从未播过 +%d" % (days_in_lib, idle_score))
                 elif days_in_lib > 60:
                     idle_score = 20
-                    reasons.append("👁️ 入库 %d 天未播过" % days_in_lib)
+                    reasons.append("👁️ 入库 %d 天未播过 +%d" % (days_in_lib, idle_score))
             elif days_since_play and days_since_play > 365:
                 idle_score = 30
-                reasons.append("👁️ %d 天未看" % days_since_play)
+                reasons.append("👁️ %d 天未看 +%d" % (days_since_play, idle_score))
         size_gb = size_bytes / (1024.0 ** 3)
         size_score = 0
         if "size" in enabled:
             if size_gb > 50:
                 size_score = min(40, int(size_gb / 5))
-                reasons.append("💾 占 %.1f GB(大)" % size_gb)
+                reasons.append("💾 占 %.1f GB(大)+%d" % (size_gb, size_score))
             elif size_gb > 20:
                 size_score = int(size_gb / 2)
-                reasons.append("💾 占 %.1f GB" % size_gb)
+                reasons.append("💾 占 %.1f GB +%d" % (size_gb, size_score))
         meta_score = 0
         if "meta" in enabled:
+            ms_poster = 0; ms_overview = 0
             if not (i.get("ImageTags") or {}).get("Primary"):
-                meta_score += 10; reasons.append("🖼️ 无海报")
+                ms_poster = 10; reasons.append("🖼️ 无海报 +10")
             if not i.get("Overview"):
-                meta_score += 5; reasons.append("📝 无简介")
+                ms_overview = 5; reasons.append("📝 无简介 +5")
+            meta_score = ms_poster + ms_overview
         total = rating_score + age_score + idle_score + size_score + meta_score
         if total < min_score:
             continue
