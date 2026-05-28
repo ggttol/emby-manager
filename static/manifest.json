@@ -1,0 +1,13 @@
+{
+  "name": "Emby 管理工具",
+  "short_name": "Emby 管",
+  "description": "Emby strm 库管理 / 海报 / 清理 / 去重 / 定时",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b0f17",
+  "theme_color": "#6366f1",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

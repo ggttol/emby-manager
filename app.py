@@ -171,6 +171,25 @@ class H(BaseHTTPRequestHandler):
             try: html = open(os.path.join(HERE, "index.html"), encoding="utf-8").read()
             except Exception: html = "<h1>缺少 index.html</h1>"
             return self._send(200, "text/html; charset=utf-8", html)
+        # 公开静态资源:iOS 主屏图标 / favicon / PWA manifest。白名单路径(不开 /static/* 通配防遍历)
+        STATIC_MAP = {
+            "/apple-touch-icon.png":             ("static/apple-touch-icon.png", "image/png"),
+            "/apple-touch-icon-precomposed.png": ("static/apple-touch-icon.png", "image/png"),  # 老 iOS 兜底名
+            "/favicon.ico":                       ("static/favicon-32.png",       "image/png"),
+            "/favicon.png":                       ("static/favicon-32.png",       "image/png"),
+            "/icon-192.png":                      ("static/icon-192.png",         "image/png"),
+            "/icon-512.png":                      ("static/icon-512.png",         "image/png"),
+            "/manifest.json":                     ("static/manifest.json",        "application/manifest+json; charset=utf-8"),
+        }
+        if path in STATIC_MAP:
+            relpath, ctype = STATIC_MAP[path]
+            full = os.path.join(HERE, relpath)
+            try:
+                with open(full, "rb") as f: data = f.read()
+            except Exception:
+                return self._send(404, "text/plain", "not found")
+            # 长缓存(图标极少改;改了重启服务时 ETag 也变)
+            return self._send(200, ctype, data, extra_headers=[("Cache-Control", "public, max-age=86400")])
         if path == "/health":
             # 公开,不要 auth — 给外部探活(uptime kuma 之类)用
             emb = emby_online()
