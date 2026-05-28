@@ -301,15 +301,16 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
     <div class="card">
       <div class="row" style="margin-bottom:8px">
         <div style="display:inline-flex;gap:2px;background:#0b0f17;border-radius:8px;padding:3px">
-          <button class="btn ghost" id="logSubTabOps" onclick="logSwitchTab('ops')" style="padding:5px 12px;font-size:13px">📜 操作日志</button>
+          <button class="btn" id="logSubTabOps" onclick="logSwitchTab('ops')" style="padding:5px 12px;font-size:13px">📜 操作日志</button>
           <button class="btn ghost" id="logSubTabUndo" onclick="logSwitchTab('undo')" style="padding:5px 12px;font-size:13px">↩️ Undo 记录</button>
         </div>
         <span style="flex:1"></span>
-        <input id="logFilter" placeholder="过滤…" style="width:160px" oninput="renderLogList()">
+        <input id="logFilter" placeholder="过滤(只过滤当前子页)…" style="width:200px" oninput="renderLogList()">
         <button class="btn ghost" onclick="logRefresh()">刷新</button>
         <button class="btn ghost" onclick="logDownload()">📥 下载 .log</button>
       </div>
-      <div id="logOut" class="log">…</div>
+      <div id="logOps" class="log">…</div>
+      <div id="logUndo" class="hide" style="margin-top:0"></div>
     </div>
   </section>
 
@@ -1590,20 +1591,99 @@ async function delReview(gi,ri){const g=window._review[gi];const r=g.rows[ri];
 async function loadItems(){const lib=$("#mgLib").value;$("#itemList").innerHTML='<span class="spin"></span> 加载…';
   const others=LIBS.map(l=>l.name).filter(n=>n!==lib);
   $("#mgBatchTo").innerHTML='<option value="">移到…</option>'+others.map(n=>`<option>${esc(n)}</option>`).join("");
+  // 切库:清选中
+  window._mgSel = new Set();
   const d=await api("/api/items?lib="+encodeURIComponent(lib));ITEMS=d.items||[];$("#mgCount").textContent=`共 ${ITEMS.length} 部`;renderItems();}
 function renderItems(){
-  const kw=($("#mgFilter").value||"").trim();const list=kw?ITEMS.filter(i=>i.name.includes(kw)||i.folder.includes(kw)):ITEMS;
+  // 先销毁上次的 VirtualList(防止 scroll listener 泄漏)
+  const itemListEl = $("#itemList");
+  if (window._mgVList){
+    try{ window._mgVList.destroy(); }catch(e){}
+    window._mgVList = null;
+  }
+  // 清掉 ui-virt 留下的 inline style/class(切回普通模式后样式不能残留)
+  if (itemListEl){
+    itemListEl.classList.remove('ui-virt');
+    itemListEl.style.height = '';
+    itemListEl.style.overflow = '';
+  }
+  const kw=($("#mgFilter").value||"").trim();
+  // 高级过滤:tmdb:123 / 年:2024 / 路径:S01,默认搜片名+文件夹
+  let list = ITEMS;
+  if (kw){
+    let m;
+    if ((m = kw.match(/^tmdb:(\S+)$/i))){
+      const t = m[1]; list = ITEMS.filter(i=>String(i.tmdb||'')===t);
+    } else if ((m = kw.match(/^(?:年|year):(\d{4})$/i))){
+      const y = m[1]; list = ITEMS.filter(i=>String(i.year||'')===y);
+    } else if ((m = kw.match(/^(?:路径|path):(.+)$/i))){
+      const p = m[1].toLowerCase(); list = ITEMS.filter(i=>(i.folder||'').toLowerCase().includes(p));
+    } else {
+      const q = kw.toLowerCase();
+      list = ITEMS.filter(i=>(i.name||'').toLowerCase().includes(q) || (i.folder||'').toLowerCase().includes(q));
+    }
+  }
+  const meta = $("#itemListMeta");
+  if (meta) meta.textContent = `过滤后 ${list.length} 项 / 总 ${ITEMS.length} 项${list.length>200?' · 虚拟滚动模式':''}`;
   const others=LIBS.map(l=>l.name).filter(n=>n!==$("#mgLib").value);
-  $("#itemList").innerHTML=list.slice(0,500).map(i=>{const gi=ITEMS.indexOf(i);
-    return `<div class="item"><input type="checkbox" class="ck" data-gi="${gi}" onchange="updateSel()" style="margin-right:8px;width:16px;height:16px;flex-shrink:0"><div class="main"><div class="nm">${esc(i.name)} <span class="muted">${i.year||""}</span></div><div class="meta">tmdb:${i.tmdb||"无"} · 📁${esc(i.folder)}</div></div>
-      <select id="mv${gi}"><option value="">移到…</option>${others.map(o=>`<option>${esc(o)}</option>`).join("")}</select>
-      <button class="btn ghost" onclick="doMove(${gi})">移动</button><button class="btn danger" onclick="doDelete(${gi})">删除</button></div>`;
-  }).join("")+(list.length>500?'<p class="muted">仅显示前 500,用过滤缩小</p>':"");
+  const optsHtml = others.map(o=>`<option>${esc(o)}</option>`).join("");
+  const rowHTML = (i, gi)=>`<div class="item" style="height:64px;box-sizing:border-box">
+    <input type="checkbox" class="ck" data-gi="${gi}" onchange="updateSel()" style="margin-right:8px;width:16px;height:16px;flex-shrink:0">
+    <div class="main"><div class="nm">${esc(i.name)} <span class="muted">${i.year||""}</span></div><div class="meta">tmdb:${i.tmdb||"无"} · 📁${esc(i.folder)}</div></div>
+    <select id="mv${gi}"><option value="">移到…</option>${optsHtml}</select>
+    <button class="btn ghost" onclick="doMove(${gi})">移动</button><button class="btn danger" onclick="doDelete(${gi})">删除</button>
+  </div>`;
+  if (list.length <= 200){
+    // 小列表直接渲染(无虚拟滚动,保留原行为)
+    itemListEl.innerHTML = list.map(i=>{ const gi=ITEMS.indexOf(i); return rowHTML(i, gi); }).join("");
+  } else {
+    // 大列表用 VirtualList(防 5000+ item 卡死 DOM)
+    itemListEl.style.height = '600px';
+    itemListEl.style.overflow = 'auto';
+    // VirtualList.render 返 HTML 字符串(类内部 cell=render(...) 再包一层 <div>);
+    // 我们的 rowHTML 已带外层 .item div,所以渲一个原子字符串即可
+    window._mgVList = new UI.VirtualList({
+      items: list,
+      rowHeight: 64,
+      render: (it, idx) => {
+        const gi = ITEMS.indexOf(it);
+        return rowHTML(it, gi);
+      }
+    }).mount(itemListEl);
+  }
   if($("#ckAll"))$("#ckAll").checked=false;updateSel();
 }
-function updateSel(){const n=document.querySelectorAll(".ck:checked").length;$("#selCnt").textContent=`选中 ${n}`;}
-function toggleAll(){const on=$("#ckAll").checked;document.querySelectorAll(".ck").forEach(c=>c.checked=on);updateSel();}
-function selectedGis(){return Array.from(document.querySelectorAll(".ck:checked")).map(c=>parseInt(c.dataset.gi));}
+// 选中状态用 Set 跟,VirtualList 模式下只有可见行在 DOM,不能光靠 querySelector
+window._mgSel = window._mgSel || new Set();
+function updateSel(forceFromDom){
+  // 把 DOM 里当前可见 checkbox 的状态同步进 Set(用户手点的体现);
+  // VList 滚出视野的行 unmount → 它的状态保留在 Set
+  document.querySelectorAll('.ck').forEach(c=>{
+    const gi = parseInt(c.dataset.gi);
+    if (c.checked) window._mgSel.add(gi); else window._mgSel.delete(gi);
+  });
+  const n = window._mgSel.size;
+  $("#selCnt").textContent = `选中 ${n}`;
+}
+function toggleAll(){
+  const on = $("#ckAll").checked;
+  // 重新算"过滤后"列表的 gi 全集(对当前过滤结果全选/全清)
+  const kw=($("#mgFilter").value||"").trim().toLowerCase();
+  const filtered = kw ? ITEMS.filter(i=>(i.name||'').toLowerCase().includes(kw) || (i.folder||'').toLowerCase().includes(kw)) : ITEMS;
+  window._mgSel = new Set();
+  if (on) filtered.forEach(i=>window._mgSel.add(ITEMS.indexOf(i)));
+  // 同步可见 DOM
+  document.querySelectorAll('.ck').forEach(c=>{
+    const gi = parseInt(c.dataset.gi);
+    c.checked = window._mgSel.has(gi);
+  });
+  $("#selCnt").textContent = `选中 ${window._mgSel.size}`;
+}
+function selectedGis(){
+  // 先把可见 DOM 同步进 Set,再返
+  updateSel();
+  return Array.from(window._mgSel);
+}
 async function doDelete(gi){const i=ITEMS[gi];
   const body = `<div>删除 <b>${UI.esc(i.name)}</b> ${i.year||''}</div><div class="muted" style="font-size:12px;margin-top:4px">tmdb:${i.tmdb||'无'} · 📁${UI.esc(i.folder)} · 库 ${UI.esc($("#mgLib").value)}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 → 回收站(可还原)+ strm + Emby 同步删</div>`;
   if(!(await UI.modal.confirm({danger:true,title:'删除',body,okText:'删除'})))return;
@@ -1619,34 +1699,58 @@ async function doDeleteBatch(){
   const names=gis.slice(0,5).map(g=>ITEMS[g].name).join("、")+(gis.length>5?` 等 ${gis.length} 部`:"");
   const body = `<div>删除 <b>${gis.length}</b> 部</div><div class="muted" style="font-size:12px;margin-top:4px">${UI.esc(names)}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 → 回收站(可还原)+ strm + Emby 同步删</div>`;
   if(!(await UI.modal.confirm({danger:true,title:'批量删除',body,okText:'确认批量删',requireType: gis.length >= 5 ? '删除' : null})))return;
-  let ok=0,fail=0,failNames=[];
-  for(const gi of gis){
-    const i=ITEMS[gi];
-    try{const r=await api("/api/item",{method:"DELETE",body:JSON.stringify({lib,folder:i.folder,id:i.id})});
-        if(r.err){fail++;failNames.push(i.name+":"+r.err);}else ok++;}
-    catch(e){fail++;failNames.push(i.name+":"+e);}
-    toast(`删除中 ${ok+fail}/${gis.length}…`);
-  }
-  toast(`完成: ✓ ${ok}${fail?` ✗ ${fail}`:""}`,4500);
-  if(failNames.length)console.warn("删除失败:",failNames);
-  loadItems();start();
+  const items = gis.map(g=>({folder: ITEMS[g].folder, id: ITEMS[g].id}));
+  const r = await api('/api/manage/delete_batch', {method:'POST', body:JSON.stringify({lib, items, async:true})});
+  if (r && r.err){ UI.toast('启动失败: '+r.err, {type:'error'}); return; }
+  if (!r || !r.tid){ UI.toast('后端未返 tid', {type:'error'}); return; }
+  UI.tasks.start(r.tid, {
+    label: `批量删 ${gis.length} 部`,
+    onDone: (t)=>{
+      const res = t.result || {};
+      const ok = res.ok_count || 0;
+      const fail = (res.total || 0) - ok;
+      UI.toast(`删除完成 ✓${ok}${fail?` ✗${fail}`:''}`, {
+        type: fail ? 'warn' : 'ok', ms: 7000,
+        action: fail ? {label:'失败详情', fn:()=>UI.modal.alert({
+          title:'删除失败列表',
+          body:(res.results||[]).filter(x=>!x.ok).map(x=>'· '+UI.esc(x.folder||'?')+': '+UI.esc(x.err||'')).join('<br>'),
+          copyable: true
+        })} : null
+      });
+      window._mgSel = new Set();
+      loadItems();
+      start();
+    }
+  });
 }
 async function doMoveBatch(){
   const gis=selectedGis();if(!gis.length){toast("先勾选");return;}
   const to=$("#mgBatchTo").value;if(!to){toast("先在工具栏选目标库");return;}
   const lib=$("#mgLib").value;
   if(!(await UI.modal.confirm({title:'批量移动',body:`<div>把 <b>${gis.length}</b> 部从 <b>${UI.esc(lib)}</b> → <b>${UI.esc(to)}</b></div>`,okText:'移动'})))return;
-  let ok=0,fail=0,failNames=[];
-  for(const gi of gis){
-    const i=ITEMS[gi];
-    try{const r=await api("/api/move",{method:"POST",body:JSON.stringify({from:lib,folder:i.folder,to,id:i.id})});
-        if(r.err){fail++;failNames.push(i.name+":"+r.err);}else ok++;}
-    catch(e){fail++;failNames.push(i.name+":"+e);}
-    toast(`移动中 ${ok+fail}/${gis.length}…`);
-  }
-  toast(`完成: ✓ ${ok}${fail?` ✗ ${fail}`:""}`,4500);
-  if(failNames.length)console.warn("移动失败:",failNames);
-  loadItems();start();
+  const items = gis.map(g=>({folder: ITEMS[g].folder, id: ITEMS[g].id}));
+  const r = await api('/api/manage/move_batch', {method:'POST', body:JSON.stringify({from:lib, to, items, async:true})});
+  if (r && r.err){ UI.toast('启动失败: '+r.err, {type:'error'}); return; }
+  if (!r || !r.tid){ UI.toast('后端未返 tid', {type:'error'}); return; }
+  UI.tasks.start(r.tid, {
+    label: `批量移 ${gis.length} 部 → ${to}`,
+    onDone: (t)=>{
+      const res = t.result || {};
+      const ok = res.ok_count || 0;
+      const fail = (res.total || 0) - ok;
+      UI.toast(`移动完成 ✓${ok}${fail?` ✗${fail}`:''}`, {
+        type: fail ? 'warn' : 'ok', ms: 7000,
+        action: fail ? {label:'失败详情', fn:()=>UI.modal.alert({
+          title:'移动失败列表',
+          body:(res.results||[]).filter(x=>!x.ok).map(x=>'· '+UI.esc(x.folder||'?')+': '+UI.esc(x.err||'')).join('<br>'),
+          copyable: true
+        })} : null
+      });
+      window._mgSel = new Set();
+      loadItems();
+      start();
+    }
+  });
 }
 
 // 系统
@@ -1704,8 +1808,110 @@ async function loadRecentTasks(){
     </div>`;
   }).join('');
 }
-// 日志
-async function loadLog(){const o=$("#logOut");o.textContent="加载…";const d=await api("/api/log");o.textContent=(d.logs||[]).join("\n")||"(暂无操作记录)";}
+// 日志:两个子页(操作日志 / Undo 记录),共享过滤框
+window._logSub = window._logSub || 'ops';
+window._logsRaw = window._logsRaw || []; // 全量缓存供过滤
+window._undoRaw = window._undoRaw || [];
+
+async function loadLog(){
+  // tab 入口:按当前子页加载对应数据
+  if (window._logSub === 'undo') return loadUndoLog();
+  const o=$("#logOps");o.textContent="加载…";
+  const d=await api("/api/log");
+  window._logsRaw = d.logs || [];
+  renderLogList();
+}
+async function loadUndoLog(){
+  const o = $("#logUndo");
+  o.innerHTML = '<span class="spin"></span> 加载…';
+  let d; try { d = await api('/api/undo_log'); } catch(e){ o.textContent='出错: '+e; return; }
+  window._undoRaw = d.items || [];
+  renderLogList();
+}
+function logSwitchTab(name){
+  window._logSub = name;
+  document.querySelector('#logSubTabOps').classList.toggle('ghost', name !== 'ops');
+  document.querySelector('#logSubTabUndo').classList.toggle('ghost', name !== 'undo');
+  document.querySelector('#logOps').classList.toggle('hide', name !== 'ops');
+  document.querySelector('#logUndo').classList.toggle('hide', name !== 'undo');
+  if (name === 'undo' && !window._undoRaw.length) loadUndoLog();
+  else renderLogList();
+}
+function renderLogList(){
+  const kw = ($("#logFilter").value || '').trim().toLowerCase();
+  if (window._logSub === 'ops'){
+    const o = $("#logOps");
+    if (!o) return;
+    let lines = window._logsRaw;
+    if (kw) lines = lines.filter(ln=>String(ln).toLowerCase().includes(kw));
+    o.textContent = lines.join('\n') || (kw?'(无匹配)':'(暂无操作记录)');
+    return;
+  }
+  // undo 子页
+  const o = $("#logUndo"); if (!o) return;
+  let items = window._undoRaw;
+  if (kw){
+    items = items.filter(e=>{
+      try { return JSON.stringify(e).toLowerCase().includes(kw); }
+      catch(_){ return false; }
+    });
+  }
+  if (!items.length){ o.innerHTML = '<p class="muted" style="padding:14px 4px">'+(kw?'(无匹配)':'(暂无 undo 记录)')+'</p>'; return; }
+  o.innerHTML = items.map(e=>{
+    const ts = e.ts ? new Date(e.ts*1000).toLocaleString('zh-CN', {hour12:false}) : '?';
+    const op = e.op || '?';
+    const p = e.payload || {};
+    const desc = op === 'move'
+      ? `<b>${esc(p.folder||'?')}</b> · <span class="badge">${esc(p.from||'?')}</span> → <span class="badge">${esc(p.to||'?')}</span>`
+      : op === 'delete'
+        ? `<b>${esc(p.folder||'?')}</b> · 库 <span class="badge">${esc(p.lib||'?')}</span> 删除`
+        : `<span class="muted">${esc(JSON.stringify(p))}</span>`;
+    const action = op === 'move'
+      ? `<button class="btn ghost" onclick='doUndo(${JSON.stringify(e.id)})'>↩️ 撤销</button>`
+      : `<span class="muted" style="font-size:11px">删除已进 115 回收站,自行还原</span>`;
+    return `<div class="item" style="padding:10px 4px">
+      <div class="main">
+        <div style="font-size:13px">${desc}</div>
+        <div class="meta" style="margin-top:3px">${esc(ts)} · op:${esc(op)} · id:${esc(e.id||'')}</div>
+      </div>
+      ${action}
+    </div>`;
+  }).join('');
+}
+async function doUndo(id){
+  if(!(await UI.modal.confirm({title:'撤销操作', body:'确定撤销 id <code>'+esc(id)+'</code> 这条记录?<div class="muted" style="font-size:12px;margin-top:6px">仅 move 可一键撤销;delete 会提示去 115 回收站还原。</div>', okText:'撤销'}))) return;
+  const r = await api('/api/undo', {method:'POST', body:JSON.stringify({id})});
+  if (r && r.err){
+    // delete 类返 err+hint:友好弹出
+    if (r.hint){
+      await UI.modal.alert({title:'需要手动还原', body:'<div>'+esc(r.err)+'</div><div class="muted" style="font-size:12px;margin-top:8px">提示: '+esc(r.hint)+'</div>', copyable:false});
+    } else {
+      UI.toast('撤销失败: '+r.err, {type:'error'});
+    }
+    return;
+  }
+  UI.toast('已撤销', {type:'ok'});
+  loadUndoLog();
+  // 若是反向 move,关联库可能需要刷
+  if (typeof loadItems === 'function' && $("#mgLib")) loadItems();
+}
+async function logRefresh(){
+  if (window._logSub === 'undo') return loadUndoLog();
+  return loadLog();
+}
+function logDownload(){
+  // 浏览器侧 download:把当前缓存按子页 dump 成 txt
+  const lines = window._logSub === 'undo'
+    ? window._undoRaw.map(e=>JSON.stringify(e))
+    : window._logsRaw;
+  const blob = new Blob([lines.join('\n')], {type:'text/plain'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `emby-manager-${window._logSub}-${new Date().toISOString().slice(0,10)}.log`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
 
 // 用户管理
 async function loadUsers(){
