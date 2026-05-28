@@ -815,6 +815,27 @@ def replace_folder(lib, win_folder, lose_folder):
                 "新 folder 改名回「%s」" % lose_folder if renamed_to == lose_folder else "")}
 
 
+def replace_batch_async(tid, items):
+    """批量替换 [{lib, win_folder, lose_folder}, ...] → 进度上报 + 聚合结果。
+    每条调 replace_folder;失败的项不阻塞其他项。"""
+    task_set(tid, total=len(items))
+    results = []
+    for i, it in enumerate(items):
+        if task_is_cancelled(tid): break
+        lib = it.get("lib", ""); win = it.get("win_folder", ""); lose = it.get("lose_folder", "")
+        task_set(tid, progress=i, status_text="替换 " + lose[:40])
+        try:
+            r = replace_folder(lib, win, lose)
+            results.append({"lib": lib, "lose": lose, "win": win, "ok": True,
+                            "kept_as": r.get("kept_as"), "msg": r.get("msg", "")})
+        except Exception as e:
+            results.append({"lib": lib, "lose": lose, "win": win, "ok": False, "err": str(e)})
+        task_set(tid, progress=i + 1)
+    ok_n = sum(1 for r in results if r["ok"])
+    log("批量替换 → ✓ %d / 共 %d" % (ok_n, len(results)))
+    return {"results": results, "ok_count": ok_n, "total": len(results)}
+
+
 def add_new_pipeline_async(tid, items, default_lib, save_to_lib_fn):
     """一条龙加新资源 pipeline:批量 receive → scan 涉及库 → 等刮削 → 海报+重复检查 → 聚合 report。
 
