@@ -304,7 +304,7 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/move": return self._json(move_item(b.get("from"), b.get("folder"), b.get("to"), b.get("id"), on_conflict=b.get("on_conflict", "error")))
             if path == "/api/createlib": return self._json(create_library(b.get("name"), b.get("ctype")))
             if path == "/api/users/new": return self._json(create_user(b.get("name"), b.get("pw")))
-            if path == "/api/users/update": return self._json(update_user(b.get("id"), b.get("maxsessions"), b.get("disabled")))
+            if path == "/api/users/update": return self._json(update_user(b.get("id"), b.get("maxsessions"), b.get("disabled"), b.get("bitrate_mbps")))
             if path == "/api/config": return self._json(set_config(b))
             if path == "/api/c115/snap":
                 items = b.get("items")

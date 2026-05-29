@@ -2352,11 +2352,14 @@ async function loadUsers(){
   const d=await api("/api/users?withActivity=1");
   o.innerHTML=(d.users||[]).map(u=>{
     const act = (u.last_activity||'').slice(0,10) || (u.last_login||'').slice(0,10) || '';
+    const sl = u.stream_limit!=null?u.stream_limit:u.maxsessions;
+    const br = u.bitrate_mbps||0;
     return `<div class="item"><div class="main">
     <div class="nm">${esc(u.name)} ${u.admin?'<span class="badge">管理员</span>':''} ${u.disabled?'<span class="badge warn">已停用</span>':''}</div>
-    <div class="meta">同时串流上限: ${u.maxsessions?u.maxsessions:'不限'} · 最后活跃: <span class="muted">${esc(act||'未记录')}</span></div></div>
-    <input id="ms${u.id}" type="number" min="0" value="${u.maxsessions}" style="width:64px" title="0=不限">
-    <button class="btn ghost" onclick="updateUser('${u.id}')">存上限</button>
+    <div class="meta">同时播放: ${sl?sl+' 路':'不限'} · 限速: ${br?br+' Mbps':'不限'} · 最后活跃: <span class="muted">${esc(act||'未记录')}</span></div></div>
+    <label class="muted" style="font-size:11px">同时播放<input id="ms${u.id}" type="number" min="0" value="${sl}" style="width:54px;margin-left:3px" title="同时能开几路播放,0=不限"></label>
+    <label class="muted" style="font-size:11px">限速Mbps<input id="br${u.id}" type="number" min="0" step="0.5" value="${br}" style="width:60px;margin-left:3px" title="远程串流码率上限,0=不限。参考:1080p≈8,4K≈25"></label>
+    <button class="btn ghost" onclick="updateUser('${u.id}')">存</button>
     <button class="btn ghost" onclick="updateUser('${u.id}',${u.disabled?0:1})">${u.disabled?'启用':'停用'}</button>
     ${u.admin?'':`<button class="btn danger" onclick="delUser('${u.id}','${esc(u.name)}')">删</button>`}</div>`;
   }).join("");
@@ -2370,7 +2373,10 @@ async function addUser(){
 async function updateUser(id,toggleDisabled){
   const body={id};
   if(toggleDisabled!==undefined) body.disabled=(toggleDisabled===1);
-  else{const el=$("#ms"+id); if(el) body.maxsessions=el.value;}
+  else{
+    const el=$("#ms"+id); if(el) body.maxsessions=el.value;
+    const bl=$("#br"+id); if(bl) body.bitrate_mbps=bl.value;
+  }
   const r=await api("/api/users/update",{method:"POST",body:JSON.stringify(body)});
   if (r.ok) UI.toast('已保存', {type:'ok', ms:1500});
   else UI.toast('失败' + (r.err?': '+r.err:''), {type:'error'});

@@ -164,8 +164,15 @@ def list_users(with_activity=False):
     try:
         for u in eget("/Users"):
             p = u.get("Policy", {})
+            # 同时播放数:真实字段是 SimultaneousStreamLimit(MaxActiveSessions 在新版 Emby 是死字段,
+            # 回落兼容)。码率上限 RemoteClientBitrateLimit 单位 bps,转 Mbps 给前端展示。
+            stream_limit = p.get("SimultaneousStreamLimit") or p.get("MaxActiveSessions") or 0
+            bps = p.get("RemoteClientBitrateLimit") or 0
             row = {"id": u["Id"], "name": u["Name"], "admin": bool(p.get("IsAdministrator")),
-                   "disabled": bool(p.get("IsDisabled")), "maxsessions": p.get("MaxActiveSessions", 0)}
+                   "disabled": bool(p.get("IsDisabled")),
+                   "maxsessions": stream_limit,        # 兼容老前端字段名
+                   "stream_limit": stream_limit,
+                   "bitrate_mbps": round(bps / 1000000.0, 1) if bps else 0}
             if with_activity:
                 row["last_activity"] = u.get("LastActivityDate", "") or ""
                 row["last_login"] = u.get("LastLoginDate", "") or ""
@@ -192,18 +199,31 @@ def create_user(name, pw):
     return {"ok": True, "id": uid, "name": name}
 
 
-def update_user(uid, maxsessions, disabled):
+def update_user(uid, maxsessions=None, disabled=None, bitrate_mbps=None):
+    """改用户策略。
+    maxsessions  → 同时播放数上限(写真实字段 SimultaneousStreamLimit,顺带 MaxActiveSessions 兼容旧版)
+    bitrate_mbps → 远程串流码率上限(Mbps,转 bps 写 RemoteClientBitrateLimit;0/'' = 不限)
+    disabled     → 停用/启用
+    """
     from lib.logger import log
     pol = next((u.get("Policy", {}) for u in eget("/Users") if u["Id"] == uid), None)
     if pol is None:
         return {"err": "用户不存在"}
-    if maxsessions is not None:
-        try: pol["MaxActiveSessions"] = int(maxsessions)
+    if maxsessions is not None and str(maxsessions) != "":
+        try:
+            n = max(0, int(maxsessions))
+            pol["SimultaneousStreamLimit"] = n
+            pol["MaxActiveSessions"] = n  # 旧版 Emby 字段,新版忽略,写了无害
+        except Exception: pass
+    if bitrate_mbps is not None and str(bitrate_mbps) != "":
+        try:
+            mbps = max(0.0, float(bitrate_mbps))
+            pol["RemoteClientBitrateLimit"] = int(round(mbps * 1000000))  # 0 = 不限
         except Exception: pass
     if disabled is not None:
         pol["IsDisabled"] = bool(disabled)
     code = epost("/Users/%s/Policy" % uid, body=pol)
-    log("改用户策略 %s (并发=%s 停用=%s)" % (uid, maxsessions, disabled))
+    log("改用户策略 %s (同时播放=%s 码率Mbps=%s 停用=%s)" % (uid, maxsessions, bitrate_mbps, disabled))
     return {"ok": code in (200, 204), "code": code}
 
 

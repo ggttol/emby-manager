@@ -134,5 +134,41 @@ class TestDeleteItemVerifyRetry(unittest.TestCase):
         self.assertEqual(calls["del_folder"], 1, "verify 失败磁盘也要清")
 
 
+class TestUserLimits(unittest.TestCase):
+    """限速 / 限同时播放数:写入真实 Policy 字段 + Mbps→bps 换算。"""
+    def _capture(self, **kw):
+        import lib.emby as em
+        posted = {}
+        users = [{"Id": "u1", "Name": "ca", "Policy": {"IsAdministrator": False}}]
+        def fake_eget(path, params=None): return users
+        def fake_epost(path, params=None, body=None):
+            posted["path"] = path; posted["body"] = body; return 204
+        with patch.object(em, "eget", fake_eget), patch.object(em, "epost", fake_epost):
+            em.update_user("u1", **kw)
+        return posted.get("body", {})
+
+    def test_bitrate_mbps_to_bps(self):
+        pol = self._capture(bitrate_mbps=8)
+        self.assertEqual(pol["RemoteClientBitrateLimit"], 8000000)
+
+    def test_bitrate_zero_means_unlimited(self):
+        pol = self._capture(bitrate_mbps=0)
+        self.assertEqual(pol["RemoteClientBitrateLimit"], 0)
+
+    def test_stream_limit_writes_real_field(self):
+        # 同时播放数要写真实字段 SimultaneousStreamLimit(不是死字段 MaxActiveSessions)
+        pol = self._capture(maxsessions=2)
+        self.assertEqual(pol["SimultaneousStreamLimit"], 2)
+
+    def test_list_users_maps_policy_fields(self):
+        import lib.emby as em
+        users = [{"Id": "u1", "Name": "ca", "Policy": {
+            "SimultaneousStreamLimit": 3, "RemoteClientBitrateLimit": 8000000}}]
+        with patch.object(em, "eget", lambda path, params=None: users):
+            rows = em.list_users()
+        self.assertEqual(rows[0]["stream_limit"], 3)
+        self.assertEqual(rows[0]["bitrate_mbps"], 8.0)
+
+
 if __name__ == "__main__":
     unittest.main()
