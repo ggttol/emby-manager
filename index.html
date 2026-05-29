@@ -256,6 +256,12 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
       <p class="muted" style="font-size:12px;margin:6px 0 10px">本地 115 资源库(从金山文档抓的 ~15.7 万条分享链)。搜片名 → 选中 → 一键转存到 115 指定目录。⚠️ 链接是快照,部分可能已失效;「整包」是合集链(转的是整包不是单片)。</p>
       <div class="row" style="gap:8px">
         <input id="catalogQ" placeholder="片名关键词(多个空格分隔,如:沙丘 4k)" style="flex:1" onkeydown="if(event.key==='Enter')catalogSearch()">
+        <select id="catalogType" title="链接类型" onchange="catalogSearch()">
+          <option value="">全部类型</option>
+          <option value="share115">115分享(秒传)</option>
+          <option value="magnet">磁力(离线下载)</option>
+          <option value="ed2k">ed2k(离线下载)</option>
+        </select>
         <button class="btn" onclick="catalogSearch()">🔍 搜索</button>
       </div>
       <div class="row" style="gap:8px;margin-top:8px;align-items:center">
@@ -2622,23 +2628,31 @@ async function loadCatalog(){
     }
   }catch(e){}
 }
+function _ltLabel(t){ return t==='share115'?'<span class="badge g">115秒传</span>':t==='magnet'?'<span class="badge" style="background:#7c3aed">磁力</span>':t==='ed2k'?'<span class="badge" style="background:#7c3aed">ed2k</span>':'<span class="badge">'+esc(t||'?')+'</span>'; }
 async function catalogSearch(){
   const q = $("#catalogQ").value.trim();
   const out = $("#catalogOut");
   if(!q){ out.textContent='输入片名'; return; }
+  const type = $("#catalogType").value;
   out.innerHTML='<span class="spin"></span> 搜索中…';
-  let d; try{ d=await api('/api/catalog/search?q='+encodeURIComponent(q)); }catch(e){ out.textContent='出错: '+e; return; }
+  let d; try{ d=await api('/api/catalog/search?q='+encodeURIComponent(q)+(type?'&type='+type:'')); }catch(e){ out.textContent='出错: '+e; return; }
   if(d.err){ out.innerHTML=`<span class="badge warn">${esc(d.err)}</span>`; return; }
+  if(d.hint && !(d.items||[]).length){ out.innerHTML=`<span class="badge warn">${esc(d.hint)}</span>`; return; }
   window._catalogItems = d.items||[];
   if(!d.items.length){ out.innerHTML='<p class="muted">没搜到。换个关键词试试(库里名字是从文档抓的,可能和标准译名不同)</p>'; return; }
-  out.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:6px">${d.items.length} 条${d.truncated?'(已截断,缩小关键词)':''} · 单片优先排前</div>` +
-    d.items.map((it,i)=>`<div class="item" style="border-bottom:1px solid var(--line);padding:8px 2px">
+  out.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:6px">${d.items.length} 条${d.truncated?'(已截断,缩小关键词)':''} · 115秒传链优先排前</div>` +
+    d.items.map((it,i)=>{
+      const offline = !it.transfer;  // 磁力/ed2k 走离线下载
+      const btn = offline
+        ? `<button class="btn ghost" style="color:#a78bfa" onclick="catalogTransfer(${i})">📡 离线下载</button>`
+        : `<button class="btn ghost" onclick="catalogTransfer(${i})">⬇️ 转存</button>`;
+      return `<div class="item" style="border-bottom:1px solid var(--line);padding:8px 2px">
       <div class="main">
-        <div class="nm">${esc(it.name)} ${it.is_pkg?'<span class="badge warn" title="整包合集,转的是整包不是单片">📦整包</span>':'<span class="badge g">单片</span>'}</div>
-        <div class="meta"><span class="badge">${esc(it.sheet)}</span> <span class="muted" style="font-size:11px">${esc((it.link||'').slice(0,52))}…</span></div>
+        <div class="nm">${esc(it.name)} ${_ltLabel(it.link_type)} ${it.is_pkg?'<span class="badge warn" title="整包合集">📦整包</span>':''}</div>
+        <div class="meta"><span class="badge">${esc(it.sheet)}</span> <span class="muted" style="font-size:11px">${esc((it.link||'').slice(0,46))}…</span></div>
       </div>
-      <button class="btn ghost" onclick="catalogTransfer(${i})">⬇️ 转存</button>
-    </div>`).join("");
+      ${btn}
+    </div>`;}).join("");
 }
 async function catalogTransfer(i){
   const it = window._catalogItems[i];
@@ -2648,24 +2662,27 @@ async function catalogTransfer(i){
   if(!cid && !lib){ UI.toast('先选目标库或填 cid', {type:'warn'}); return; }
   if(cid && !/^[1-9]\d*$/.test(cid)){ UI.toast('自定义 cid 必须是正整数(0=根目录不允许)', {type:'warn'}); return; }
   const target = cid ? ('cid '+cid) : ('库「'+lib+'」');
+  const offline = !it.transfer;
   const ok = await UI.modal.confirm({
     danger: it.is_pkg,
-    title: '转存到 '+target,
-    body: `<div><b>${UI.esc(it.name)}</b></div>`+
-      (it.is_pkg?'<div style="margin-top:8px;color:var(--warn);font-size:12px">⚠️ 这是<b>整包合集</b>链接 —— 会把整个合集(可能几百部/几 TB)转进目标目录,不是单部!打字确认。</div>':'')+
+    title: (offline?'📡 离线下载到 ':'⬇️ 转存到 ')+target,
+    body: `<div><b>${UI.esc(it.name)}</b> ${_ltLabel(it.link_type)}</div>`+
+      (offline?'<div style="margin-top:8px;color:#a78bfa;font-size:12px">📡 这是<b>磁力/ed2k</b>,走 115 <b>离线下载</b>(115 云端替你下,占空间、要时间、冷门可能下不动;到 115 看进度,不是秒传)。</div>':'')+
+      (it.is_pkg?'<div style="margin-top:8px;color:var(--warn);font-size:12px">⚠️ <b>整包合集</b> —— 整个合集(可能几百部/几 TB)!打字确认。</div>':'')+
       `<div class="muted" style="font-size:12px;margin-top:8px">${UI.esc(it.link)}</div>`,
-    okText: '转存',
-    requireType: it.is_pkg ? '整包' : null   // 整包是 TB 级不可逆操作,打字确认(与本仓库高危操作惯例一致)
+    okText: offline?'离线下载':'转存',
+    requireType: it.is_pkg ? '整包' : null
   });
   if(!ok) return;
   const body = cid ? {link:it.link, cid:cid, label:it.name} : {link:it.link, lib:lib};
   let r; try{ r=await api('/api/catalog/transfer',{method:'POST',body:JSON.stringify(body)}); }
-  catch(e){ UI.toast('转存失败: '+e,{type:'error'}); return; }
+  catch(e){ UI.toast((offline?'离线添加':'转存')+'失败: '+e,{type:'error'}); return; }
   if(r.ok){
-    UI.toast(`✓ ${r.msg||'已转存'}${r.count?(' ('+r.count+'项)'):''}`,{type:'ok',ms:5000,
-      action:lib?{label:'去扫这个库',fn:()=>{tab('scan');setTimeout(()=>{const s=$("#scanLib");if(s){s.value=lib;}},80);}}:null});
+    const tip = offline ? (r.msg||'已加入离线队列')+(r.quota!=null?(' · 配额剩 '+r.quota):'') : (r.msg||'已转存')+(r.count?(' ('+r.count+'项)'):'');
+    UI.toast('✓ '+tip,{type:'ok',ms:6000,
+      action:(!offline&&lib)?{label:'去扫这个库',fn:()=>{tab('scan');setTimeout(()=>{const s=$("#scanLib");if(s){s.value=lib;}},80);}}:null});
   }else{
-    UI.toast('转存失败: '+(r.err||r.msg||'未知'),{type:'error',ms:6000});
+    UI.toast((offline?'离线添加':'转存')+'失败: '+(r.err||r.msg||'未知'),{type:'error',ms:6000});
   }
 }
 function parseLines(t){

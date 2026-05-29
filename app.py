@@ -104,6 +104,10 @@ def c115_save_to_cid(url, pwd, cid, label=None, file_ids=None):
     return _c115.c115_save_to_cid(_c115_req, url, pwd, cid, label, file_ids)
 
 
+def c115_offline_add(url, cid, label=None):
+    return _c115.c115_offline_add(_c115_req, url, cid, label)
+
+
 # business 里的 c115 批处理也走本模块的 c115_snap_full / c115_save_to_lib(让 patch 链能贯穿)
 def c115_snap_batch(items, default_pwd=""):
     return _biz.c115_snap_batch(c115_snap_full, items, default_pwd)
@@ -257,7 +261,7 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"csrf": _token_csrf(t) or "",
                                    "username": CFG.get("username") or "admin"})
             if path == "/api/catalog/search":
-                return self._json(_catalog.catalog_search(q.get("q", [""])[0]))
+                return self._json(_catalog.catalog_search(q.get("q", [""])[0], link_type=q.get("type", [""])[0] or None))
             if path == "/api/catalog/stats":
                 return self._json(_catalog.catalog_stats())
             if path == "/api/schedules":
@@ -343,17 +347,27 @@ class H(BaseHTTPRequestHandler):
                 return self._json({"tid": run_async("dedup_exec_batch", dedup_exec_batch_async,
                                                    b.get("groups") or [])})
             if path == "/api/catalog/transfer":
-                # 从资源库选中的分享链 → 转存到指定目录(lib 名 或 直接 cid)
+                # 从资源库选中 → 按链接类型自动路由:115 分享链走转存(秒传);magnet/ed2k 走离线下载
                 lib = b.get("lib"); cid = b.get("cid")
                 url = b.get("link") or b.get("url", ""); pwd = b.get("pwd", "")
+                ul = (url or "").lower()
+                is_offline = ul.startswith("magnet:") or ul.startswith("ed2k:") or \
+                             (ul.startswith("http") and "/s/" not in ul)  # 非 115 分享的 http 直链也走离线
+                # 解析目标 cid:显式 cid 优先(必须正整数),否则用 lib 映射的 cid
+                target_cid = None; label = b.get("label") or lib
                 if cid not in (None, ""):
-                    # cid 必须正整数:防 "0"(=115 根目录)误转 + 非数字注定失败的请求
                     if not re.fullmatch(r"[1-9]\d*", str(cid)):
-                        return self._json({"ok": False, "err": "cid 必须是正整数(0=根目录,不允许;从 CloudDrive2 web 进目录看 URL 末尾数字)"}, 400)
-                    return self._json(c115_save_to_cid(url, pwd, str(cid), label=b.get("label")))
-                if lib:
-                    return self._json(c115_save_to_lib(url, pwd, lib))
-                return self._json({"ok": False, "err": "未指定目标库或 cid"}, 400)
+                        return self._json({"ok": False, "err": "cid 必须是正整数(0=根目录,不允许)"}, 400)
+                    target_cid = str(cid)
+                elif lib:
+                    target_cid = (CFG.get("c115_cid_map") or {}).get(lib)
+                    if not target_cid:
+                        return self._json({"ok": False, "err": "库「%s」没配 115 cid,去设置页填" % lib}, 400)
+                else:
+                    return self._json({"ok": False, "err": "未指定目标库或 cid"}, 400)
+                if is_offline:
+                    return self._json(c115_offline_add(url, target_cid, label=label))
+                return self._json(c115_save_to_cid(url, pwd, target_cid, label=label))
             if path == "/api/c115/test_candidate":
                 return self._json(c115_test(b.get("cookie")))
             if path == "/api/c115/auto_cid":

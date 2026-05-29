@@ -118,34 +118,37 @@ class TestConfigBak(unittest.TestCase):
     """config.json 损坏时从 .bak 恢复,不静默丢配置。"""
     def test_corrupt_config_falls_back_to_bak(self):
         from lib import config
-        with tempfile.TemporaryDirectory() as tmp:
-            cfgf = os.path.join(tmp, "config.json")
-            good = {"emby_url": "http://good", "api_key": "K", "port": 8097,
-                    "c115_cookie": "REAL_COOKIE", "password_hash": "h"}
-            # 先写一份好的 + 备份
-            with open(cfgf, "w") as f: json.dump(good, f)
-            with open(cfgf + ".bak", "w") as f: json.dump(good, f)
-            # 主文件损坏(漏括号)
-            with open(cfgf, "w") as f: f.write('{"emby_url": "http://good", BROKEN')
-            with patch.object(config, "CONFIG_FILE", cfgf):
-                config.load_cfg()
-                self.assertEqual(config.CFG.get("c115_cookie"), "REAL_COOKIE", "应从 .bak 恢复")
-                self.assertTrue(config.CONFIG_EXISTED)
-        config.load_cfg()  # 还原真实 CFG
+        snap = dict(config.CFG)  # 快照,测完精确还原(load_cfg 会读真实磁盘污染其它测试的 CFG)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cfgf = os.path.join(tmp, "config.json")
+                good = {"emby_url": "http://good", "api_key": "K", "port": 8097,
+                        "c115_cookie": "REAL_COOKIE", "password_hash": "h"}
+                with open(cfgf, "w") as f: json.dump(good, f)
+                with open(cfgf + ".bak", "w") as f: json.dump(good, f)
+                with open(cfgf, "w") as f: f.write('{"emby_url": "http://good", BROKEN')
+                with patch.object(config, "CONFIG_FILE", cfgf):
+                    config.load_cfg()
+                    self.assertEqual(config.CFG.get("c115_cookie"), "REAL_COOKIE", "应从 .bak 恢复")
+                    self.assertTrue(config.CONFIG_EXISTED)
+        finally:
+            config.CFG.clear(); config.CFG.update(snap)
 
     def test_save_cfg_writes_bak(self):
         from lib import config
-        with tempfile.TemporaryDirectory() as tmp:
-            cfgf = os.path.join(tmp, "config.json")
-            with open(cfgf, "w") as f: json.dump({"v": 1}, f)
-            with patch.object(config, "CONFIG_FILE", cfgf):
-                config.CFG.clear(); config.CFG.update({"v": 2})
-                config.save_cfg()
-                # 新语义:写成功后把【刚写好的新内容】同步到 .bak(不是备份旧的)
-                self.assertTrue(os.path.exists(cfgf + ".bak"))
-                with open(cfgf + ".bak") as f:
-                    self.assertEqual(json.load(f).get("v"), 2, ".bak 应是刚写好的新配置,不是旧的")
-        config.load_cfg()
+        snap = dict(config.CFG)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cfgf = os.path.join(tmp, "config.json")
+                with open(cfgf, "w") as f: json.dump({"v": 1}, f)
+                with patch.object(config, "CONFIG_FILE", cfgf):
+                    config.CFG.clear(); config.CFG.update({"v": 2})
+                    config.save_cfg()
+                    self.assertTrue(os.path.exists(cfgf + ".bak"))
+                    with open(cfgf + ".bak") as f:
+                        self.assertEqual(json.load(f).get("v"), 2, ".bak 应是刚写好的新配置,不是旧的")
+        finally:
+            config.CFG.clear(); config.CFG.update(snap)
 
 
 if __name__ == "__main__":

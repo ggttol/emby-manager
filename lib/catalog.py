@@ -30,9 +30,9 @@ def _like_escape(t):
     return t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def catalog_search(q, limit=80):
-    """按名称 LIKE 多关键词(空格分隔,AND)搜。返 {items:[{name,sheet,link,is_pkg,share,rc}], total, truncated}。
-    share/rc 预解析出来,前端可直接展示 + 转存。"""
+def catalog_search(q, limit=80, link_type=None):
+    """按名称 LIKE 多关键词(空格分隔,AND)搜,可选 link_type 过滤(share115/magnet/ed2k)。
+    返 {items:[{name,sheet,link,is_pkg,link_type,transfer,share,rc}], total, truncated}。"""
     q = (q or "").strip()
     if not q:
         return {"items": [], "total": 0}
@@ -42,25 +42,52 @@ def catalog_search(q, limit=80):
     # 最小词长:单字符 term('%' 或 'a')会全表扫 15.7 万行 + filesort,挡掉
     if not terms or all(len(t) < 2 for t in terms):
         return {"items": [], "total": 0, "hint": "关键词太短,至少 2 个字符"}
-    where = " AND ".join(["name LIKE ? ESCAPE '\\'"] * len(terms))
+    conds = ["name LIKE ? ESCAPE '\\'"] * len(terms)
     args = ["%" + _like_escape(t) + "%" for t in terms]
+    # 可选按类型过滤(share115 / magnet / ed2k)
+    if link_type in ("share115", "magnet", "ed2k"):
+        conds.append("link_type = ?"); args.append(link_type)
+    where = " AND ".join(conds)
     try:
         with sqlite3.connect("file:%s?mode=ro" % CATALOG_DB, uri=True) as con:
-            # 多取一条判断是否截断;非整包优先(单片比整包好转),其次名字短的靠前
-            rows = con.execute(
-                "SELECT name,sheet,link,is_pkg FROM catalog WHERE %s ORDER BY is_pkg ASC, length(name) ASC LIMIT %d"
-                % (where, limit + 1), args).fetchall()
+            # link_type 列可能旧库没有 → 兼容查
+            cols = "name,sheet,link,is_pkg,link_type" if _has_type_col(con) else "name,sheet,link,is_pkg"
+            # 多取一条判断是否截断;115 分享链(秒传稳)优先、非整包优先、名字短靠前
+            order = "is_pkg ASC, length(name) ASC"
+            if _has_type_col(con):
+                order = "(link_type='share115') DESC, is_pkg ASC, length(name) ASC"
+            rows = con.execute("SELECT %s FROM catalog WHERE %s ORDER BY %s LIMIT %d"
+                               % (cols, where, order, limit + 1), args).fetchall()
     except Exception as e:
         return {"err": "查询失败: " + str(e)}
     truncated = len(rows) > limit
     rows = rows[:limit]
     items = []
-    for name, sheet, link, is_pkg in rows:
+    for r in rows:
+        name, sheet, link, is_pkg = r[0], r[1], r[2], r[3]
+        lt = r[4] if len(r) > 4 else _infer_type(link)
         share, rc = _parse(link)
         items.append({"name": name or "", "sheet": sheet or "", "link": link or "",
-                      "is_pkg": int(is_pkg or 0), "share": share, "rc": rc})
+                      "is_pkg": int(is_pkg or 0), "link_type": lt,
+                      "transfer": (lt == "share115"),   # True=可转存(秒传);False=磁力/ed2k 走离线下载
+                      "share": share, "rc": rc})
     log("资源库搜索「%s」→ %d 条%s" % (q, len(items), "(已截断)" if truncated else ""))
     return {"items": items, "total": len(items), "truncated": truncated}
+
+
+def _has_type_col(con):
+    try:
+        return any(c[1] == "link_type" for c in con.execute("PRAGMA table_info(catalog)").fetchall())
+    except Exception:
+        return False
+
+
+def _infer_type(link):
+    l = (link or "").lower()
+    if "/s/" in l and ("115cdn.com" in l or "115.com" in l or "anxia.com" in l): return "share115"
+    if l.startswith("magnet:"): return "magnet"
+    if l.startswith("ed2k:"): return "ed2k"
+    return "other"
 
 
 def _parse(link):
