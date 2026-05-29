@@ -35,7 +35,7 @@ from lib import c115 as _c115
 from lib.c115 import C115_UA, C115_API, _c115_uid, c115_parse_url
 from lib.business import (LIB_LOCKS, LIB_LOCKS_GUARD, _lib_lock,
                           qscore, all_libraries, scan_lib, _scan_lib_locked,
-                          analyze_dups, _del_folder, exec_dedup, delete_item,
+                          analyze_dups, subtitle_overview, _del_folder, exec_dedup, delete_item,
                           move_item, _move_item_locked,
                           create_library, list_items, zhuigeng_status, series_gaps,
                           _gb, system_info, get_config, set_config,
@@ -224,6 +224,7 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/system/health": return self._json(system_health_summary())
             if path == "/api/noposter": return self._json({"items": list_noposter()})
             if path == "/api/dups": return self._json(analyze_dups())
+            if path == "/api/subtitles": return self._json(subtitle_overview())
             if path == "/api/items": return self._json(list_items(q.get("lib", [""])[0]))
             if path == "/api/zhuigeng": return self._json(zhuigeng_status())
             if path == "/api/gaps": return self._json(series_gaps(q.get("id", [""])[0]))

@@ -192,6 +192,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   <button data-tab="zhuigeng" onclick="tab('zhuigeng')">🔄 追更检查</button>
   <button data-tab="gaps" onclick="tab('gaps')">🔍 缺集检查</button>
   <button data-tab="poster" onclick="tab('poster')">🖼️ 海报修复</button>
+  <button data-tab="subs" onclick="tab('subs')">📝 字幕</button>
   <button data-tab="dedup" onclick="tab('dedup')">🧹 去重</button>
   <button data-tab="manage" onclick="tab('manage')">🗂️ 删除/移动</button>
   <button data-tab="cleanup" onclick="tab('cleanup')">🧹 智能清理</button>
@@ -308,6 +309,14 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
       <div id="posterList" style="margin-top:10px"></div>
       <div id="posterPagi"></div>
       <div id="mismatchOut" style="margin-top:14px"></div></div>
+  </section>
+
+  <section id="subs" class="hide">
+    <div class="card">
+      <div class="row"><h2>📝 字幕概览</h2><span style="flex:1"></span>
+        <button class="btn ghost" onclick="loadSubs(true)">重新扫描</button></div>
+      <p class="muted">扫 <code>/strm</code> 树:每个视频旁边有没有外挂字幕(.srt/.ass…)。<b>这是 Emby 真正能用的字幕</b> —— Emby 读 /strm,不读 115。本地扫,不碰网盘。</p>
+      <div id="subsOut" style="margin-top:10px"></div></div>
   </section>
 
   <section id="dedup" class="hide">
@@ -1441,6 +1450,29 @@ function tab(name){
   if(name==="catalog") loadCatalog();
   if(name==="cleanup") loadCleanupLibs();
   if(name==="schedule") loadSchedules();
+  if(name==="subs") loadSubs();
+}
+let _subsLoaded=false;
+async function loadSubs(force){
+  if(_subsLoaded && !force) return;
+  const out=$("#subsOut"); out.innerHTML='<p class="muted">扫描 /strm 中…</p>';
+  let d; try{ d=await api("/api/subtitles"); }catch(e){ out.innerHTML='<p class="muted">出错:'+esc(e.message)+'</p>'; return; }
+  _subsLoaded=true;
+  const pct=d.coverage||0;
+  let h=`<div style="font-size:15px;margin-bottom:8px">总覆盖率 <b style="color:${pct>0?'var(--ok,#86efac)':'var(--red,#f87171)'}">${pct}%</b> · ${d.total_with_sub}/${d.total_videos} 个视频有外挂字幕</div>`;
+  if(d.note) h+=`<div class="badge warn" style="display:block;padding:10px;line-height:1.6;white-space:normal;margin-bottom:10px">⚠️ ${esc(d.note)}</div>`;
+  h+=`<table style="width:100%;border-collapse:collapse;font-size:13px"><thead><tr style="text-align:left;color:#9aa">
+      <th style="padding:6px 8px">库</th><th>类型</th><th style="text-align:right">视频数</th><th style="text-align:right">有字幕</th><th style="text-align:right">覆盖率</th></tr></thead><tbody>`;
+  for(const l of (d.libs||[])){
+    const c=l.coverage||0, col=c>0?'#86efac':'#f87171';
+    h+=`<tr style="border-top:1px solid #2a2f3a"><td style="padding:6px 8px">${esc(l.lib)}</td><td class="muted">${l.type==='tvshows'?'📺剧集':'🎬电影'}</td>
+        <td style="text-align:right">${l.videos}</td><td style="text-align:right">${l.with_sub}</td>
+        <td style="text-align:right;color:${col}">${c}%</td></tr>`;
+  }
+  h+=`</tbody></table>`;
+  const fmts=Object.entries(d.formats||{}); const langs=Object.entries(d.langs||{});
+  if(fmts.length) h+=`<p class="muted" style="margin-top:10px">格式:${fmts.map(([k,v])=>k+'×'+v).join(' · ')} ｜ 语言:${langs.map(([k,v])=>k+'×'+v).join(' · ')}</p>`;
+  out.innerHTML=h;
 }
 async function start(){
   $("#login").classList.add("hide");$("#app").classList.remove("hide");

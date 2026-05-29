@@ -237,6 +237,58 @@ def analyze_dups():
     return {"dups": dups, "review": review}
 
 
+def subtitle_overview():
+    """字幕概览:扫 /strm 树,统计每个库里"视频(.strm)旁边有没有外挂字幕"。
+    ⚠️ 关键:这是 **Emby 真正能用的** 外挂字幕 —— Emby 读 /strm 不读 115/media。本地扫,快,不碰 115。
+    chinesesubfinder 默认把字幕下到 /media(115)的视频旁边,跟 /strm 不是一处 → 它下的字幕 Emby 看不到。"""
+    SUB_EXT = (".srt", ".ass", ".ssa", ".sub", ".vtt", ".smi")
+    libs = fetch_libs()
+    out = []; tot_v = 0; tot_s = 0
+    fmt = collections.Counter(); langs = collections.Counter(); missing = []
+    for name, m in libs.items():
+        if m.get("ctype") not in ("movies", "tvshows"):
+            continue
+        base = os.path.join(STRM, m["folder"])
+        if not os.path.isdir(base):
+            continue
+        vids = 0; withsub = 0
+        for root, _ds, fs in os.walk(base):
+            strms = [f for f in fs if f.endswith(".strm")]
+            if not strms:
+                continue
+            subs = [f for f in fs if os.path.splitext(f)[1].lower() in SUB_EXT]
+            for sf in subs:
+                fmt[os.path.splitext(sf)[1].lower()] += 1
+                low = sf.lower()
+                if any(k in low for k in ("chinese", "chs", "cht", ".zh", "简", "繁", ".chi", ".zho", "中")):
+                    langs["中文"] += 1
+                elif any(k in low for k in ("english", ".eng", ".en.")):
+                    langs["英文"] += 1
+                else:
+                    langs["其他/未标"] += 1
+            for st in strms:
+                vids += 1
+                stem = st[:-5]  # 去掉 .strm;字幕名通常以视频名为前缀(xxx.chinese(xunlei).default.ass)
+                if any(sf.startswith(stem) for sf in subs):
+                    withsub += 1
+                elif len(missing) < 60:
+                    missing.append({"lib": name, "video": st})
+        cov = round(withsub * 100.0 / vids, 1) if vids else 0.0
+        out.append({"lib": name, "type": m.get("ctype", ""), "videos": vids,
+                    "with_sub": withsub, "coverage": cov})
+        tot_v += vids; tot_s += withsub
+    out.sort(key=lambda x: -x["videos"])
+    note = ""
+    if tot_v and tot_s == 0:
+        note = ("/strm 里 0 个外挂字幕 → Emby 看不到任何外挂字幕。chinesesubfinder 默认把字幕下到 115(/media)"
+                "的视频旁边,而 Emby 读的是 /strm,两处不同 —— 即便它下到字幕,Emby 也用不上。"
+                "要让字幕生效,得让字幕落到 /strm 对应位置(或用内封字幕的片源)。")
+    return {"libs": out, "total_videos": tot_v, "total_with_sub": tot_s,
+            "coverage": round(tot_s * 100.0 / tot_v, 1) if tot_v else 0.0,
+            "formats": dict(fmt), "langs": dict(langs),
+            "missing_sample": missing, "note": note}
+
+
 # ===== 删除 / 去重执行 =====
 def _del_folder(lib, folder):
     L = fetch_libs(); fol = L.get(lib, {}).get("folder", lib)
@@ -1042,7 +1094,8 @@ def replace_folder(lib, win_folder, lose_folder):
                         continue
                     p = os.path.join(root, f)
                     try:
-                        content = open(p, encoding="utf-8").read()
+                        with open(p, encoding="utf-8") as _rf:
+                            content = _rf.read()
                         # 简单替换 first occurrence 即可(content 里 win_folder 通常只出现一次,在 /media/lib/folder/... 路径里)
                         new_content = content.replace("/" + win_folder + "/", "/" + lose_folder + "/", 1)
                         if new_content != content:
@@ -1050,10 +1103,19 @@ def replace_folder(lib, win_folder, lose_folder):
                                 w.write(new_content)
                     except Exception:
                         logger.exception("改 strm content 失败 %s", p)
-    # 3. 通知 emby 重扫该 folder(路径变化)
-    epost("/Library/Media/Updated", body={"Updates": [
-        {"Path": "/strm/%s/%s" % (fol, lose_folder), "UpdateType": "Modified"}
-    ]})
+    # 3. 通知 emby —— 被删/消失的路径必须发 "Deleted"(发 "Modified" 清不掉已不存在路径的残留条目,
+    #    会在 Emby 留下孤儿重复剧集);被新内容占用的路径发 "Modified"/"Created" 让它就地收录。
+    #    两个改名方向都要覆盖,否则总有一条路径变成孤儿:
+    #      改名(win→lose 名):win 旧路径没了 → Deleted;lose 路径现由 win 占用 → Modified
+    #      未改名(win 保留原名):lose 真没了 → Deleted;win 路径不变 → Created(确保收录,幂等)
+    P = lambda f: "/strm/%s/%s" % (fol, f)
+    if renamed_to == lose_folder:
+        updates = [{"Path": P(win_folder), "UpdateType": "Deleted"},
+                   {"Path": P(lose_folder), "UpdateType": "Modified"}]
+    else:
+        updates = [{"Path": P(lose_folder), "UpdateType": "Deleted"},
+                   {"Path": P(win_folder), "UpdateType": "Created"}]
+    epost("/Library/Media/Updated", body={"Updates": updates})
     log("替换 [%s] 用 %s 替掉 %s%s" % (lib, win_folder, lose_folder,
         " (并改名回原名)" if renamed_to == lose_folder else ""))
     _undo_record("replace", {"lib": lib, "win_was": win_folder, "lose_was": lose_folder,
