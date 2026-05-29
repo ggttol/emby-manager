@@ -187,6 +187,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   <button data-tab="dash" class="on" onclick="tab('dash')">📊 仪表盘</button>
   <button data-tab="scan" onclick="tab('scan')">➕ 扫描加新内容</button>
   <button data-tab="c115" onclick="tab('c115')">⬇️ 115 转存</button>
+  <button data-tab="catalog" onclick="tab('catalog')">📚 找资源</button>
   <button data-tab="zhuigeng" onclick="tab('zhuigeng')">🔄 追更检查</button>
   <button data-tab="gaps" onclick="tab('gaps')">🔍 缺集检查</button>
   <button data-tab="poster" onclick="tab('poster')">🖼️ 海报修复</button>
@@ -243,6 +244,26 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
         <span id="cShareOut" class="muted" style="margin-left:6px"></span></div>
       <div class="muted" style="font-size:12px;margin-top:6px">🪄 一条龙 = 转存所有分享 → 自动扫"转到库" → 等 8s Emby 刮削 → 检查涉及库的无海报项 / 跟现有库重复 → 弹出报告(可一键修海报/去重)。最适合"我从群里抓了一批新片"场景。</div>
       <div id="cShareList"></div>
+    </div>
+  </section>
+
+  <section id="catalog" class="hide">
+    <div class="card">
+      <div class="row" style="align-items:center;gap:10px;flex-wrap:wrap">
+        <h2 style="margin:0">📚 找资源</h2>
+        <span class="muted" id="catalogStat" style="font-size:12px"></span>
+      </div>
+      <p class="muted" style="font-size:12px;margin:6px 0 10px">本地 115 资源库(从金山文档抓的 ~15.7 万条分享链)。搜片名 → 选中 → 一键转存到 115 指定目录。⚠️ 链接是快照,部分可能已失效;「整包」是合集链(转的是整包不是单片)。</p>
+      <div class="row" style="gap:8px">
+        <input id="catalogQ" placeholder="片名关键词(多个空格分隔,如:沙丘 4k)" style="flex:1" onkeydown="if(event.key==='Enter')catalogSearch()">
+        <button class="btn" onclick="catalogSearch()">🔍 搜索</button>
+      </div>
+      <div class="row" style="gap:8px;margin-top:8px;align-items:center">
+        <span class="muted" style="font-size:12px">转存到:</span>
+        <select id="catalogTarget" style="min-width:160px"></select>
+        <span class="muted" style="font-size:11px">或自定义 cid <input id="catalogCid" placeholder="115 目录 cid" style="width:120px"></span>
+      </div>
+      <div id="catalogOut" class="muted" style="margin-top:12px">输入片名开始搜索</div>
     </div>
   </section>
 
@@ -1345,6 +1366,7 @@ function tab(name){
   if(name==="zhuigeng") loadZhuigeng();
   if(name==="gaps") fillGapLibs();
   if(name==="c115") loadC115();
+  if(name==="catalog") loadCatalog();
   if(name==="cleanup") loadCleanupLibs();
   if(name==="schedule") loadSchedules();
 }
@@ -2578,6 +2600,71 @@ async function loadC115(){
   $("#cShareLib").innerHTML=LIBS.map(l=>`<option value="${esc(l.name)}">${esc(l.name)}</option>`).join("");
   const t=await api("/api/c115/test");
   $("#c115Status").innerHTML=t.ok?`<span class="badge g">● 115 在线</span> UID ${esc(t.uid)}${t.used?' · 已用 '+esc(t.used):''}`:`<span class="badge warn">○ ${esc(t.err)}</span> 去 ⚙️ 设置 填 cookie`;
+}
+// === 📚 找资源(本地 115 资源库搜索 + 转存)===
+window._catalogItems = [];
+async function loadCatalog(){
+  // 库状态
+  try{
+    const st = await api('/api/catalog/stats');
+    $("#catalogStat").textContent = st.available ? `(库内 ${st.total} 条 · 整包 ${st.packages})` : '⚠️ 资源库未部署';
+  }catch(e){ $("#catalogStat").textContent=''; }
+  // 目标库下拉:用配了 115 cid 的库
+  try{
+    const cfg = await api('/api/config');
+    const cidMap = cfg.c115_cid_map || {};
+    const keys = Object.keys(cidMap);
+    const sel = $("#catalogTarget");
+    if(keys.length){
+      sel.innerHTML = keys.map(k=>`<option value="${esc(k)}">${esc(k)}(cid ${esc(cidMap[k])})</option>`).join("");
+    }else{
+      sel.innerHTML = '<option value="">(未配库 cid,去设置页配,或用右边自定义 cid)</option>';
+    }
+  }catch(e){}
+}
+async function catalogSearch(){
+  const q = $("#catalogQ").value.trim();
+  const out = $("#catalogOut");
+  if(!q){ out.textContent='输入片名'; return; }
+  out.innerHTML='<span class="spin"></span> 搜索中…';
+  let d; try{ d=await api('/api/catalog/search?q='+encodeURIComponent(q)); }catch(e){ out.textContent='出错: '+e; return; }
+  if(d.err){ out.innerHTML=`<span class="badge warn">${esc(d.err)}</span>`; return; }
+  window._catalogItems = d.items||[];
+  if(!d.items.length){ out.innerHTML='<p class="muted">没搜到。换个关键词试试(库里名字是从文档抓的,可能和标准译名不同)</p>'; return; }
+  out.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:6px">${d.items.length} 条${d.truncated?'(已截断,缩小关键词)':''} · 单片优先排前</div>` +
+    d.items.map((it,i)=>`<div class="item" style="border-bottom:1px solid var(--line);padding:8px 2px">
+      <div class="main">
+        <div class="nm">${esc(it.name)} ${it.is_pkg?'<span class="badge warn" title="整包合集,转的是整包不是单片">📦整包</span>':'<span class="badge g">单片</span>'}</div>
+        <div class="meta"><span class="badge">${esc(it.sheet)}</span> <span class="muted" style="font-size:11px">${esc((it.link||'').slice(0,52))}…</span></div>
+      </div>
+      <button class="btn ghost" onclick="catalogTransfer(${i})">⬇️ 转存</button>
+    </div>`).join("");
+}
+async function catalogTransfer(i){
+  const it = window._catalogItems[i];
+  if(!it){ return; }
+  const cid = $("#catalogCid").value.trim();
+  const lib = $("#catalogTarget").value;
+  if(!cid && !lib){ UI.toast('先选目标库或填 cid', {type:'warn'}); return; }
+  const target = cid ? ('cid '+cid) : ('库「'+lib+'」');
+  const ok = await UI.modal.confirm({
+    danger: it.is_pkg,
+    title: '转存到 '+target,
+    body: `<div><b>${UI.esc(it.name)}</b></div>`+
+      (it.is_pkg?'<div style="margin-top:8px;color:var(--warn);font-size:12px">⚠️ 这是<b>整包合集</b>链接 —— 会把整个合集(可能几百部/几 TB)转进目标目录,不是单部!确认要整包?</div>':'')+
+      `<div class="muted" style="font-size:12px;margin-top:8px">${UI.esc(it.link)}</div>`,
+    okText: '转存'
+  });
+  if(!ok) return;
+  const body = cid ? {link:it.link, cid:cid, label:it.name} : {link:it.link, lib:lib};
+  let r; try{ r=await api('/api/catalog/transfer',{method:'POST',body:JSON.stringify(body)}); }
+  catch(e){ UI.toast('转存失败: '+e,{type:'error'}); return; }
+  if(r.ok){
+    UI.toast(`✓ ${r.msg||'已转存'}${r.count?(' ('+r.count+'项)'):''}`,{type:'ok',ms:5000,
+      action:lib?{label:'去扫这个库',fn:()=>{tab('scan');setTimeout(()=>{const s=$("#scanLib");if(s){s.value=lib;}},80);}}:null});
+  }else{
+    UI.toast('转存失败: '+(r.err||r.msg||'未知'),{type:'error',ms:6000});
+  }
 }
 function parseLines(t){
   return t.split(/\r?\n/).map(s=>s.trim()).filter(Boolean).map(line=>{

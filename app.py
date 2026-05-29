@@ -52,6 +52,7 @@ from lib.business import (LIB_LOCKS, LIB_LOCKS_GUARD, _lib_lock,
 from lib import business as _biz
 from lib.undo import UNDO_FILE, UNDO_MAX, UNDO_LOCK, _undo_record, list_undo, exec_undo
 from lib import scheduler as _sched
+from lib import catalog as _catalog
 
 
 # ===== 版本缓存:_version() 读 VERSION 文件并缓存到模块级(每次 do_GET 不要 fs hit) =====
@@ -97,6 +98,10 @@ def c115_auto_cid(max_depth=2):
 
 def c115_save_to_lib(url, pwd, lib, file_ids=None):
     return _c115.c115_save_to_lib(_c115_req, url, pwd, lib, file_ids)
+
+
+def c115_save_to_cid(url, pwd, cid, label=None, file_ids=None):
+    return _c115.c115_save_to_cid(_c115_req, url, pwd, cid, label, file_ids)
 
 
 # business 里的 c115 批处理也走本模块的 c115_snap_full / c115_save_to_lib(让 patch 链能贯穿)
@@ -251,6 +256,10 @@ class H(BaseHTTPRequestHandler):
                 t = self._cookie_token() or self.headers.get("X-Token")
                 return self._json({"csrf": _token_csrf(t) or "",
                                    "username": CFG.get("username") or "admin"})
+            if path == "/api/catalog/search":
+                return self._json(_catalog.catalog_search(q.get("q", [""])[0]))
+            if path == "/api/catalog/stats":
+                return self._json(_catalog.catalog_stats())
             if path == "/api/schedules":
                 from lib.business import SCHEDULE_KINDS
                 # 顺带把 next_run 算进列表,UI 直接展示;kinds map 也带上避免再多发一次请求
@@ -333,6 +342,15 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/dedup/exec_batch":
                 return self._json({"tid": run_async("dedup_exec_batch", dedup_exec_batch_async,
                                                    b.get("groups") or [])})
+            if path == "/api/catalog/transfer":
+                # 从资源库选中的分享链 → 转存到指定目录(lib 名 或 直接 cid)
+                lib = b.get("lib"); cid = b.get("cid")
+                url = b.get("link") or b.get("url", ""); pwd = b.get("pwd", "")
+                if cid:
+                    return self._json(c115_save_to_cid(url, pwd, str(cid), label=b.get("label")))
+                if lib:
+                    return self._json(c115_save_to_lib(url, pwd, lib))
+                return self._json({"ok": False, "err": "未指定目标库或 cid"}, 400)
             if path == "/api/c115/test_candidate":
                 return self._json(c115_test(b.get("cookie")))
             if path == "/api/c115/auto_cid":

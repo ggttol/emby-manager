@@ -195,19 +195,26 @@ def c115_auto_cid(req_fn, fetch_libs_fn, max_depth=2):
             "scanned": walked[0]}
 
 
-def c115_save_to_lib(req_fn, url, pwd, lib, file_ids=None):
-    """单链接转存到指定 emby 库对应的 115 cid。"""
+def c115_save_to_cid(req_fn, url, pwd, cid, label=None, file_ids=None):
+    """单链接转存到指定 115 cid(任意目录,不限 emby 库)。label 仅用于日志/返回文案。"""
+    if not cid:
+        return {"ok": False, "err": "未指定目标 115 目录 cid"}
     s = c115_snap_full(req_fn, url, pwd)
     if not s.get("ok"): return s
-    cid_map = CFG.get("c115_cid_map") or {}
-    cid = cid_map.get(lib)
-    if not cid: return {"ok": False, "err": "库「%s」没配 115 cid,先去设置页填(从 CloudDrive2 web 进入该目录,URL 末尾的数字就是 cid)" % lib}
     if not file_ids:
         file_ids = [f["id"] for f in s["files"] if f.get("id")]
     if not file_ids: return {"ok": False, "err": "分享内无可转存文件(snap 返回里没识别出 id,raw_sample=%s)" % json.dumps(s.get("_raw_sample"), ensure_ascii=False)[:300]}
     res = c115_receive_api(req_fn, s["share"], s["rc"], file_ids, cid)
     ok = bool(res.get("state"))
-    log("115 转存 %s (%d项) → 库「%s」 cid=%s: %s" % (s["share"], len(file_ids), lib, cid, "✓" if ok else (res.get("error") or res.get("msg"))))
-    return {"ok": ok, "share": s["share"], "count": len(file_ids), "lib": lib, "cid": cid,
+    where = ("库「%s」" % label) if label else ("目录 cid=%s" % cid)
+    log("115 转存 %s (%d项) → %s cid=%s: %s" % (s["share"], len(file_ids), where, cid, "✓" if ok else (res.get("error") or res.get("msg"))))
+    return {"ok": ok, "share": s["share"], "count": len(file_ids), "cid": cid, "lib": label,
             "title": s.get("share_title"),
-            "msg": (res.get("error") or res.get("msg")) if not ok else ("已转存 %d 项到库「%s」" % (len(file_ids), lib))}
+            "msg": (res.get("error") or res.get("msg")) if not ok else ("已转存 %d 项到%s" % (len(file_ids), where))}
+
+
+def c115_save_to_lib(req_fn, url, pwd, lib, file_ids=None):
+    """单链接转存到指定 emby 库对应的 115 cid(解析 lib→cid 后走 c115_save_to_cid)。"""
+    cid = (CFG.get("c115_cid_map") or {}).get(lib)
+    if not cid: return {"ok": False, "err": "库「%s」没配 115 cid,先去设置页填(从 CloudDrive2 web 进入该目录,URL 末尾的数字就是 cid)" % lib}
+    return c115_save_to_cid(req_fn, url, pwd, cid, label=lib, file_ids=file_ids)
