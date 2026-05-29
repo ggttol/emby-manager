@@ -4,25 +4,29 @@
 
 为 strm 架构(strm 文件 + 115 网盘 CloudDrive2 挂载)而生,但纯 Emby 库也能用大部分功能。
 
-**v3.0** 升级了体验:全局 UI 组件库(Modal/Toast/TaskCenter/Drawer/VirtualList/Combobox),危险操作走 Modal + 打字防误删,长任务进 TaskCenter(顶部进度条 + 🔔 bell + 可取消、跨 tab 不丢、刷新自动恢复),键盘快捷键全覆盖,暗/亮三态主题,撤销系统接入 UI,配置导出/导入。后端能力 100% 暴露,9 lib 模块零循环依赖,148+ 单元测试。
+**v3.0** 升级了体验:全局 UI 组件库(Modal/Toast/TaskCenter/Drawer/VirtualList/Combobox),危险操作走 Modal + 打字防误删,长任务进 TaskCenter(顶部进度条 + 🔔 bell + 可取消、跨 tab 不丢、刷新自动恢复),键盘快捷键全覆盖,暗/亮三态主题,撤销系统接入 UI,配置导出/导入。后端能力 100% 暴露,11 lib 模块零循环依赖,166 单元测试。
+
+**v3.0.x** 增量:智能清理(多维度评分)/ 一条龙加新资源向导 / 追更扫描 + 缺集汇总 / 全库缺集扫描 / 海报错绑检测 / 仪表盘待办 / 空 folder 扫 / 一键自动去重 / ⏰ 定时任务(每日 / 每周 / 每月,4 种 kind)/ 手机加主屏 + PWA standalone(蓝紫「管」图标)。
 
 ---
 
-## 功能(12 个 tabs)
+## 功能(13 个 tabs)
 
 | Tab | 用途 |
 |---|---|
-| 仪表盘 | Emby 在线状态、库列表、各库项目数 / 海报缺失数 / 重复数概览 |
-| 扫描 | 单库 / 全库扫描(异步任务,进度条),按关键词扫描指定子目录,集成自动清孤儿 strm |
-| 115 转存 | 粘贴 115 分享链接 → snap 列文件 → receive 到指定库 cid;支持多链接批量 |
-| 追更检查 | 拉 TMDb `status` 看哪部剧已完结 / 在播,标红「应追更但本地没新集」 |
-| 缺集检查 | 对照 TMDb 季集表,列出本地缺失的集号(支持绝对集号模式) |
-| 海报修复 | 列无海报项 → 调 Emby RemoteSearch 给候选 → 一键 Apply TMDb id |
-| 去重 | 同 TMDb id 多份的项目对照(分辨率 / 容器 / 大小),勾选删冗余 |
-| 删除·移动 | 单选 / 多选删除项目,或在库之间移动 strm + nfo + 海报 |
-| 系统 | Docker 容器列表、磁盘 / 内存 / 负载、Emby 版本 |
-| 日志 | 应用日志环形缓冲(最近 200 条) |
-| 用户 | Emby 用户增删改、最大会话数、禁用 |
+| 仪表盘 | Emby 在线状态、库卡片(点击跳管理)、待办清单(无海报 / 重复项 / 无评分 等) |
+| 扫描 | 单库 / 全库扫描(异步任务,进度条),按关键词扫指定子目录,集成自动清孤儿 strm |
+| 115 转存 | 粘贴 115 分享链接 → snap 列文件 → receive 到指定库 cid;支持多链接批量;**一条龙向导**:转存 → 扫 → 等刮削 → 海报+重复检查 → 报告 |
+| 追更检查 | 拉 TMDb `status` 看哪部剧已完结 / 在播,标红「应追更但本地没新集」;**一键扫所有在更剧** + **缺集求资源清单** |
+| 缺集检查 | 对照 TMDb 季集表,列出本地缺失的集号(支持绝对集号模式);**全库缺集扫描** |
+| 海报修复 | 列无海报项 → 调 Emby RemoteSearch 给候选 → 一键 Apply TMDb id;**全自动批量**;**错绑检测**(folder 中文 vs emby name 重合度低的疑似绑错) |
+| 去重 | 同 TMDb id 多份的项目对照(分辨率 / 容器 / 大小),勾选删冗余;**一键全自动去重**(只删可逆的清晰胜负);**全替换**(新版替老版) |
+| 删除·移动 | 单选 / 多选删除项目,或在库之间移动 strm + nfo + 海报;**智能冲突**(归档时按 strm 集数判断保留方) |
+| 智能清理 | 多维度评分(⭐评分低 / 📅入库久 / 👁️没人看 / 💾占空间 / 🖼️元数据残缺),维度可勾选,**只算勾选维度**;评分细则可查;一键删除选中 |
+| 系统 | Docker 容器列表、磁盘 / 内存 / 负载、Emby 版本;**健康预警**(容器非 Up / 磁盘紧 / Emby 离线 红色高亮)+ 复制系统报告 |
+| ⏰ 定时 | 4 种 kind(扫全库 / 扫追更剧 / 海报自动修 / 无评分剧刷新),触发模式每日 / 每周X / 每月N日 + HH:MM,启停 / 立即跑 / 改 / 删 |
+| 日志 | 应用日志环形缓冲(最近 200 条),按级别过滤;**Undo 子页**:可逆操作记录 |
+| 用户 | Emby 用户增删改、最大会话数、禁用、活跃度 |
 | 设置 | 改 Emby 地址 / API Key / 登录密码 / 115 cookie / 115 cid 映射 / 反代信任 IP / 配置导出导入 |
 
 ---
@@ -36,7 +40,7 @@
 | `Esc` | 关闭最上层 Modal / Drawer |
 | `g` 然后 `d/s/c/z/g/p/r/m/y/l/u/,` | 跳 12 个 tab(仪/扫/115/追/缺/海/重/管/系/日/用/设) |
 
-在 input/textarea 输入时整套快捷键自动屏蔽,只允许 Esc blur 输入框。
+在 input/textarea 输入时整套快捷键自动屏蔽,只允许 Esc blur 输入框。**智能清理 / 定时**两个 tab 暂无快捷键,从 nav 点。
 
 ## 🔔 任务中心
 
@@ -51,6 +55,28 @@
 ## 🌓 主题
 
 三态:auto(跟系统) / light / dark。点击 header 🌓 切换,持久化到 `localStorage.theme`。所有组件 CSS 走 `:root` 变量,无主题闪烁。
+
+## ⏰ 定时任务
+
+后台 daemon 线程 30s 轮询,**5 min 触发窗口**容下 misses + **同周期防重入**(daily 同天 / weekly 同 ISO 周 / monthly 同月不重跑)+ **重叠保护**(上次任务 `last_status=running` 时跳过,避免长跑任务跨周期并发起两份)。命中后走 `run_async` 进 TaskCenter,watch 线程跟到结束 + 写 `last_status` / `last_err` 到 config。watch 线程 6h deadline 防卡死。
+
+4 种内置 kind(`business.SCHEDULE_KINDS`):
+
+| kind | 描述 |
+|---|---|
+| `scan_all` | 🔍 对每个 strm 库发 Refresh,发现手动加的新 strm |
+| `zhuigeng_scan_airing` | 🔄 对所有「在更」剧用剧名扫对应库,拿新集 |
+| `fix_posters_all` | 🖼️ 对所有无海报项跑保守自动匹配 |
+| `refresh_no_rating_all` | 🔄 对所有无评分剧调 Emby Refresh 重拉 TMDb |
+
+UI 僻瓜式下拉:每日 / 每周X / 每月N日 + HH:MM。改 / 启停 / 立即跑 / 删 都在卡片上。
+
+## 📱 手机 / PWA
+
+- **viewport + 两段 `@media (max-width:640px)`**:tab nav 缩字 + 横向滚动,Modal/Drawer 在手机全屏,input 16px 防 iOS zoom,库卡片 360px 屏两列
+- **iOS 主屏图标**:`/apple-touch-icon.png`(180×180,蓝紫底白「管」,PIL+Hiragino 本地生成)
+- **PWA standalone**:Safari → 分享 → 添加到主屏幕 → 全屏运行(无浏览器 UI);Android Chrome → 安装应用走 `/manifest.json`
+- 静态资源:`app.py` 白名单 7 条路径(`/apple-touch-icon.png`、`/favicon.png`、`/icon-{192,512}.png`、`/manifest.json` 等),`Cache-Control: max-age=86400`,**不开 `/static/*` 通配防 path traversal**
 
 ---
 
@@ -138,7 +164,7 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 - **无 HTTPS:** HTTP 服务,加密交给反代(NAS 反代 / nginx / Caddy)。
 - **无审计日志持久化:** 日志只环形缓冲 200 条 + `lib/embymgr.log`,没接 ELK / Loki。
 - **undo log 局部:** 删除 / 移动有 undo log,但 115 转存 / 海报 Apply 没记录。
-- **测试覆盖:** 只覆盖纯函数(path 安全、cfg migrate、TMDb 解析),HTTP handler / Emby API 调用未覆盖。
+- **测试覆盖:** 166 case 覆盖 path 安全 / cfg migrate / TMDb 解析 / c115 内部 / 密码 / HTTP handler / 配置导入导出 / strm 列表 / qscore / XFF / scheduler 触发判定。**Emby/115 实活 HTTP 端到端未覆盖**(需起 Emby mock,价值低)。
 
 ---
 
@@ -185,7 +211,7 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 
 | Method | Path | 用途 |
 |---|---|---|
-| GET | `/api/me` | 返当前 csrf + username(supersedes the older endpoint) |
+| GET | `/api/me` | 返当前 csrf + username |
 | POST | `/api/logout` | 登出,清 cookie + token |
 | GET | `/api/tasks/list?limit=20` | 任务总览,前端 hydrate 用 |
 | GET | `/api/undo_log` | 撤销日志列表 |
@@ -202,15 +228,29 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 | POST | `/api/c115/auto_cid?async=1` | 自动检测 cid 异步 |
 | Header | `X-Server-Version` | 所有响应附带工具版本号(VERSION 文件) |
 
----
+### v3.0.x 增量 endpoint
 
-## 升级到 v3.0(从 v2.x)
-
-- **第一次 v3 启动 grace**:`migrate_cfg` 加 `last_password_change_at: null` 字段。该字段为 `null` 时允许一次无旧密码改密;改密后会写入 timestamp,以后必须输旧密码才能改。
-- **TOKENS 重启清空**:所有用户需重新登录(token 在内存,无持久化)。
-- **老 X-Token header 兼容**:v2 用 header,v3 改 HttpOnly cookie。后端两种都接,但建议清浏览器 localStorage 老 token 残留(v3 启动 JS 会自动清)。
-- **旧 endpoint 全部保留**(向后兼容);新增 16 个异步/批量/管理类 endpoint(见上表)。
-- **部署方式不变**:`tar -cf - . | ssh ... "tar -xf -"` 然后 `manager.sh restart`(注意 chmod +x manager.sh 和 scripts/*.sh)。
+| Method | Path | 用途 |
+|---|---|---|
+| GET | `/api/dash/todo` | 仪表盘待办(无海报数 / 重复数 / 无评分数等) |
+| GET | `/api/system/health` | 系统健康预警(容器非 Up / 磁盘紧 / Emby 离线) |
+| POST | `/api/dedup/replace` | 全替换:删 lose folder + win 改名,body `{lib, win_folder, lose_folder}` |
+| POST | `/api/dedup/replace_batch?async=1` | 批量替换,body `{items}` |
+| POST | `/api/dedup/auto_all` | 一键全自动去重(只删可逆胜负) |
+| POST | `/api/zhuigeng/scan_airing` | 一键扫所有在更剧,返报告 |
+| POST | `/api/zhuigeng/gaps_summary` | 汇总所有在更剧的缺集 → 求资源清单 |
+| POST | `/api/cleanup/suggest` | 智能清理建议,body `{lib, top, min_score, dimensions:[rating,age,idle,size,meta]}` |
+| POST | `/api/cleanup/empty_folders` | 扫某库的 115 上无视频文件的空 folder |
+| POST | `/api/cleanup/refresh_no_rating` | 触发某库无评分剧的 emby 元数据刷新 |
+| POST | `/api/gaps/scan_lib` | 全库缺集扫描,body `{lib}` |
+| POST | `/api/poster/detect_mismatch` | 检测疑似绑错 tmdbid(folder vs name 重合度低) |
+| POST | `/api/wizard/add_new` | 一条龙加新资源:转存 → 扫 → 等刮削 → 海报+重复检查 → 报告 |
+| GET | `/api/schedules` | 列所有定时任务(含 next_run / 状态 / kinds map) |
+| POST | `/api/schedules/new` | 新建,body `{name, kind, schedule:{mode,hour,minute,weekday?,day?}, enabled}` |
+| POST | `/api/schedules/update` | 改(只接受 name/params/schedule/enabled,**kind 不可改**) |
+| POST | `/api/schedules/delete` | 删,body `{id}` |
+| POST | `/api/schedules/run` | 立即跑(绕过 is_due 判定),返 tid |
+| GET | `/apple-touch-icon.png` 等 | 公开静态资源(iOS 图标 / favicon / manifest);白名单 7 路径 + 1 天缓存 |
 
 ---
 
