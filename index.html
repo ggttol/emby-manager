@@ -57,6 +57,7 @@ button.danger{background:var(--red)}button.ok{background:var(--green)}button.gho
   .row > input, .row > select, .row > textarea{flex:1;min-width:0}
   /* item 列表行: 主信息独占一行,操作按钮挤在下一行均分 */
   .item{flex-wrap:wrap;height:auto!important}  /* 覆盖管理行内联 height:64px,否则手机两行布局控件被裁/重叠 */
+  .ui-virt .item{height:64px!important}  /* 但 VirtualList(>200 项)按固定行高绝对定位,行高放开会重叠 → 保持固定 */
   .item .main{flex-basis:100%}
   .item select, .item button, .item label{flex:1 1 45%;margin-top:6px}  /* label 也纳入换行(用户行的同时播放/限速输入) */
   /* header 状态栏: 不再 margin-left:auto 推到右边,占整行 */
@@ -926,13 +927,21 @@ window.UI = (() => {
     function _activeCount() {
       return Object.values(T).filter(t => t.status === 'running' || t.status === 'pending').length;
     }
-    // 任务到终态:失败/取消【中心化】自动弹错误 toast + 铃铛标红,这样不管各 onDone 写没写检查,失败都不静默
+    // 任务到终态:失败/取消【中心化】自动弹错误 toast + 铃铛标红。
+    // 关键:error/cancelled 时【不调业务 onDone】—— 否则各 onDone 的成功分支会再弹个绿色「✓0」与错误 toast 打架。
+    // (注:部分项失败的任务仍是 status==='done' + results 里逐项标 fail,会正常走 onDone 显示 ✓N✗M)
     function _finish(tid, t) {
       const rec = T[tid]; if (!rec) return;
-      if (rec.status === 'error') {
-        _failCount++;
-        try { toast('任务失败:' + (t.label || rec.label || '') + ' — ' + (rec.err || '未知'),
-          { type: 'error', ms: 8000, action: { label: '详情', fn: openDrawer } }); } catch (e) {}
+      if (rec.status === 'error' || rec.status === 'cancelled') {
+        if (rec.status === 'error') {
+          _failCount++;
+          try { toast('任务失败:' + (t.label || rec.label || '') + ' — ' + (rec.err || '未知'),
+            { type: 'error', ms: 8000, action: { label: '详情', fn: openDrawer } }); } catch (e) {}
+        } else {
+          try { toast('已取消:' + (t.label || rec.label || ''), { type: 'warn', ms: 3000 }); } catch (e) {}
+        }
+        _updateBell();
+        return;  // 不走业务 onDone(成功路径),避免双弹
       }
       _updateBell();
       try { t.onDone && t.onDone(rec); } catch (e) {}
@@ -1264,8 +1273,22 @@ window.UI = (() => {
           if (cur) this._input.value = cur.label;
         }
       });
-      // 失焦 close (延迟以便点 dropdown 时不丢失)
-      this._input.addEventListener('blur', () => setTimeout(close, 160));
+      // 失焦 close + 校准:让 value 与输入框文本一致(防"打了字没从下拉选"导致 getValue 返陈旧值)
+      this._input.addEventListener('blur', () => setTimeout(() => {
+        const txt = (this._input.value || '').trim();
+        if (!txt) { this.value = null; }
+        else {
+          const exact = this.options.find(o => (o.label || '') === txt);
+          if (exact) { this.value = exact.value; }
+          else {
+            // 文本不精确匹配任何项 → 回填当前已选项的 label(或清空),不留"看着是 A、值却是 B"
+            const cur = this.options.find(o => o.value === this.value);
+            this._input.value = cur ? cur.label : '';
+            if (!cur) this.value = null;
+          }
+        }
+        close();
+      }, 160));
       this._dd.addEventListener('mousedown', (ev) => ev.preventDefault());  // 防止 input 先 blur
       return this;
     }
@@ -1737,11 +1760,12 @@ async function scanAll(){
 }
 
 // 海报修复
+let _noposterLoaded=false;
 async function loadNoposter(force){
-  // 缓存:NOPOSTER 已有且非强制刷新就不重扫全库(全库扫很重)。tab 切回/修复后用 renderPosterList 局部更新
-  if(NOPOSTER.length && !force){ renderPosterList(); return; }
+  // 缓存:已加载过且非强制就不重扫全库(用独立标志,不用 NOPOSTER.length —— 否则"全有海报"的空结果会每次进 tab 都重扫)
+  if(_noposterLoaded && !force){ renderPosterList(); return; }
   $("#posterList").innerHTML='<span class="spin"></span> 扫描全库无海报条目…';
-  const d=await api("/api/noposter");NOPOSTER=d.items;
+  const d=await api("/api/noposter");NOPOSTER=d.items||[];_noposterLoaded=true;
   renderPosterList();
 }
 function renderPosterList(){
@@ -1791,7 +1815,7 @@ async function posterAutoAll(){
             type: fail ? 'warn' : 'ok', ms: 7000,
             action: fail ? {label:'失败详情', fn:()=>UI.modal.alert({title:'未匹配条目',body:(res.results||[]).filter(x=>!x.ok).map(x=>'· '+UI.esc(x.name||x.id)+': '+UI.esc(x.err||'')).join('<br>'), copyable:true})} : null
           });
-          loadNoposter();
+          loadNoposter(true);  // 批量后端修完,前端 NOPOSTER 没变,必须强制重扫回查真实状态(否则命中缓存显示陈旧)
         }
       });
     } else UI.toast(lbl+' 启动失败: '+ (r&&r.err||'未知'), {type:'error'});
@@ -1893,7 +1917,7 @@ function renderItems(){
   const others=LIBS.map(l=>l.name).filter(n=>n!==$("#mgLib").value);
   const optsHtml = others.map(o=>`<option>${esc(o)}</option>`).join("");
   const rowHTML = (i, gi)=>`<div class="item" style="height:64px;box-sizing:border-box">
-    <input type="checkbox" class="ck" data-gi="${gi}" onchange="updateSel()" style="margin-right:8px;width:16px;height:16px;flex-shrink:0">
+    <input type="checkbox" class="ck" data-gi="${gi}" ${window._mgSel.has(gi)?'checked':''} onchange="updateSel()" style="margin-right:8px;width:16px;height:16px;flex-shrink:0">
     <div class="main"><div class="nm">${esc(i.name)} <span class="muted">${esc(i.year||"")}</span></div><div class="meta">tmdb:${esc(i.tmdb||"无")} · 📁${esc(i.folder)}</div></div>
     <select id="mv${gi}"><option value="">移到…</option>${optsHtml}</select>
     <button class="btn ghost" onclick="doMove(${gi})">移动</button><button class="btn danger" onclick="doDelete(${gi})">删除</button>
@@ -1944,9 +1968,11 @@ function toggleAll(){
   $("#selCnt").textContent = `选中 ${window._mgSel.size}`;
 }
 function selectedGis(){
-  // 先把可见 DOM 同步进 Set,再返
+  // 先把可见 DOM 同步进 Set
   updateSel();
-  return Array.from(window._mgSel);
+  // ⚠️ 只返回【当前过滤结果内】的选中项:防"全选某过滤→改过滤词→批量删"命中屏幕外/过滤外的项(误删/误移)
+  const visible = new Set(filterItems($("#mgFilter").value).map(i=>ITEMS.indexOf(i)));
+  return Array.from(window._mgSel).filter(gi=>visible.has(gi));
 }
 async function doDelete(gi){const i=ITEMS[gi];
   const body = `<div>删除 <b>${UI.esc(i.name)}</b> ${i.year||''}</div><div class="muted" style="font-size:12px;margin-top:4px">tmdb:${i.tmdb||'无'} · 📁${UI.esc(i.folder)} · 库 ${UI.esc($("#mgLib").value)}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 → 回收站(可还原)+ strm + Emby 同步删</div>`;
@@ -2473,7 +2499,8 @@ async function loadUsers(){
 // 用户行改了数字未保存 → 存按钮变色提示(防切走静默丢失);回车直接存
 function userDirty(id){
   const b=$("#save"+id);
-  if(b){ b.classList.add('primary'); b.textContent='存*'; b.title='有未保存改动'; }
+  // 用内联样式而非 .primary class(后者 CSS 不存在,不生效);金色边+背景表示有未存改动
+  if(b){ b.style.borderColor='var(--gold)'; b.style.color='var(--gold)'; b.textContent='存*'; b.title='有未保存改动'; }
 }
 async function addUser(){
   const name=$("#nuName").value.trim(),pw=$("#nuPw").value;
@@ -2785,22 +2812,22 @@ async function catalogBatchTransfer(){
     requireType: pkg.length>0 ? '整包' : null
   });
   if(!ok) return;
-  const out=$("#catalogOut");
-  let done=0, okN=0, fail=[];
-  const orig=out.innerHTML;
+  let done=0, okN=0, okNormal=0, fail=[];
   for(const it of items){
-    out.scrollIntoView&&0;
     const body=Object.assign({link:it.link, label:it.name}, tgt.cid?{cid:tgt.cid}:{lib:tgt.lib});
     let r; try{ r=await api('/api/catalog/transfer',{method:'POST',body:JSON.stringify(body)}); }
     catch(e){ r={ok:false,err:String(e)}; }
     done++;
-    if(r.ok) okN++; else fail.push((it.name||'?')+': '+(r.err||r.msg||'失败'));
+    if(r.ok){ okN++; if(it.transfer) okNormal++; } else fail.push((it.name||'?')+': '+(r.err||r.msg||'失败'));
     UI.toast(`进度 ${done}/${items.length} · ✓${okN}${fail.length?' ✗'+fail.length:''}`,{type:'info',ms:1200});
     await new Promise(s=>setTimeout(s,400));  // 115 友好,别太快
   }
+  // 转完取消勾选,防对已转项重复点
+  document.querySelectorAll('.ck-cat').forEach(c=>c.checked=false);
+  const all=$("#catAll"); if(all) all.checked=false;
   UI.toast(`完成:✓${okN} / 共 ${items.length}${fail.length?` · ✗${fail.length}`:''}`,{type:fail.length?'warn':'ok',ms:7000,
     action: fail.length?{label:'失败详情',fn:()=>UI.modal.alert({title:'失败列表',body:fail.map(esc).join('<br>'),copyable:true})}:null});
-  if(okN) catalogMaybeScan(tgt.lib, items.some(x=>x.transfer));  // 有秒传成功 + 配置库 → 自动扫
+  if(okNormal) catalogMaybeScan(tgt.lib, true);  // 只在【秒传真成功】时自动扫库(不是"勾选里有秒传项")
 }
 async function catalogTransfer(i){
   const it = window._catalogItems[i];
@@ -3918,8 +3945,9 @@ function fillGapLibs(){
 window._gapCombo = null;
 function gapSeriesValue(){ return window._gapCombo ? window._gapCombo.getValue() : ''; }
 async function loadGapSeries(){
+  window._gapCombo=null;  // 先置空:zgGoCheck 轮询只认"重建好的"新实例,不会设到旧实例上被覆盖
   const lib=$("#gapLib").value;
-  const el=$("#gapSeries"); el.innerHTML='';
+  const el=$("#gapSeries"); el.innerHTML='<span class="muted" style="font-size:12px">加载剧目…</span>';
   const d=await api("/api/items?lib="+encodeURIComponent(lib));
   const opts=(d.items||[]).map(i=>({value:String(i.id), label:i.name||String(i.id)}));
   // 用可搜索 Combobox 取代上千项原生 select(中文剧名翻不动)
