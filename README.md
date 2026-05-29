@@ -26,7 +26,7 @@
 | 系统 | Docker 容器列表、磁盘 / 内存 / 负载、Emby 版本;**健康预警**(容器非 Up / 磁盘紧 / Emby 离线 红色高亮)+ 复制系统报告 |
 | ⏰ 定时 | 4 种 kind(扫全库 / 扫追更剧 / 海报自动修 / 无评分剧刷新),触发模式每日 / 每周X / 每月N日 + HH:MM,启停 / 立即跑 / 改 / 删 |
 | 日志 | 应用日志环形缓冲(最近 200 条),按级别过滤;**Undo 子页**:可逆操作记录 |
-| 用户 | Emby 用户增删改、最大会话数、禁用、活跃度 |
+| 用户 | Emby 用户增删改、禁用、活跃度;**单用户限速**(远程串流码率上限 Mbps)+ **限同时播放数**(并发流) |
 | 设置 | 改 Emby 地址 / API Key / 登录密码 / 115 cookie / 115 cid 映射 / 反代信任 IP / 配置导出导入 |
 
 ---
@@ -77,6 +77,21 @@ UI 僻瓜式下拉:每日 / 每周X / 每月N日 + HH:MM。改 / 启停 / 立即
 - **iOS 主屏图标**:`/apple-touch-icon.png`(180×180,蓝紫底白「管」,PIL+Hiragino 本地生成)
 - **PWA standalone**:Safari → 分享 → 添加到主屏幕 → 全屏运行(无浏览器 UI);Android Chrome → 安装应用走 `/manifest.json`
 - 静态资源:`app.py` 白名单 7 条路径(`/apple-touch-icon.png`、`/favicon.png`、`/icon-{192,512}.png`、`/manifest.json` 等),`Cache-Control: max-age=86400`,**不开 `/static/*` 通配防 path traversal**
+
+## 🚦 单用户限速 / 限同时播放数
+
+「用户」tab 每行可设两项(都写 Emby 用户 Policy,**免费版 Emby 即可,无需 Premiere**):
+
+| 控件 | Emby Policy 字段 | 含义 |
+|---|---|---|
+| **同时播放** | `SimultaneousStreamLimit` | 该账号最多同时开几路播放,0=不限。纯计数检查 |
+| **限速 Mbps** | `RemoteClientBitrateLimit` | 远程串流码率上限(UI 用 Mbps,存时 ×1e6 转 bps),0=不限。参考:1080p≈8 / 4K≈25 |
+
+注意:
+
+- **限速靠转码实现**:源码率超过上限时 Emby 实时转码降码率 → 吃 NAS CPU(免费版只有软件转码,`HardwareAccelerationRequiresPremiere`)。源码率本就在上限内则 direct play 不转码。别把上限设得过低,否则频繁触发转码,叠加 strm/115 拉流负担更重。
+- **「远程」才生效**:`RemoteClientBitrateLimit` 限的是远程客户端;内网直连默认算本地不受限。
+- **历史 bug 修正**:旧版本工具的「并发」写的是 `MaxActiveSessions`(本机 Emby 4.9.5 已无此字段 → 静默失效);现写真实字段 `SimultaneousStreamLimit`(+ `MaxActiveSessions` 兼容旧版 Emby)。
 
 ---
 
@@ -199,7 +214,7 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 | POST | `/api/move` | 跨库移动,body `{from, folder, to, id}` |
 | POST | `/api/createlib` | 创建 strm 库,body `{name, ctype}` |
 | POST | `/api/users/new` | 新建 Emby 用户 |
-| POST | `/api/users/update` | 改 Emby 用户(maxsessions / disabled) |
+| POST | `/api/users/update` | 改 Emby 用户:`maxsessions`(同时播放数→SimultaneousStreamLimit)/ `bitrate_mbps`(限速→RemoteClientBitrateLimit,Mbps×1e6)/ `disabled` |
 | POST | `/api/config` | 改 config(密码 / Emby / API Key / 115) |
 | POST | `/api/c115/snap` | 115 分享 → snap 列文件(支持批量 + async) |
 | POST | `/api/c115/save` | 115 receive 到库(支持批量 + async) |
