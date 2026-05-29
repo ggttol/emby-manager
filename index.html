@@ -56,9 +56,9 @@ button.danger{background:var(--red)}button.ok{background:var(--green)}button.gho
   /* .row 内的表单控件让其撑满剩余宽度,避免被压缩成一小条 */
   .row > input, .row > select, .row > textarea{flex:1;min-width:0}
   /* item 列表行: 主信息独占一行,操作按钮挤在下一行均分 */
-  .item{flex-wrap:wrap}
+  .item{flex-wrap:wrap;height:auto!important}  /* 覆盖管理行内联 height:64px,否则手机两行布局控件被裁/重叠 */
   .item .main{flex-basis:100%}
-  .item select, .item button{flex:1 1 30%;margin-top:6px}
+  .item select, .item button, .item label{flex:1 1 45%;margin-top:6px}  /* label 也纳入换行(用户行的同时播放/限速输入) */
   /* header 状态栏: 不再 margin-left:auto 推到右边,占整行 */
   .stat{margin-left:0;flex-basis:100%}
   /* 库卡片网格: 360px 屏也能两列,数字字号略降 */
@@ -204,7 +204,6 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
 
   <section id="dash">
     <div id="dashHealth"></div>
-    <div id="dashTodo"></div>
     <div class="card">
       <div class="row"><button class="btn" id="scanAllBtn" onclick="scanAll()">➕ 一键扫全库(收新内容)</button><span id="scanAllOut" class="muted"></span></div>
       <div class="row" style="margin-top:12px">
@@ -215,6 +214,8 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
       <div id="newLibOut" class="muted" style="margin-top:6px"></div>
     </div>
     <div class="grid" id="libGrid"></div>
+    <!-- 待办卡放最后:它每次刷要 3-5s 扫全库,放前面会把上面的扫全库/库网格压下去、首屏转圈 -->
+    <div id="dashTodo" style="min-height:48px"></div>
   </section>
 
   <section id="scan" class="hide">
@@ -268,6 +269,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
         <span class="muted" style="font-size:12px">转存到:</span>
         <select id="catalogTarget" style="min-width:160px"></select>
         <span class="muted" style="font-size:11px">或自定义 cid <input id="catalogCid" placeholder="115 目录 cid" style="width:120px"></span>
+        <label class="muted" style="font-size:11px"><input type="checkbox" id="catalogAutoScan"> 转完自动扫库</label>
       </div>
       <div id="catalogOut" class="muted" style="margin-top:12px">输入片名开始搜索</div>
     </div>
@@ -287,7 +289,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   <section id="gaps" class="hide">
     <div class="card"><h2>🔍 缺集检查</h2>
       <p class="muted">单剧:选剧集库 → 选一部剧 → 查它缺哪些集 + 最大集号。全库:扫整个剧集库每部剧的缺集状态。</p>
-      <div class="row"><select id="gapLib" onchange="loadGapSeries()"></select><select id="gapSeries" style="flex:1;min-width:160px"></select><button class="btn" onclick="checkGaps()">检查</button><button class="btn ghost" onclick="refreshSeries()">刷新元数据</button>
+      <div class="row"><select id="gapLib" onchange="loadGapSeries()"></select><div id="gapSeries" style="flex:1;min-width:200px"></div><button class="btn" onclick="checkGaps()">检查</button><button class="btn ghost" onclick="refreshSeries(this)">刷新元数据</button>
       <button class="btn" style="background:#7c3aed" onclick="gapsScanLib()">📊 全库扫描</button></div>
       <div id="gapOut" class="muted" style="margin-top:12px"></div></div>
   </section>
@@ -297,7 +299,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
       <div class="row">
         <h2>没有海报的条目 <span class="muted" id="posterCount" style="font-size:13px;font-weight:normal"></span></h2>
         <span style="flex:1"></span>
-        <button class="btn ghost" onclick="loadNoposter()">刷新列表</button>
+        <button class="btn ghost" onclick="loadNoposter(true)">刷新列表</button>
         <button class="btn ok" id="posterAutoAll" onclick="posterAutoAll()" style="display:none">🪄 尝试全部自动匹配</button>
         <button class="btn" style="background:#7c3aed" onclick="detectMismatchPosters()">🔍 检测疑似绑错</button>
       </div>
@@ -319,7 +321,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
         <select id="mgLib" onchange="loadItems()" style="min-width:160px"></select>
         <span class="muted" id="mgCount"></span>
       </div>
-      <input id="mgFilter" placeholder="过滤(支持 tmdb:123 / 年:2024 / 路径:S01,默认搜片名+文件夹)" style="width:100%;margin-top:10px" oninput="renderItems()">
+      <input id="mgFilter" placeholder="过滤(支持 tmdb:123 / 年:2024 / 路径:S01,默认搜片名+文件夹)" style="width:100%;margin-top:10px" oninput="mgFilterInput()">
       <div class="row" style="margin-top:8px;align-items:center;flex-wrap:wrap;gap:8px">
         <label class="muted" style="white-space:nowrap"><input type="checkbox" id="ckAll" onchange="toggleAll()"> 全选(当前过滤结果)</label>
         <span class="muted" id="selCnt">选中 0</span>
@@ -890,11 +892,15 @@ window.UI = (() => {
       else if (typeof this.content === 'string') body.innerHTML = this.content;
       drawer.appendChild(head); drawer.appendChild(body); mask.appendChild(drawer);
       mask.addEventListener('click', (e) => { if (e.target === mask) this.close(); });
+      // Esc 关闭(与 Modal 行为一致,之前 Drawer 没接 Esc)
+      this._esc = (e) => { if (e.key === 'Escape') { e.stopPropagation(); this.close(); } };
+      document.addEventListener('keydown', this._esc);
       document.body.appendChild(mask);
       this._mask = mask; this._drawer = drawer; this._body = body;
     }
     close() {
       if (!this._mask) return;
+      if (this._esc) { document.removeEventListener('keydown', this._esc); this._esc = null; }
       try { this._mask.remove(); } catch (e) {}
       this._mask = null;
       if (typeof this.onClose === 'function') try { this.onClose(); } catch (e) {}
@@ -916,14 +922,34 @@ window.UI = (() => {
     let bellEl = null, bellCountEl = null, progBarEl = null, progRootEl = null, drawer = null;
     let drawerListEl = null;
 
+    let _failCount = 0;  // 近期失败任务数(未查看);铃铛标红用
     function _activeCount() {
       return Object.values(T).filter(t => t.status === 'running' || t.status === 'pending').length;
+    }
+    // 任务到终态:失败/取消【中心化】自动弹错误 toast + 铃铛标红,这样不管各 onDone 写没写检查,失败都不静默
+    function _finish(tid, t) {
+      const rec = T[tid]; if (!rec) return;
+      if (rec.status === 'error') {
+        _failCount++;
+        try { toast('任务失败:' + (t.label || rec.label || '') + ' — ' + (rec.err || '未知'),
+          { type: 'error', ms: 8000, action: { label: '详情', fn: openDrawer } }); } catch (e) {}
+      }
+      _updateBell();
+      try { t.onDone && t.onDone(rec); } catch (e) {}
     }
     function _updateBell() {
       const n = _activeCount();
       if (bellCountEl) {
-        bellCountEl.textContent = String(n);
-        bellCountEl.style.display = n > 0 ? '' : 'none';
+        // 有失败 → 红底显示失败数(优先);否则显示活跃数
+        if (_failCount > 0) {
+          bellCountEl.textContent = '✗' + _failCount;
+          bellCountEl.style.display = '';
+          bellCountEl.style.background = 'var(--red)';
+        } else {
+          bellCountEl.textContent = String(n);
+          bellCountEl.style.display = n > 0 ? '' : 'none';
+          bellCountEl.style.background = '';
+        }
       }
       _updateProgress();
       _renderDrawerList();
@@ -1013,8 +1039,7 @@ window.UI = (() => {
         if (r.err) {
           T[tid].status = 'error';
           T[tid].err = r.err;
-          _updateBell();
-          try { t.onDone && t.onDone(T[tid]); } catch (e) {}
+          _finish(tid, t);
           return;
         }
         T[tid].status = r.status;
@@ -1027,7 +1052,7 @@ window.UI = (() => {
         if (r.status === 'running' || r.status === 'pending') {
           T[tid]._timer = setTimeout(() => _poll(tid), 900);
         } else {
-          try { t.onDone && t.onDone(T[tid]); } catch (e) {}
+          _finish(tid, t);
         }
       });
     }
@@ -1065,6 +1090,7 @@ window.UI = (() => {
       return Object.entries(T).map(([tid, t]) => ({ tid, ...t }));
     }
     function openDrawer() {
+      _failCount = 0; _updateBell();   // 查看即清失败标记
       if (!drawer) {
         drawerListEl = $h('div');
         drawer = new Drawer({ title: '🔔 任务中心', content: drawerListEl, width: 420 });
@@ -1322,10 +1348,17 @@ window.UI = (() => {
 // auth:cookie(emby_tok)由后端 set HttpOnly,JS 偷不到;csrf 在 sessionStorage,关浏览器即清。
 let CSRF = sessionStorage.getItem("emby_csrf") || "";
 let LIBS = [], NOPOSTER = [], ITEMS = [];
+// 统一危险操作打字确认阈值:删/移 ≥ 这个数量才要求打字(单条/少量只 danger 确认),跨 tab 一致
+const TYPE_CONFIRM_AT = 3;
 // 一次性清掉老版 localStorage 残留(v1.x 把 token 放 localStorage,XSS 风险大)
 try{ localStorage.removeItem("emby_tok"); }catch(e){}
 const $ = s => document.querySelector(s);
-function toast(m,ms=2800){const t=$("#toast");t.textContent=m;t.classList.remove("hide");clearTimeout(t._t);t._t=setTimeout(()=>t.classList.add("hide"),ms);}
+// 旧 toast() 转发到 UI.toast(统一成一套堆叠+配色;消歧:出错/失败 自动红)。26 处旧调用不用改就变对。
+function toast(m,ms=2800){
+  const s=String(m);
+  const type=/出错|失败|错误|✗|未登录|拒绝/.test(s)?'error':'info';
+  return UI.toast(s,{ms,type});
+}
 async function api(path, opt={}){
   opt.credentials = 'same-origin';
   opt.headers = Object.assign({"Content-Type":"application/json"}, opt.headers||{});
@@ -1369,9 +1402,12 @@ async function logout(){
 function tab(name){
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.tab===name));
   document.querySelectorAll("section").forEach(s=>s.classList.toggle("hide",s.id!==name));
+  // 手机端 nav 横向滚动:把激活 tab 滚进可视区,否则点了靠后的 tab 看不到下划线在哪
+  const active=document.querySelector('nav button.on');
+  if(active) try{ active.scrollIntoView({inline:'center',block:'nearest'}); }catch(e){}
   // 切走 system 必须清自动刷新计时器(否则后台一直 30s 打 /api/system)
   if (name !== "system" && window._sysRefresh){ clearInterval(window._sysRefresh); window._sysRefresh = null; }
-  if(name==="poster"&&!NOPOSTER.length) loadNoposter();
+  if(name==="poster") loadNoposter();  // 内部带缓存:有数据不重扫,只局部渲染
   if(name==="system") loadSystem();
   if(name==="log") loadLog();
   if(name==="users") loadUsers();
@@ -1474,12 +1510,15 @@ function showExcluded(){
 async function loadHealthCard(){
   try {
     const r = await fetch('/health',{credentials:'same-origin'}).then(x=>x.json());
-    const dot = (b) => b ? '<span style="color:var(--green)">●</span>' : '<span style="color:var(--red)">○</span>';
     const hrs = Math.floor((r.uptime||0)/3600), mins = Math.floor(((r.uptime||0)%3600)/60);
+    // 绿点=纯文本;红点=可点跳到能处理的地方(cookie→设置,Emby/挂载→系统页看 D-state/容器)
+    const item = (ok, label, goTab) => ok
+      ? `<span><span style="color:var(--green)">●</span> ${label}</span>`
+      : `<a href="#" onclick="event.preventDefault();tab('${goTab}')" style="color:var(--red);text-decoration:none" title="去处理">○ ${label} →</a>`;
     const card = `<div class="card" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:13px">
-      <span>${dot(r.emby_online)} Emby</span>
-      <span>${dot(r.c115_cookie_set)} 115 cookie</span>
-      <span>${dot(r.cd_mounted)} CloudDrive 挂载</span>
+      ${item(r.emby_online,'Emby','system')}
+      ${item(r.c115_cookie_set,'115 cookie','settings')}
+      ${item(r.cd_mounted,'CloudDrive 挂载','system')}
       <span class="muted">v${UI.esc(r.version||'?')} · 已运行 ${hrs}h${mins}m</span>
     </div>`;
     // 写进固定占位容器(可重复刷新不堆叠),取代之前 afterbegin + _v3Init 一次性快照
@@ -1698,9 +1737,14 @@ async function scanAll(){
 }
 
 // 海报修复
-async function loadNoposter(){
+async function loadNoposter(force){
+  // 缓存:NOPOSTER 已有且非强制刷新就不重扫全库(全库扫很重)。tab 切回/修复后用 renderPosterList 局部更新
+  if(NOPOSTER.length && !force){ renderPosterList(); return; }
   $("#posterList").innerHTML='<span class="spin"></span> 扫描全库无海报条目…';
   const d=await api("/api/noposter");NOPOSTER=d.items;
+  renderPosterList();
+}
+function renderPosterList(){
   const cnt=$("#posterCount"); if (cnt) cnt.textContent = NOPOSTER.length ? `(共 ${NOPOSTER.length})` : '';
   const autoBtn=$("#posterAutoAll"); if (autoBtn) autoBtn.style.display = NOPOSTER.length ? '' : 'none';
   if(!NOPOSTER.length){$("#posterList").innerHTML='<p class="muted">🎉 全部条目都有海报</p>';return;}
@@ -1713,8 +1757,10 @@ async function fixPoster(idx){
   box.classList.remove("hide");box.innerHTML='<span class="spin"></span> 按「'+esc(name)+'」重搜 TMDb…';
   const d=await api(`/api/search?id=${i.id}&type=${i.type}&name=${encodeURIComponent(name)}`);
   let h='<div class="muted" style="margin-bottom:4px">选正确的一条(点一下=绑定+拉海报):</div>';
+  // 带图候选排前(无图的对"选海报"这个目的没价值,别挤掉正确项);稳定排序
+  const cands=(d.candidates||[]).map((c,k)=>[c,k]).sort((a,b)=>((b[0].img?1:0)-(a[0].img?1:0))||(a[1]-b[1])).map(x=>x[0]);
   // 92×138 大缩略图(默认 46×68 太小,候选海报常常细节看不清)
-  h+=(d.candidates||[]).map(c=>`<div class="cand" onclick='applyPoster(${idx},${JSON.stringify(c.tmdb)})'>
+  h+=cands.map(c=>`<div class="cand" onclick='applyPoster(${idx},${JSON.stringify(c.tmdb)})'>
     ${c.img?`<img src="${esc(c.img)}" style="width:92px;height:138px;object-fit:cover;border-radius:4px;background:#222" loading="lazy">`:'<div style="width:92px;height:138px;background:#222;border-radius:4px"></div>'}
     <div><div class="nm">${esc(c.name||"?")} ${esc(c.year||"")} ${c.img?'<span class="badge g">有海报</span>':'<span class="badge warn">无海报</span>'}</div>
     <div class="meta">tmdb:${esc(c.tmdb)} · ${esc(c.overview||"")}</div></div></div>`).join("");
@@ -1754,12 +1800,21 @@ async function posterAutoAll(){
   await launch(movies.map(i=>i.id), 'Movie', '电影海报');
 }
 async function applyPoster(idx,tmdb){
-  if(!tmdb){toast("没有 tmdbid");return;}
+  if(!tmdb){UI.toast("没有 tmdbid",{type:'warn'});return;}
   const i=NOPOSTER[idx],box=$("#cand"+idx);
-  box.innerHTML='<span class="spin"></span> 绑定 tmdb '+tmdb+' 并拉海报(约 10-20 秒)…';
-  const r=await api("/api/fixposter",{method:"POST",body:JSON.stringify({id:i.id,tmdb,type:i.type,name:i.name})});
-  box.innerHTML=r.poster?`<span class="badge g">✓ 已修复</span> ${esc(r.name)} — 海报已出`:`<span class="badge warn">已绑定 ${esc(r.name||"")} 但海报仍未拉到(可换个 tmdbid 或稍后再试)</span>`;
-  if(r.poster)setTimeout(loadNoposter,1200);
+  const prev = box ? box.innerHTML : '';   // 缓存候选,失败时恢复(否则换不了下一条,得从头重搜)
+  if(box) box.innerHTML='<span class="spin"></span> 绑定 tmdb '+esc(String(tmdb))+' 并拉海报(约 10-20 秒)…';
+  let r; try{ r=await api("/api/fixposter",{method:"POST",body:JSON.stringify({id:i.id,tmdb,type:i.type,name:i.name})}); }
+  catch(e){ if(box) box.innerHTML=prev; UI.toast("绑定失败: "+e,{type:'error',ms:6000}); return; }
+  if(r.err){ if(box) box.innerHTML=prev; UI.toast("绑定失败: "+r.err,{type:'error',ms:6000}); return; }
+  if(r.poster){
+    UI.toast(`✓ 已修「${esc(r.name||i.name)}」海报`,{type:'ok'});
+    NOPOSTER = NOPOSTER.filter(x=>x!==i);  // 移除该项 + 局部重渲,不触发全库重扫
+    renderPosterList();
+  }else{
+    // 已绑定但海报没到:保留候选,可直接换下一条
+    if(box) box.innerHTML = `<div class="badge warn" style="display:inline-block;margin-bottom:6px">已绑定 ${esc(r.name||"")} 但海报没拉到 — 换下面另一条候选,或稍后再试</div>` + prev;
+  }
 }
 
 // 去重
@@ -1785,14 +1840,16 @@ async function loadDups(){
 }
 async function execDedup(idx){const g=window._dups[idx];
   const body = `<div>tmdb <b>${UI.esc(g.tmdb)}</b> 删 <b>${g.remove.length}</b> 个版本(<b>留</b>:${UI.esc(g.keep.folder)})</div><div style="margin-top:8px;font-size:12px;color:var(--sub)">${g.remove.map(r=>'· '+UI.esc(r.folder)+'  ['+r.lib+'/'+r.n+'文件]').join('<br>')}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 文件夹进回收站(可还原),strm + Emby 条目同步删</div>`;
-  if(!(await UI.modal.confirm({danger:true,title:'确认去重',body,okText:'确认删除',requireType: g.remove.length>=3 ? '删除' : null})))return;
+  if(!(await UI.modal.confirm({danger:true,title:'确认去重',body,okText:'确认删除',requireType: g.remove.length>=TYPE_CONFIRM_AT ? '删除' : null})))return;
   const r=await api("/api/dedup",{method:"POST",body:JSON.stringify({tmdb:g.tmdb,remove:g.remove.map(x=>({lib:x.lib,folder:x.folder}))})});
-  toast("已删 "+(r.removed||[]).length+" 个");loadDups();}
+  if(r.err){ UI.toast("去重失败: "+r.err,{type:'error',ms:6000}); return; }   // 不再"已删0个"假成功
+  UI.toast("已删 "+(r.removed||[]).length+" 个",{type:'ok'});loadDups();}
 async function delReview(gi,ri){const g=window._review[gi];const r=g.rows[ri];
   const body = `<div>删除 <b>${UI.esc(r.folder)}</b></div><div class="muted" style="font-size:12px;margin-top:4px">库:${UI.esc(r.lib)} · ${r.n} 文件 · 画质 ${r.score}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 → 回收站(可还原)+ strm 同步删</div>`;
   if(!(await UI.modal.confirm({danger:true,title:'删除版本',body,okText:'删除',requireType:'删除'})))return;
   const x=await api("/api/dedup",{method:"POST",body:JSON.stringify({tmdb:g.tmdb,remove:[{lib:r.lib,folder:r.folder}]})});
-  toast("已删 "+(x.removed||[]).length+" 个");loadDups();}
+  if(x.err){ UI.toast("删除失败: "+x.err,{type:'error',ms:6000}); return; }
+  UI.toast("已删 "+(x.removed||[]).length+" 个",{type:'ok'});loadDups();}
 
 // 删除/移动
 async function loadItems(){const lib=$("#mgLib").value;$("#itemList").innerHTML='<span class="spin"></span> 加载…';
@@ -1801,6 +1858,21 @@ async function loadItems(){const lib=$("#mgLib").value;$("#itemList").innerHTML=
   // 切库:清选中
   window._mgSel = new Set();
   const d=await api("/api/items?lib="+encodeURIComponent(lib));ITEMS=d.items||[];$("#mgCount").textContent=`共 ${ITEMS.length} 部`;renderItems();}
+// 过滤输入去抖:大库(上千项)每键即重建 VirtualList 会卡,200ms 去抖
+let _mgFilterT;
+function mgFilterInput(){ clearTimeout(_mgFilterT); _mgFilterT = setTimeout(renderItems, 200); }
+// 高级过滤:tmdb:123 / 年:2024 / 路径:S01,默认搜片名+文件夹。
+// ⚠️ renderItems 和 toggleAll 必须共用这一个,否则全选算出的集合与显示的不一致 → 高级过滤下全选+批量删=误删屏幕外的项
+function filterItems(kw){
+  kw = (kw||"").trim();
+  if (!kw) return ITEMS;
+  let m;
+  if ((m = kw.match(/^tmdb:(\S+)$/i))) return ITEMS.filter(i=>String(i.tmdb||'')===m[1]);
+  if ((m = kw.match(/^(?:年|year):(\d{4})$/i))) return ITEMS.filter(i=>String(i.year||'')===m[1]);
+  if ((m = kw.match(/^(?:路径|path):(.+)$/i))){ const p=m[1].toLowerCase(); return ITEMS.filter(i=>(i.folder||'').toLowerCase().includes(p)); }
+  const q = kw.toLowerCase();
+  return ITEMS.filter(i=>(i.name||'').toLowerCase().includes(q) || (i.folder||'').toLowerCase().includes(q));
+}
 function renderItems(){
   // 先销毁上次的 VirtualList(防止 scroll listener 泄漏)
   const itemListEl = $("#itemList");
@@ -1815,21 +1887,7 @@ function renderItems(){
     itemListEl.style.overflow = '';
   }
   const kw=($("#mgFilter").value||"").trim();
-  // 高级过滤:tmdb:123 / 年:2024 / 路径:S01,默认搜片名+文件夹
-  let list = ITEMS;
-  if (kw){
-    let m;
-    if ((m = kw.match(/^tmdb:(\S+)$/i))){
-      const t = m[1]; list = ITEMS.filter(i=>String(i.tmdb||'')===t);
-    } else if ((m = kw.match(/^(?:年|year):(\d{4})$/i))){
-      const y = m[1]; list = ITEMS.filter(i=>String(i.year||'')===y);
-    } else if ((m = kw.match(/^(?:路径|path):(.+)$/i))){
-      const p = m[1].toLowerCase(); list = ITEMS.filter(i=>(i.folder||'').toLowerCase().includes(p));
-    } else {
-      const q = kw.toLowerCase();
-      list = ITEMS.filter(i=>(i.name||'').toLowerCase().includes(q) || (i.folder||'').toLowerCase().includes(q));
-    }
-  }
+  const list = filterItems(kw);
   const meta = $("#itemListMeta");
   if (meta) meta.textContent = `过滤后 ${list.length} 项 / 总 ${ITEMS.length} 项${list.length>200?' · 虚拟滚动模式':''}`;
   const others=LIBS.map(l=>l.name).filter(n=>n!==$("#mgLib").value);
@@ -1874,9 +1932,8 @@ function updateSel(forceFromDom){
 }
 function toggleAll(){
   const on = $("#ckAll").checked;
-  // 重新算"过滤后"列表的 gi 全集(对当前过滤结果全选/全清)
-  const kw=($("#mgFilter").value||"").trim().toLowerCase();
-  const filtered = kw ? ITEMS.filter(i=>(i.name||'').toLowerCase().includes(kw) || (i.folder||'').toLowerCase().includes(kw)) : ITEMS;
+  // 用与 renderItems 同一个过滤器算全集(含 tmdb:/年:/路径: 高级语法),否则全选的是错的集合
+  const filtered = filterItems($("#mgFilter").value);
   window._mgSel = new Set();
   if (on) filtered.forEach(i=>window._mgSel.add(ITEMS.indexOf(i)));
   // 同步可见 DOM
@@ -1905,7 +1962,7 @@ async function doDeleteBatch(){
   const lib=$("#mgLib").value;
   const names=gis.slice(0,5).map(g=>ITEMS[g].name).join("、")+(gis.length>5?` 等 ${gis.length} 部`:"");
   const body = `<div>删除 <b>${gis.length}</b> 部</div><div class="muted" style="font-size:12px;margin-top:4px">${UI.esc(names)}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 → 回收站(可还原)+ strm + Emby 同步删</div>`;
-  if(!(await UI.modal.confirm({danger:true,title:'批量删除',body,okText:'确认批量删',requireType: gis.length >= 5 ? '删除' : null})))return;
+  if(!(await UI.modal.confirm({danger:true,title:'批量删除',body,okText:'确认批量删',requireType: gis.length >= TYPE_CONFIRM_AT ? '删除' : null})))return;
   const items = gis.map(g=>({folder: ITEMS[g].folder, id: ITEMS[g].id}));
   const r = await api('/api/manage/delete_batch', {method:'POST', body:JSON.stringify({lib, items, async:true})});
   if (r && r.err){ UI.toast('启动失败: '+r.err, {type:'error'}); return; }
@@ -1934,7 +1991,8 @@ async function doMoveBatch(){
   const gis=selectedGis();if(!gis.length){toast("先勾选");return;}
   const to=$("#mgBatchTo").value;if(!to){toast("先在工具栏选目标库");return;}
   const lib=$("#mgLib").value;
-  if(!(await UI.modal.confirm({title:'批量移动',body:`<div>把 <b>${gis.length}</b> 部从 <b>${UI.esc(lib)}</b> → <b>${UI.esc(to)}</b></div>`,okText:'移动'})))return;
+  const names=gis.slice(0,5).map(g=>ITEMS[g].name).join("、")+(gis.length>5?` 等 ${gis.length} 部`:"");
+  if(!(await UI.modal.confirm({title:'批量移动',body:`<div>把 <b>${gis.length}</b> 部从 <b>${UI.esc(lib)}</b> → <b>${UI.esc(to)}</b></div><div class="muted" style="font-size:12px;margin-top:4px">${UI.esc(names)}</div>`,okText:'移动',requireType: gis.length>=TYPE_CONFIRM_AT ? '移动' : null})))return;
   const items = gis.map(g=>({folder: ITEMS[g].folder, id: ITEMS[g].id}));
   const r = await api('/api/manage/move_batch', {method:'POST', body:JSON.stringify({from:lib, to, items, async:true})});
   if (r && r.err){ UI.toast('启动失败: '+r.err, {type:'error'}); return; }
@@ -2349,7 +2407,7 @@ function renderLogList(){
       ? `<span class="badge" style="opacity:.6">已撤销</span>`
       : (op === 'move' || op === 'rebind')
         ? `<button class="btn ghost" onclick='doUndo(${JSON.stringify(e.id)})'>↩️ 撤销</button>`
-        : `<span class="muted" style="font-size:11px">删除已进 115 回收站,自行还原</span>`;
+        : `<span class="muted" style="font-size:11px">已进 115 回收站 <a href="https://115.com" target="_blank" rel="noopener" style="color:var(--blue)">打开 115 →回收站还原</a></span>`;
     return `<div class="item" style="padding:10px 4px">
       <div class="main">
         <div style="font-size:13px">${desc}</div>
@@ -2405,12 +2463,17 @@ async function loadUsers(){
     return `<div class="item"><div class="main">
     <div class="nm">${esc(u.name)} ${u.admin?'<span class="badge">管理员</span>':''} ${u.disabled?'<span class="badge warn">已停用</span>':''}</div>
     <div class="meta">同时播放: ${sl?sl+' 路':'不限'} · 限速: ${br?br+' Mbps':'不限'} · 最后活跃: <span class="muted">${esc(act||'未记录')}</span></div></div>
-    <label class="muted" style="font-size:11px">同时播放<input id="ms${u.id}" type="number" min="0" value="${sl}" style="width:54px;margin-left:3px" title="同时能开几路播放,0=不限"></label>
-    <label class="muted" style="font-size:11px">限速Mbps<input id="br${u.id}" type="number" min="0" step="0.5" value="${br}" style="width:60px;margin-left:3px" title="远程串流码率上限,0=不限。参考:1080p≈8,4K≈25。⚠️ 设得低于源码率会触发实时转码吃 NAS CPU,别设太狠"></label>
-    <button class="btn ghost" onclick="updateUser('${u.id}')">存</button>
+    <label class="muted" style="font-size:11px">同时播放<input id="ms${u.id}" type="number" min="0" value="${sl}" style="width:54px;margin-left:3px" title="同时能开几路播放,0=不限" oninput="userDirty('${u.id}')" onkeydown="if(event.key==='Enter')updateUser('${u.id}')"></label>
+    <label class="muted" style="font-size:11px">限速Mbps<input id="br${u.id}" type="number" min="0" step="0.5" value="${br}" style="width:60px;margin-left:3px" title="远程串流码率上限,0=不限。参考:1080p≈8,4K≈25。⚠️ 设得低于源码率会触发实时转码吃 NAS CPU,别设太狠" oninput="userDirty('${u.id}')" onkeydown="if(event.key==='Enter')updateUser('${u.id}')"></label>
+    <button class="btn ghost" id="save${u.id}" onclick="updateUser('${u.id}')">存</button>
     <button class="btn ghost" onclick="updateUser('${u.id}',${u.disabled?0:1})">${u.disabled?'启用':'停用'}</button>
     ${u.admin?'':`<button class="btn danger" onclick="delUser('${u.id}','${esc(u.name)}')">删</button>`}</div>`;
   }).join("");
+}
+// 用户行改了数字未保存 → 存按钮变色提示(防切走静默丢失);回车直接存
+function userDirty(id){
+  const b=$("#save"+id);
+  if(b){ b.classList.add('primary'); b.textContent='存*'; b.title='有未保存改动'; }
 }
 async function addUser(){
   const name=$("#nuName").value.trim(),pw=$("#nuPw").value;
@@ -2664,47 +2727,106 @@ async function catalogSearch(){
   if(d.hint && !(d.items||[]).length){ out.innerHTML=`<span class="badge warn">${esc(d.hint)}</span>`; return; }
   window._catalogItems = d.items||[];
   if(!d.items.length){ out.innerHTML='<p class="muted">没搜到。换个关键词试试(库里名字是从文档抓的,可能和标准译名不同)</p>'; return; }
-  out.innerHTML = `<div class="muted" style="font-size:12px;margin-bottom:6px">${d.items.length} 条${d.truncated?'(已截断,缩小关键词)':''} · 115秒传链优先排前</div>` +
+  out.innerHTML = `<div class="row" style="font-size:12px;margin-bottom:6px;align-items:center;gap:10px">
+      <label class="muted"><input type="checkbox" id="catAll" onchange="catalogToggleAll()"> 全选</label>
+      <span class="muted">${d.items.length} 条${d.truncated?'(已截断,缩小关键词)':''} · 115秒传链优先</span>
+      <span style="flex:1"></span>
+      <button class="btn" onclick="catalogBatchTransfer()">⬇️ 转存/下载选中</button>
+    </div>` +
     d.items.map((it,i)=>{
       const offline = !it.transfer;  // 磁力/ed2k 走离线下载
       const btn = offline
-        ? `<button class="btn ghost" style="color:#a78bfa" onclick="catalogTransfer(${i})">📡 离线下载</button>`
+        ? `<button class="btn ghost" style="color:#a78bfa" onclick="catalogTransfer(${i})">📡 离线</button>`
         : `<button class="btn ghost" onclick="catalogTransfer(${i})">⬇️ 转存</button>`;
       return `<div class="item" style="border-bottom:1px solid var(--line);padding:8px 2px">
+      <input type="checkbox" class="ck-cat" data-idx="${i}" style="margin-right:8px;width:16px;height:16px;flex-shrink:0">
       <div class="main">
         <div class="nm">${esc(it.name)} ${_ltLabel(it.link_type)} ${it.is_pkg?'<span class="badge warn" title="整包合集">📦整包</span>':''}</div>
-        <div class="meta"><span class="badge">${esc(it.sheet)}</span> <span class="muted" style="font-size:11px">${esc((it.link||'').slice(0,46))}…</span></div>
+        <div class="meta"><span class="badge">${esc(it.sheet)}</span> <span class="muted" style="font-size:11px;word-break:break-all">${esc((it.link||'').slice(0,46))}…</span></div>
       </div>
       ${btn}
     </div>`;}).join("");
 }
+function catalogToggleAll(){
+  const on=$("#catAll").checked;
+  document.querySelectorAll('.ck-cat').forEach(c=>c.checked=on);
+}
+// 转完自动扫库:仅当勾了「转完自动扫库」且目标是配置库(非自定义 cid,扫不了任意 cid)且有秒传成功
+async function catalogMaybeScan(lib, hadNonOffline){
+  if(!lib || !hadNonOffline) return;
+  if(!$("#catalogAutoScan") || !$("#catalogAutoScan").checked) return;
+  try{
+    const r=await api('/api/scan',{method:'POST',body:JSON.stringify({lib})});
+    if(r&&!r.err) UI.toast(`已扫「${lib}」:新增 ${r.new_count||0} strm`,{type:'ok',ms:5000});
+    else UI.toast('自动扫库失败: '+(r&&r.err||'?'),{type:'warn'});
+  }catch(e){ UI.toast('自动扫库出错: '+e,{type:'warn'}); }
+}
+// 目标解析:自定义 cid 优先(必须正整数),否则用库下拉。返 {cid|lib, label, desc} 或 {err}
+function catalogTarget(){
+  const cid=($("#catalogCid").value||'').trim(), lib=$("#catalogTarget").value;
+  if(cid){ if(!/^[1-9]\d*$/.test(cid)) return {err:'自定义 cid 必须是正整数(0=根目录不允许)'}; return {cid, desc:'cid '+cid}; }
+  if(lib) return {lib, desc:'库「'+lib+'」'};
+  return {err:'先选目标库或填 cid(没库可选就去设置页配 cid)'};
+}
+async function catalogBatchTransfer(){
+  const idxs=Array.from(document.querySelectorAll('.ck-cat:checked')).map(c=>parseInt(c.dataset.idx));
+  if(!idxs.length){ UI.toast('先勾选要转的',{type:'warn'}); return; }
+  const tgt=catalogTarget(); if(tgt.err){ UI.toast(tgt.err,{type:'warn'}); return; }
+  const items=idxs.map(i=>window._catalogItems[i]).filter(Boolean);
+  const pkg=items.filter(x=>x.is_pkg), offline=items.filter(x=>!x.transfer), normal=items.filter(x=>x.transfer&&!x.is_pkg);
+  const ok=await UI.modal.confirm({
+    danger: pkg.length>0,
+    title:`转存/下载 ${items.length} 条到 ${tgt.desc}`,
+    body:`<div>普通秒传 <b>${normal.length}</b> · 离线下载 <b>${offline.length}</b> · 📦整包 <b style="color:var(--warn)">${pkg.length}</b></div>`+
+      (offline.length?'<div style="margin-top:6px;color:#a78bfa;font-size:12px">📡 磁力/ed2k 走 115 离线下载(真下载、占空间、到 115 看进度)。</div>':'')+
+      (pkg.length?'<div style="margin-top:6px;color:var(--warn);font-size:12px">⚠️ 含 '+pkg.length+' 个整包合集(每个可能几百部/几 TB)!打字「整包」确认。</div>':'')+
+      '<div class="muted" style="font-size:12px;margin-top:6px">逐条提交,完成后给汇总。</div>',
+    okText:`开始(${items.length})`,
+    requireType: pkg.length>0 ? '整包' : null
+  });
+  if(!ok) return;
+  const out=$("#catalogOut");
+  let done=0, okN=0, fail=[];
+  const orig=out.innerHTML;
+  for(const it of items){
+    out.scrollIntoView&&0;
+    const body=Object.assign({link:it.link, label:it.name}, tgt.cid?{cid:tgt.cid}:{lib:tgt.lib});
+    let r; try{ r=await api('/api/catalog/transfer',{method:'POST',body:JSON.stringify(body)}); }
+    catch(e){ r={ok:false,err:String(e)}; }
+    done++;
+    if(r.ok) okN++; else fail.push((it.name||'?')+': '+(r.err||r.msg||'失败'));
+    UI.toast(`进度 ${done}/${items.length} · ✓${okN}${fail.length?' ✗'+fail.length:''}`,{type:'info',ms:1200});
+    await new Promise(s=>setTimeout(s,400));  // 115 友好,别太快
+  }
+  UI.toast(`完成:✓${okN} / 共 ${items.length}${fail.length?` · ✗${fail.length}`:''}`,{type:fail.length?'warn':'ok',ms:7000,
+    action: fail.length?{label:'失败详情',fn:()=>UI.modal.alert({title:'失败列表',body:fail.map(esc).join('<br>'),copyable:true})}:null});
+  if(okN) catalogMaybeScan(tgt.lib, items.some(x=>x.transfer));  // 有秒传成功 + 配置库 → 自动扫
+}
 async function catalogTransfer(i){
   const it = window._catalogItems[i];
   if(!it){ return; }
-  const cid = $("#catalogCid").value.trim();
-  const lib = $("#catalogTarget").value;
-  if(!cid && !lib){ UI.toast('先选目标库或填 cid', {type:'warn'}); return; }
-  if(cid && !/^[1-9]\d*$/.test(cid)){ UI.toast('自定义 cid 必须是正整数(0=根目录不允许)', {type:'warn'}); return; }
-  const target = cid ? ('cid '+cid) : ('库「'+lib+'」');
+  const tgt = catalogTarget(); if(tgt.err){ UI.toast(tgt.err, {type:'warn'}); return; }
   const offline = !it.transfer;
   const ok = await UI.modal.confirm({
     danger: it.is_pkg,
-    title: (offline?'📡 离线下载到 ':'⬇️ 转存到 ')+target,
+    title: (offline?'📡 离线下载到 ':'⬇️ 转存到 ')+tgt.desc,
     body: `<div><b>${UI.esc(it.name)}</b> ${_ltLabel(it.link_type)}</div>`+
       (offline?'<div style="margin-top:8px;color:#a78bfa;font-size:12px">📡 这是<b>磁力/ed2k</b>,走 115 <b>离线下载</b>(115 云端替你下,占空间、要时间、冷门可能下不动;到 115 看进度,不是秒传)。</div>':'')+
       (it.is_pkg?'<div style="margin-top:8px;color:var(--warn);font-size:12px">⚠️ <b>整包合集</b> —— 整个合集(可能几百部/几 TB)!打字确认。</div>':'')+
-      `<div class="muted" style="font-size:12px;margin-top:8px">${UI.esc(it.link)}</div>`,
+      `<div class="muted" style="font-size:12px;margin-top:8px;word-break:break-all">${UI.esc(it.link)}</div>`,
     okText: offline?'离线下载':'转存',
     requireType: it.is_pkg ? '整包' : null
   });
   if(!ok) return;
-  const body = cid ? {link:it.link, cid:cid, label:it.name} : {link:it.link, lib:lib};
+  const lib = tgt.lib;
+  const body = Object.assign({link:it.link, label:it.name}, tgt.cid?{cid:tgt.cid}:{lib:tgt.lib});
   let r; try{ r=await api('/api/catalog/transfer',{method:'POST',body:JSON.stringify(body)}); }
   catch(e){ UI.toast((offline?'离线添加':'转存')+'失败: '+e,{type:'error'}); return; }
   if(r.ok){
-    const tip = offline ? (r.msg||'已加入离线队列')+(r.quota!=null?(' · 配额剩 '+r.quota):'') : (r.msg||'已转存')+(r.count?(' ('+r.count+'项)'):'');
+    const tip = offline ? (r.msg||'已加入离线队列') : (r.msg||'已转存')+(r.count?(' ('+r.count+'项)'):'');
     UI.toast('✓ '+tip,{type:'ok',ms:6000,
       action:(!offline&&lib)?{label:'去扫这个库',fn:()=>{tab('scan');setTimeout(()=>{const s=$("#scanLib");if(s){s.value=lib;}},80);}}:null});
+    if(!offline) catalogMaybeScan(lib, true);  // 秒传成功 + 勾了自动扫 + 配置库 → 自动扫
   }else{
     UI.toast((offline?'离线添加':'转存')+'失败: '+(r.err||r.msg||'未知'),{type:'error',ms:6000});
   }
@@ -3500,7 +3622,7 @@ async function cleanupDeleteSelected(){
 <div style="margin-top:8px;font-size:11px;max-height:280px;overflow:auto;background:#0b0f17;padding:10px;border-radius:6px">${preview}${extra}</div>
 <div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 文件夹进回收站(7 天可还原)+ strm + Emby 条目同步删。释放约 <b>${totalGB.toFixed(1)} GB</b>。</div>`,
     okText: `🗑️ 删除 ${selected.length} 部`,
-    requireType: '删除'
+    requireType: selected.length >= TYPE_CONFIRM_AT ? '删除' : null
   });
   if (!ok) return;
   try {
@@ -3775,10 +3897,16 @@ function copySystemReport(){
 
 function zgGoCheck(id){
   tab('gaps');
-  setTimeout(()=>{
-    const sel = document.querySelector('#gapSeries');
-    if (sel){ sel.value = id; if (typeof checkGaps === 'function') checkGaps(); }
-  }, 200);
+  // loadGapSeries 是异步建 combobox,轮询等它就绪再 setValue + 查
+  let tries=0;
+  const t=setInterval(()=>{
+    tries++;
+    if(window._gapCombo){
+      clearInterval(t);
+      window._gapCombo.setValue(String(id));
+      if(typeof checkGaps==='function') checkGaps();
+    } else if(tries>20){ clearInterval(t); }
+  }, 150);
 }
 
 // 缺集检查
@@ -3787,14 +3915,20 @@ function fillGapLibs(){
   $("#gapLib").innerHTML=tv.map(l=>`<option>${esc(l.name)}</option>`).join("");
   if(tv.length) loadGapSeries();
 }
+window._gapCombo = null;
+function gapSeriesValue(){ return window._gapCombo ? window._gapCombo.getValue() : ''; }
 async function loadGapSeries(){
-  const lib=$("#gapLib").value; $("#gapSeries").innerHTML='<option>加载中…</option>';
+  const lib=$("#gapLib").value;
+  const el=$("#gapSeries"); el.innerHTML='';
   const d=await api("/api/items?lib="+encodeURIComponent(lib));
-  $("#gapSeries").innerHTML=(d.items||[]).map(i=>`<option value="${i.id}">${esc(i.name)}</option>`).join("")||'<option value="">(空)</option>';
+  const opts=(d.items||[]).map(i=>({value:String(i.id), label:i.name||String(i.id)}));
+  // 用可搜索 Combobox 取代上千项原生 select(中文剧名翻不动)
+  window._gapCombo = new UI.Combobox({options:opts, placeholder:`搜剧名(共 ${opts.length} 部)…`, onChange:()=>{}});
+  window._gapCombo.mount(el);
   $("#gapOut").innerHTML="";
 }
 async function checkGaps(){
-  const id=$("#gapSeries").value; if(!id){toast("先选一部剧");return;}
+  const id=gapSeriesValue(); if(!id){UI.toast("先选一部剧",{type:'warn'});return;}
   const o=$("#gapOut"); o.innerHTML='<span class="spin"></span> 分析…';
   const d=await api("/api/gaps?id="+encodeURIComponent(id));
   const behind=(d.tmdb_max>d.max_ep)?(d.tmdb_max-d.max_ep):0;
@@ -3843,10 +3977,18 @@ function copyEp(s){
     ta.remove();
   }
 }
-async function refreshSeries(){
-  const id=$("#gapSeries").value; if(!id){toast("先选一部剧");return;}
-  toast("正在从 TMDb 刷新该剧元数据(拉最新集列表),稍等十几秒再点「检查」…",5000);
-  await api("/api/refreshseries?id="+encodeURIComponent(id));
+async function refreshSeries(btn){
+  const id=gapSeriesValue(); if(!id){UI.toast("先选一部剧",{type:'warn'});return;}
+  if(btn){ btn.disabled=true; btn._t=btn.textContent; btn.textContent='刷新中…'; }  // 防连点
+  UI.toast("从 TMDb 刷新元数据中(约十几秒,完了自动重查缺集)…",{type:'info',ms:4000});
+  try{
+    const r=await api("/api/refreshseries?id="+encodeURIComponent(id));
+    if(r&&r.err){ UI.toast("刷新失败: "+r.err,{type:'error',ms:6000}); return; }
+    // Emby 后台拉 TMDb 要点时间,等一下再自动重查(省去用户掐表手点)
+    UI.toast("已触发刷新,稍候自动重查缺集",{type:'ok',ms:2500});
+    setTimeout(()=>{ if(gapSeriesValue()===id) checkGaps(); }, 12000);
+  }catch(e){ UI.toast("刷新失败: "+e,{type:'error'}); }
+  finally{ if(btn){ btn.disabled=false; btn.textContent=btn._t||'刷新元数据'; } }
 }
 
 function esc(s){return(s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
