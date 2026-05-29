@@ -7,7 +7,8 @@ from lib.logger import logger
 
 TOKENS = {}            # token -> {created, last_seen, ip, csrf}
 TOKENS_LOCK = threading.Lock()
-TOKEN_TTL = 7 * 24 * 3600     # 7 天没用就失效
+TOKEN_TTL = 7 * 24 * 3600          # 7 天没用就失效(滑动空闲窗)
+ABS_TOKEN_TTL = 30 * 24 * 3600     # 绝对寿命上限:不管多活跃,30 天必须重登(防泄露 token 被无限 keep-alive)
 
 LOGIN_FAIL = collections.defaultdict(list)  # ip -> [失败时间戳]
 LOGIN_FAIL_LOCK = threading.Lock()
@@ -51,14 +52,29 @@ def _token_csrf(t):
         return TOKENS.get(t, {}).get("csrf")
 
 
-def _token_valid(t):
+def _token_valid(t, ip=None):
+    """校验 token。ip 给定时:可选 IP 绑定(config bind_token_ip=true 则换 IP 失效;否则只记审计日志)。"""
     if not t: return False
+    now = time.time()
     with TOKENS_LOCK:
         rec = TOKENS.get(t)
         if not rec: return False
-        if time.time() - rec["last_seen"] > TOKEN_TTL:
+        # 空闲窗 + 绝对寿命双重过期
+        if now - rec["last_seen"] > TOKEN_TTL or now - rec.get("created", now) > ABS_TOKEN_TTL:
             TOKENS.pop(t, None); return False
-        rec["last_seen"] = time.time()
+        # IP 绑定 / 审计:token 记录的登录 IP 与当前请求来源不一致时
+        if ip and rec.get("ip") and ip != rec["ip"]:
+            try:
+                from lib.config import CFG
+                strict = bool(CFG.get("bind_token_ip"))
+            except Exception:
+                strict = False
+            if strict:
+                TOKENS.pop(t, None)
+                logger.warning("token IP 变更 (%s→%s) 且开启绑定 → 失效", rec["ip"], ip)
+                return False
+            logger.warning("token 来源 IP 变更:登录 %s → 当前 %s(未开 bind_token_ip,放行)", rec["ip"], ip)
+        rec["last_seen"] = now
         return True
 
 
@@ -107,14 +123,22 @@ def client_ip_for_login(remote_addr, xff_header, trusted_proxies):
 
 
 def _token_reaper():
-    """后台线程每 30 分钟清过期 token,避免 TOKENS 无限增长。"""
+    """后台线程每 30 分钟清过期 token + 清空 LOGIN_FAIL 里的陈旧 IP 项,避免两个 dict 无限增长。"""
     while True:
         time.sleep(1800)
         try:
-            cutoff = time.time() - TOKEN_TTL
+            now = time.time()
+            cutoff = now - TOKEN_TTL
             with TOKENS_LOCK:
-                dead = [t for t, r in TOKENS.items() if r["last_seen"] < cutoff]
+                dead = [t for t, r in TOKENS.items()
+                        if r["last_seen"] < cutoff or now - r.get("created", now) > ABS_TOKEN_TTL]
                 for t in dead: TOKENS.pop(t, None)
             if dead: logger.info("token reaper 清 %d 个过期 token", len(dead))
+            # LOGIN_FAIL 同样回收:删掉窗口内已无失败记录的 IP key(否则被 IP 轮换撑大)
+            with LOGIN_FAIL_LOCK:
+                stale = [ip for ip, ts in LOGIN_FAIL.items()
+                         if not [t for t in ts if now - t < LOGIN_WINDOW]]
+                for ip in stale: LOGIN_FAIL.pop(ip, None)
+            if stale: logger.info("login-fail reaper 清 %d 个陈旧 IP", len(stale))
         except Exception:
             logger.exception("token reaper 异常")

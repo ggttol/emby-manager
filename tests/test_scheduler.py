@@ -107,9 +107,18 @@ class TestIsDue(_SchedulerTestBase):
         now = datetime(2026, 5, 28, 2, 59, 30)
         self.assertFalse(scheduler.is_due(s, now))
 
-    def test_daily_after_window_no_fire(self):
+    def test_daily_after_window_catches_up(self):
+        # 新语义:去掉固定 5min 上限后,过点很久但本周期没跑过 → 仍补跑(防时钟跳变/轮询错拍漏跑)
         from lib import scheduler
         s = self._mk("daily")
+        now = datetime(2026, 5, 28, 3, 10, 0)  # 过点 10 分钟,无 last_run_at
+        self.assertTrue(scheduler.is_due(s, now))
+
+    def test_daily_after_window_no_refire_if_ran_today(self):
+        # 但当天已跑过就不再补跑(靠 last_run_at 同周期去重)
+        from lib import scheduler
+        s = self._mk("daily")
+        s["last_run_at"] = "2026-05-28T03:00:00"
         now = datetime(2026, 5, 28, 3, 10, 0)
         self.assertFalse(scheduler.is_due(s, now))
 
@@ -211,20 +220,51 @@ class TestSchedulesPersist(_SchedulerTestBase):
 
 
 class TestOverlapGuard(_SchedulerTestBase):
-    """上次任务还在跑(last_status=running)时 _fire 应短路,不并发起新的。"""
-    def test_fire_skips_when_last_running(self):
-        from lib import scheduler
-        s = scheduler.add_schedule("ov", "scan_all", {"mode": "daily", "hour": 3, "minute": 0})
-        # 模拟"还在跑"
-        scheduler.update_schedule(s["id"], {})  # noop,只是确认能找到
+    """新守卫:只有上次任务【在内存 TASKS 里确实还 running】才短路;残留状态(重启/已终)不阻塞。"""
+
+    def _set_status(self, sid, status, tid=None):
         from lib.config import CFG
-        with patch.dict(CFG, {}):
-            # 手改 last_status 为 running
-            for x in CFG["schedules"]:
-                if x["id"] == s["id"]: x["last_status"] = "running"
-            # _fire 不应起新任务
+        for x in CFG["schedules"]:
+            if x["id"] == sid:
+                x["last_status"] = status
+                x["last_tid"] = tid
+
+    def test_fire_skips_when_task_really_running(self):
+        # last_tid 指向一个内存里确实 running 的任务 → _fire 必须短路,不起新任务
+        from lib import scheduler
+        from lib import tasks
+        s = scheduler.add_schedule("ov", "scan_all", {"mode": "daily", "hour": 3, "minute": 0})
+        with patch.object(tasks, "task_get", return_value={"status": "running"}):
+            self._set_status(s["id"], "running", tid="fake_running_tid")
+            self.assertIsNone(scheduler._fire(s["id"]))
+
+    def test_fire_proceeds_when_stale_running_after_restart(self):
+        # H1:重启后 last_status 残留 running 但 task_get 返 None → 不应永久卡死,应能再次触发
+        from lib import scheduler
+        from lib import tasks
+        captured = {}
+        def fake_run_async(kind, fn, *a, **k):
+            captured["kind"] = kind
+            return "new_tid"
+        s = scheduler.add_schedule("stale", "scan_all", {"mode": "daily", "hour": 3, "minute": 0})
+        with patch.object(tasks, "task_get", return_value=None), \
+             patch.object(tasks, "run_async", side_effect=fake_run_async):
+            self._set_status(s["id"], "running", tid="dead_tid_from_old_process")
             tid = scheduler._fire(s["id"])
-            self.assertIsNone(tid)
+            self.assertEqual(tid, "new_tid")
+            self.assertEqual(captured.get("kind"), "schedule:scan_all")
+
+    def test_reconcile_resets_stale_running(self):
+        # 启动 reconcile:残留 running 且任务已不在 → 重置为 interrupted
+        from lib import scheduler
+        from lib import tasks
+        from lib.config import CFG
+        s = scheduler.add_schedule("rec", "scan_all", {"mode": "daily", "hour": 3, "minute": 0})
+        self._set_status(s["id"], "running", tid="dead")
+        with patch.object(tasks, "task_get", return_value=None):
+            scheduler._reconcile_on_start()
+        got = scheduler.get_schedule(s["id"])
+        self.assertEqual(got["last_status"], "interrupted")
 
     def test_update_does_not_change_kind(self):
         """update_schedule 只接受 name/params/schedule/enabled,kind 字段被忽略(防误改)。"""

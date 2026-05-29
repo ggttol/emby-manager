@@ -9,7 +9,11 @@ from lib.logger import logger
 
 def _url(path, params=None):
     p = dict(params or {}); p["api_key"] = CFG["api_key"]
-    return CFG["emby_url"] + path + "?" + urllib.parse.urlencode(p)
+    # path 里可能插了来自请求的 item id(/Items/<id>/Refresh 等)。percent-encode 整段 path(保留 /),
+    # 这样 id 里若带 ?/&/# 会被编码成字面量,无法越出成查询参数注入(review:emby id 注入)。
+    # 合法 id(hex GUID)不含这些字符,编码后不变。
+    safe_path = urllib.parse.quote(path, safe="/%:@")
+    return CFG["emby_url"] + safe_path + "?" + urllib.parse.urlencode(p)
 
 
 def eget(path, params=None):
@@ -106,8 +110,11 @@ def remote_search(item_id, name, typ):
 
 
 def apply_match(item_id, tmdb, typ, name):
-    import time
-    from lib.logger import log
+    import time, re
+    from lib.logger import log, AppError
+    # tmdb 必须纯数字 —— 否则会被原样写进 Emby ProviderIds.Tmdb,再在前端列表里拼进 innerHTML 成存储型 XSS 源(review)
+    if not re.fullmatch(r"\d+", str(tmdb or "")):
+        raise AppError("tmdbid 必须是数字: %r" % tmdb, status=400)
     epost("/Items/RemoteSearch/Apply/%s" % item_id, body={"ProviderIds": {"Tmdb": str(tmdb)}})
     epost("/Items/%s/Refresh" % item_id, {"MetadataRefreshMode": "FullRefresh", "ImageRefreshMode": "FullRefresh",
                                           "ReplaceAllMetadata": "true", "ReplaceAllImages": "true"})

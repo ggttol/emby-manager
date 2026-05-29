@@ -1313,7 +1313,13 @@ async function api(path, opt={}){
       }catch(e){}
     }
   }
-  return r.json();
+  // 非 2xx 或非 JSON body 统一抛 Error(带后端 err 文案),避免裸 r.json() 在 500/空 body/反代 502 时
+  // 抛 SyntaxError 成 unhandled rejection → 调用方 spinner 永久卡死(review:api 错误处理)。
+  if(!r.ok){
+    const j = await r.clone().json().catch(()=>null);
+    throw new Error((j && j.err) ? j.err : ("HTTP " + r.status));
+  }
+  return r.json().catch(()=>{ throw new Error("响应不是合法 JSON(HTTP " + r.status + ")"); });
 }
 async function login(){
   const pw=$("#pw").value;
@@ -1661,7 +1667,7 @@ async function loadNoposter(){
   const autoBtn=$("#posterAutoAll"); if (autoBtn) autoBtn.style.display = NOPOSTER.length ? '' : 'none';
   if(!NOPOSTER.length){$("#posterList").innerHTML='<p class="muted">🎉 全部条目都有海报</p>';return;}
   $("#posterList").innerHTML=NOPOSTER.map((i,idx)=>`<div class="item"><div class="main"><div class="nm">${esc(i.name)}</div>
-    <div class="meta"><span class="badge">${esc(i.lib)}</span><span class="badge">${i.type}</span>tmdb:${i.tmdb||"无"} · 📁${esc(i.folder)}</div></div>
+    <div class="meta"><span class="badge">${esc(i.lib)}</span><span class="badge">${esc(i.type)}</span>tmdb:${esc(i.tmdb||"无")} · 📁${esc(i.folder)}</div></div>
     <button class="btn" onclick="fixPoster(${idx})">重搜+修复</button></div><div id="cand${idx}" class="hide" style="margin:4px 0 14px 0"></div>`).join("");
 }
 async function fixPoster(idx){
@@ -1672,8 +1678,8 @@ async function fixPoster(idx){
   // 92×138 大缩略图(默认 46×68 太小,候选海报常常细节看不清)
   h+=(d.candidates||[]).map(c=>`<div class="cand" onclick='applyPoster(${idx},${JSON.stringify(c.tmdb)})'>
     ${c.img?`<img src="${esc(c.img)}" style="width:92px;height:138px;object-fit:cover;border-radius:4px;background:#222" loading="lazy">`:'<div style="width:92px;height:138px;background:#222;border-radius:4px"></div>'}
-    <div><div class="nm">${esc(c.name||"?")} ${c.year||""} ${c.img?'<span class="badge g">有海报</span>':'<span class="badge warn">无海报</span>'}</div>
-    <div class="meta">tmdb:${c.tmdb} · ${esc(c.overview||"")}</div></div></div>`).join("");
+    <div><div class="nm">${esc(c.name||"?")} ${esc(c.year||"")} ${c.img?'<span class="badge g">有海报</span>':'<span class="badge warn">无海报</span>'}</div>
+    <div class="meta">tmdb:${esc(c.tmdb)} · ${esc(c.overview||"")}</div></div></div>`).join("");
   if(!(d.candidates||[]).length)h+='<p class="muted">没搜到候选</p>';
   h+=`<div class="row" style="margin-top:8px">或手动填 tmdbid: <input id="mtmdb${idx}" style="width:130px" placeholder="如 252135"><button class="btn" onclick="applyPoster(${idx},document.getElementById('mtmdb${idx}').value.trim())">绑定</button></div>`;
   box.innerHTML=h;
@@ -1723,11 +1729,11 @@ async function loadDups(){
   $("#dupList").innerHTML='<span class="spin"></span> 读 strm 分析全库重复…';
   const d=await api("/api/dups");let h="";
   if(!d.dups.length)h+='<p class="muted">✅ 没发现可去重的重复</p>';
-  d.dups.forEach((g,idx)=>{h+=`<div class="card"><div class="row"><b>tmdb ${g.tmdb}</b><span class="badge g">留</span> ${esc(g.keep.folder)} <span class="muted">[画质${g.keep.score}·${g.keep.n}文件·${esc(g.keep.lib)}]</span></div>`;
+  d.dups.forEach((g,idx)=>{h+=`<div class="card"><div class="row"><b>tmdb ${esc(g.tmdb)}</b><span class="badge g">留</span> ${esc(g.keep.folder)} <span class="muted">[画质${g.keep.score}·${g.keep.n}文件·${esc(g.keep.lib)}]</span></div>`;
     g.remove.forEach(r=>h+=`<div class="row" style="margin-top:4px"><span class="badge warn">删</span> ${esc(r.folder)} <span class="muted">[画质${r.score}·${r.n}文件·${esc(r.lib)}]</span></div>`);
     h+=`<div style="margin-top:8px"><button class="btn danger" onclick='execDedup(${idx})'>确认去重</button></div></div>`;});
   if(d.review.length){h+='<h2 style="margin-top:14px">需人工确认(不自动删) <span class="muted" style="font-weight:normal">点哪行删哪行</span></h2>';
-    d.review.forEach((g,gi)=>{h+=`<div class="card"><div class="muted">tmdb ${g.tmdb} — ${g.why}</div>`
+    d.review.forEach((g,gi)=>{h+=`<div class="card"><div class="muted">tmdb ${esc(g.tmdb)} — ${esc(g.why)}</div>`
       + g.rows.map((r,ri)=>{
         let diff="";
         if(r.total_eps!==undefined){
@@ -1792,7 +1798,7 @@ function renderItems(){
   const optsHtml = others.map(o=>`<option>${esc(o)}</option>`).join("");
   const rowHTML = (i, gi)=>`<div class="item" style="height:64px;box-sizing:border-box">
     <input type="checkbox" class="ck" data-gi="${gi}" onchange="updateSel()" style="margin-right:8px;width:16px;height:16px;flex-shrink:0">
-    <div class="main"><div class="nm">${esc(i.name)} <span class="muted">${i.year||""}</span></div><div class="meta">tmdb:${i.tmdb||"无"} · 📁${esc(i.folder)}</div></div>
+    <div class="main"><div class="nm">${esc(i.name)} <span class="muted">${esc(i.year||"")}</span></div><div class="meta">tmdb:${esc(i.tmdb||"无")} · 📁${esc(i.folder)}</div></div>
     <select id="mv${gi}"><option value="">移到…</option>${optsHtml}</select>
     <button class="btn ghost" onclick="doMove(${gi})">移动</button><button class="btn danger" onclick="doDelete(${gi})">删除</button>
   </div>`;
@@ -2905,7 +2911,7 @@ async function loadZhuigeng(){
   h+=airing.map(i=>`<div class="item"><div class="main">
     <div class="nm">${esc(i.name)} ${i.count<=10?'<span class="badge warn">才 '+i.count+' 集 · 八成有新</span>':''}</div>
     <div class="meta"><span class="badge">${esc(i.lib)}</span>已有 ${i.count} 集${i.latest?' · 最新播出 '+i.latest:''}</div></div>
-    <button class="btn ghost" onclick="goScan('${esc(i.lib)}')">去扫这个库</button></div>`).join("");
+    <button class="btn ghost" onclick="goScan(${esc(JSON.stringify(i.lib))})">去扫这个库</button></div>`).join("");
 
   // ✅ 已完结 — 每行可单独归档 + 顶部一键全部归档
   h += `<h2 style="margin-top:18px">✅ 已完结(${ended.length})</h2>`;

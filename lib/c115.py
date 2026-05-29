@@ -26,12 +26,15 @@ def _c115_uid_for(cookie):
     return m.group(1).split("_")[0] if m else ""
 
 
-def _c115_req(path, params=None, post=None):
-    """实际发请求(给 app.py 复用为 app._c115_req)。出错统一返 {state:False, error:...} 不抛。"""
+def _c115_req(path, params=None, post=None, cookie=None):
+    """实际发请求(给 app.py 复用为 app._c115_req)。出错统一返 {state:False, error:...} 不抛。
+    cookie=None 时回落全局 CFG['c115_cookie'];显式传 cookie 则用它(c115_test 测候选 cookie 用,
+    不再 swap 全局 → 并发跑的批量 115 请求不会读到候选 cookie 而用错账号)。"""
     url = C115_API + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    headers = {"User-Agent": C115_UA, "Cookie": CFG.get("c115_cookie", "") or "",
+    use_cookie = cookie if cookie is not None else (CFG.get("c115_cookie", "") or "")
+    headers = {"User-Agent": C115_UA, "Cookie": use_cookie,
                "Referer": "https://115.com/", "Accept": "application/json, text/plain, */*"}
     data = None
     if post is not None:
@@ -54,23 +57,14 @@ def _c115_req(path, params=None, post=None):
 
 def c115_test(req_fn, cookie_override=None):
     """检测 cookie 是否有效。
-    如果 cookie_override 提供 → 临时替换 CFG['c115_cookie'](req_fn 内部读 CFG),完事还原。
-    **swap+restore 必须串行**(CFG_LOCK)— 否则两个并发 test_candidate 会相互污染真 cookie(P0-1 regression)。
+    cookie_override 给定时把它作为 cookie 参数透传 req_fn —— 不碰全局 CFG,
+    所以并发的批量 115 请求不会被污染(取代旧的 swap-global 方案)。
     返 {ok, uid, used} 或 {ok:False, err}。"""
     cookie = cookie_override if cookie_override is not None else CFG.get("c115_cookie")
     if not cookie:
         return {"ok": False, "err": "未设置 cookie(去设置页填)"}
     if cookie_override is not None:
-        # lazy import 避免循环(config 不依赖 c115)
-        from lib.config import CFG_LOCK
-        # 整段 swap → req → restore 必须串行;两个并发 candidate test 不能交错
-        with CFG_LOCK:
-            old = CFG.get("c115_cookie", "")
-            CFG["c115_cookie"] = cookie_override
-            try:
-                r = req_fn("/files/index_info")
-            finally:
-                CFG["c115_cookie"] = old
+        r = req_fn("/files/index_info", cookie=cookie_override)
         uid = _c115_uid_for(cookie_override)
     else:
         r = req_fn("/files/index_info")

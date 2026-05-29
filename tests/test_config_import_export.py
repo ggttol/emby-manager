@@ -98,11 +98,22 @@ class ImportTests(unittest.TestCase):
     def test_normal_field_applied(self):
         reset_cfg()
         import_config({"cfg": {"emby_url": "http://nas:9999/emby",
-                              "api_key": "newkey",
-                              "trusted_proxies": ["10.0.0.1"]}, "confirm": True})
+                              "api_key": "newkey"}, "confirm": True})
         self.assertEqual(CFG["emby_url"], "http://nas:9999/emby")
         self.assertEqual(CFG["api_key"], "newkey")
-        self.assertEqual(CFG["trusted_proxies"], ["10.0.0.1"])
+
+    def test_host_and_trusted_proxies_protected(self):
+        """host / trusted_proxies 是运行时安全开关,import 不接受(防恶意备份植入 0.0.0.0 / 伪 XFF 绕限流)"""
+        reset_cfg()
+        CFG["host"] = "127.0.0.1"; CFG["trusted_proxies"] = []
+        r = import_config({"cfg": {"host": "0.0.0.0",
+                                   "trusted_proxies": ["1.2.3.4"],
+                                   "emby_url": "http://ok"}, "confirm": True})
+        self.assertEqual(CFG["host"], "127.0.0.1")        # 没被改
+        self.assertEqual(CFG["trusted_proxies"], [])       # 没被改
+        self.assertEqual(CFG["emby_url"], "http://ok")     # 正常字段照应用
+        self.assertIn("host", r["skipped_protected"])
+        self.assertIn("trusted_proxies", r["skipped_protected"])
 
     # === 关键 P0-2 regression ===
     def test_last_password_change_at_protected(self):

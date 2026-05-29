@@ -38,7 +38,8 @@ def qscore(s):
     elif 'bluray' in p or 'blu-ray' in p or 'bdrip' in p: sc += 400
     elif 'web-dl' in p or 'webdl' in p or 'webrip' in p or '.web.' in p: sc += 200
     elif 'hdtv' in p: sc += 100
-    if 'dv' in p or '杜比视界' in p or 'dovi' in p: sc += 60
+    # 'dv' 要带边界,否则 dvd/dvdrip/advengers 等都会误命中 +60(review M3)
+    if re.search(r'(?<![a-z])dv(?![a-z])|杜比视界|dovi|dolby.?vision', p): sc += 60
     if 'hdr' in p: sc += 30
     return sc
 
@@ -133,7 +134,9 @@ def _scan_lib_locked(name, meta, keyword):
 # ===== 去重分析 =====
 def analyze_dups():
     groups = collections.defaultdict(dict)
-    for lib, m in fetch_libs().items():
+    _libm = fetch_libs()
+    _lib_ctype = {lib: m.get("ctype", "") for lib, m in _libm.items()}
+    for lib, m in _libm.items():
         base = os.path.join(STRM, m["folder"])
         if not os.path.isdir(base):
             continue
@@ -222,7 +225,15 @@ def analyze_dups():
             else:
                 review.append({"tmdb": tid, "why": "剧集季/集基本不重叠,疑似不同季(互补)", "rows": rows})
         else:
-            dups.append({"tmdb": tid, "keep": rows[0], "remove": rows[1:]})
+            # eps() 全空 → is_series=False。但若其实是剧(库类型 tvshows,或某 folder 含多文件),
+            # 集号只是命名不规范(『第01集』/『EP01』)解析不出来,绝不能当电影自动去重 →
+            # 可能把多季互补的剧删掉一季(review M5)。强制进 review 人工确认。
+            looks_series = any(_lib_ctype.get(k[0]) == "tvshows" for k in keys) or \
+                           any(folders[k]["n"] > 1 for k in keys)
+            if looks_series:
+                review.append({"tmdb": tid, "why": "集号无法解析(命名不规范),疑似剧集,请人工确认是否真重复", "rows": rows})
+            else:
+                dups.append({"tmdb": tid, "keep": rows[0], "remove": rows[1:]})
     return {"dups": dups, "review": review}
 
 
@@ -264,23 +275,26 @@ def exec_dedup(tmdb, removes):
 
 
 def delete_item(lib, folder, emby_id):
-    # ⚠️ 顺序很关键:先让 Emby 强删 Item,再动磁盘
-    # 历史 bug:磁盘先删 → epost Updated/Deleted → Emby 异步加锁 Series Item
-    #          → 紧接的 DELETE /Items/{id} silent fail → 用户反复删除都不消失
-    emby_gone = True
-    if emby_id:
-        edelete("/Items/%s" % emby_id)
-        # verify 一道:Emby 偶发吞 DELETE,真没删就重试一次(0.5s 后)
-        try:
-            chk = eget("/Items", {"Ids": str(emby_id), "Limit": "1"})
-            if chk.get("Items"):
-                time.sleep(0.5)
-                edelete("/Items/%s" % emby_id)
-                chk2 = eget("/Items", {"Ids": str(emby_id), "Limit": "1"})
-                emby_gone = not chk2.get("Items")
-        except Exception:
-            pass  # 验证失败不算致命,后面磁盘还是要清
-    done = _del_folder(lib, folder)
+    # 与 move/dedup/scan 一致地拿 _lib_lock(lib) 串行化同库磁盘改动,
+    # 否则"批量删"与"去重/移动/扫描"并发命中同库同 folder 时,rmtree 与 rename 交错(review:delete 无锁)。
+    with _lib_lock(lib):
+        # ⚠️ 顺序很关键:先让 Emby 强删 Item,再动磁盘
+        # 历史 bug:磁盘先删 → epost Updated/Deleted → Emby 异步加锁 Series Item
+        #          → 紧接的 DELETE /Items/{id} silent fail → 用户反复删除都不消失
+        emby_gone = True
+        if emby_id:
+            edelete("/Items/%s" % emby_id)
+            # verify 一道:Emby 偶发吞 DELETE,真没删就重试一次(0.5s 后)
+            try:
+                chk = eget("/Items", {"Ids": str(emby_id), "Limit": "1"})
+                if chk.get("Items"):
+                    time.sleep(0.5)
+                    edelete("/Items/%s" % emby_id)
+                    chk2 = eget("/Items", {"Ids": str(emby_id), "Limit": "1"})
+                    emby_gone = not chk2.get("Items")
+            except Exception:
+                pass  # 验证失败不算致命,后面磁盘还是要清
+        done = _del_folder(lib, folder)
     log("删除 [%s] %s%s%s" % (lib, folder,
         "" if done else " (磁盘空)",
         "" if emby_gone else " ⚠️ Emby 未删干净"))
@@ -297,6 +311,24 @@ def _count_strm(folder_path):
             if f.endswith(".strm"):
                 n += 1
     return n
+
+
+def _folder_max_qscore(folder_path):
+    """folder 下所有 .strm 内容(/media/<原始路径>)的最高画质分。folder 不存在返 0。
+    与 analyze_dups 的 qscore 同源,供 move smart 集数相等时做画质 tiebreak。"""
+    if not os.path.isdir(folder_path):
+        return 0
+    best = 0
+    for _root, _ds, fs in os.walk(folder_path):
+        for f in fs:
+            if not f.endswith(".strm"):
+                continue
+            try:
+                with open(os.path.join(_root, f), encoding="utf-8") as fh:
+                    best = max(best, qscore(fh.read()))
+            except Exception:
+                best = max(best, qscore(f))  # 读不到内容退而用文件名
+    return best
 
 
 # ===== 移动:跨库重命名 + 重建 strm =====
@@ -341,6 +373,14 @@ def _move_item_locked(from_lib, folder, to_lib, emby_id, L, on_conflict="error")
             # 比 strm 集数:source vs target
             src_n = _count_strm(os.path.join(STRM, ff, folder))
             dst_n = _count_strm(os.path.join(STRM, tf, folder))
+            # 集数相等(尤其单文件电影永远 1==1)时,纯比集数会无条件删源 → 改用画质 qscore tiebreak,
+            # 否则刚转存的 2160p 源会被老的 720p 目标静默替换掉(review M4)。
+            if src_n == dst_n:
+                src_q = _folder_max_qscore(os.path.join(STRM, ff, folder))
+                dst_q = _folder_max_qscore(os.path.join(STRM, tf, folder))
+                if src_q > dst_q:
+                    src_n = dst_n + 1  # 借道下面"源更全"分支:删目标 + move 源
+                    log("智能归档 %s: 集数相等但源画质更高(q%d>q%d)→ 保留源" % (folder, src_q, dst_q))
             if src_n > dst_n:
                 # 源更全 → 删目标(115 → 回收站 + strm)+ 通知 emby + 继续 normal move
                 shutil.rmtree(dst)
@@ -615,15 +655,21 @@ SENSITIVE_KEYS = ("password_hash", "c115_cookie")
 # PROTECTED_IMPORT_KEYS:import 时**永远跳过**,无论用户传什么值。
 # 包括 schema_version(不让绕 migration)、敏感字段(防直接覆盖植入)、
 # **last_password_change_at(防 grace 复活提权)**、username(防越权)。
+# host / trusted_proxies 也不接受导入:防恶意备份植入 host=0.0.0.0(重启暴露公网)
+# 或 trusted_proxies=[攻击者IP](伪造 XFF 绕过登录限流)。这俩是运行时安全开关,只能在设置页手改(review)。
 PROTECTED_IMPORT_KEYS = ("schema_version", "password_hash", "c115_cookie",
-                         "last_password_change_at", "username")
+                         "last_password_change_at", "username",
+                         "host", "trusted_proxies")
 
 
 def export_config():
     """返 redacted CFG —— 密码 hash 和 cookie raw 替换为 '<redacted>'(供用户下载备份)。"""
-    from lib.config import CFG as _CFG
+    from lib.config import CFG as _CFG, CFG_LOCK
+    # 持锁取快照:否则并发 import 新增键时 .items() 迭代会 RuntimeError: dict changed size(review)
+    with CFG_LOCK:
+        snapshot = list(_CFG.items())
     out = {}
-    for k, v in _CFG.items():
+    for k, v in snapshot:
         if k in SENSITIVE_KEYS and v:
             out[k] = "<redacted>"
         else:
@@ -864,7 +910,8 @@ def replace_folder(lib, win_folder, lose_folder):
     # 2. 判断 win 是否「lose(1)」或「lose(N)」格式 — 是则改名回 lose
     renamed_to = win_folder
     import re as _re
-    m = _re.match(r'^(.+?)(\(\d+\)|\(\d+\))$', win_folder)
+    # 半角 (N) 或全角(N)后缀都要认(115 转存/手建都可能产生全角);旧正则两个分支重复只认半角(review)
+    m = _re.match(r'^(.+?)[\(（]\d+[\)）]$', win_folder)
     base = m.group(1) if m else win_folder
     if base == lose_folder:
         # win 改名回原名(去掉 (1))

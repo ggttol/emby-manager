@@ -2,7 +2,7 @@
 CFG 是跨模块共享的 mutable dict —— 任何模块都 `from lib.config import CFG` 后直接改 key,
 **绝不 rebind**(load_cfg 用 clear()+update() 保证)。
 """
-import json, os, threading
+import json, os, threading, time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根 = lib/ 上一层
 CD = "/volume1/docker/clouddrive2/CloudNAS/CloudDrive"   # 115 挂载根
@@ -75,11 +75,19 @@ def _mig_to_v3():
         logger.info("已加 trusted_proxies=[] 字段。要支持反代,在 config.json 填反代 IP 如 [\"192.168.2.1\"]")
 
 def _mig_to_v4():
-    """v3 → v4:加 last_password_change_at 字段(None = 允许一次无旧密码改密 grace);加 username 默认值 admin"""
+    """v3 → v4:加 last_password_change_at 字段;加 username 默认值 admin。
+    旧装(已有 config)给 None = 允许一次无旧密码改密 grace(老用户升级体恤);
+    新装直接戳真实时间戳 = 一开始就要求旧密码,不留永久 grace 窗口(安全:见 review M2)。"""
     from lib.logger import logger
     if "last_password_change_at" not in CFG:
-        CFG["last_password_change_at"] = None
-        logger.info("加 last_password_change_at=None(下次改密为 grace 模式,无需输旧密码)")
+        # grace(None)只在"还没有密码"时给 —— 此时本就没有旧密码可验,允许设一个。
+        # 已经有密码的装(老/新)一律戳时间戳 → 改密必须输旧密码,杜绝"永久免旧密码改密"漏洞(review M2)。
+        if CONFIG_EXISTED and not CFG.get("password_hash"):
+            CFG["last_password_change_at"] = None
+            logger.info("加 last_password_change_at=None(无密码老装:允许首次设密码)")
+        else:
+            CFG["last_password_change_at"] = int(time.time())
+            logger.info("加 last_password_change_at=now(已有密码/新装:改密需旧密码)")
     if "username" not in CFG:
         CFG["username"] = "admin"
 

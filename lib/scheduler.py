@@ -96,6 +96,10 @@ def add_schedule(name, kind, schedule, params=None, enabled=True):
         "last_err": None,
         "created_at": now,
     }
+    # 防"创建即触发":若本周期的目标时刻已过(is_due 现在已过点即真),把 last_run_at 锚到当前
+    # → 本周期视为已跑,要等下个周期才触发(否则下午建个凌晨 3 点的全库扫描会立刻跑)。
+    if is_due(item, _now()):
+        item["last_run_at"] = now
     with CFG_LOCK:
         CFG["schedules"].append(item)
         save_cfg()
@@ -178,13 +182,18 @@ def is_due(s, now=None):
         return False
     H, M = sch["hour"], sch["minute"]
     target = now.replace(hour=H, minute=M, second=0, microsecond=0)
-    delta = (now - target).total_seconds()
-    if not (0 <= delta < 300):   # 5 分钟窗口
-        return False
     mode = sch["mode"]
     if mode == "weekly" and now.weekday() != int(sch.get("weekday", 0)):
         return False
-    if mode == "monthly" and now.day != int(sch.get("day", 1)):
+    if mode == "monthly":
+        # day=31 的月夹到月末(否则短月份 now.day 永远 != 31 → 整月不触发)
+        import calendar
+        eff_day = min(int(sch.get("day", 1)), calendar.monthrange(now.year, now.month)[1])
+        if now.day != eff_day:
+            return False
+    # 已过点即可触发(去掉固定 5min 上限 → NTP 校时/挂起恢复/轮询错拍导致时钟跳过窗口也能在过点后某轮补跑;
+    # 靠下面 last_run_at 同周期去重防重复)。还没到点 → 不触发。
+    if now < target:
         return False
     # 同周期防重入
     lr = _parse_iso(s.get("last_run_at"))
@@ -246,10 +255,16 @@ def _fire(sid):
         s = _find_by_id(sid)
         if not s:
             return None
-        # 重叠保护:上一次还在跑 → 不并发起新的(scheduler/run_now 都过 _fire,统一防御)
-        if s.get("last_status") == "running":
-            logger.warning("定时 %s [%s] 上次任务仍 running,跳过本次触发", sid, s.get("kind"))
-            return None
+        # 重叠保护:只有上次任务【确实还在内存里跑】才跳过。
+        # 不只看持久化的 last_status —— 进程崩溃/重启后 last_status 会残留 "running"/"watch_timeout"
+        # 但 watch 线程与 TASKS 都已随进程消失(task_get 返 None),这种残留不应永久锁死触发(H1)。
+        # watch_timeout 但任务实际仍在跑时,task_get 仍报 running → 正确拦截(M6)。
+        if s.get("last_status") in ("running", "watch_timeout"):
+            prev = task_get(s.get("last_tid")) if s.get("last_tid") else None
+            if prev and prev.get("status") == "running":
+                logger.warning("定时 %s [%s] 上次任务仍在跑,跳过本次触发", sid, s.get("kind"))
+                return None
+            # 否则:残留状态(重启/任务已终/watch 超时但已结束)→ 继续,下面占位会覆盖
         kind = s.get("kind")
         spec = business.SCHEDULE_KINDS.get(kind)
         if not spec:
@@ -257,20 +272,22 @@ def _fire(sid):
             save_cfg()
             logger.warning("定时 %s 未知 kind=%s", sid, kind)
             return None
-        # 复刻一份 spec 信息,出锁后用
         fn = spec["fn"]
         name = s.get("name", kind)
+        # 抢占式占位:守卫检查 + 置 running 在同一 CFG_LOCK 临界区内完成,
+        # 杜绝 run_now 与 _loop 并发(或双击 run_now)两边都过守卫 → 起两份任务(M6)。
+        s["last_run_at"] = _isofmt(_now())
+        s["last_status"] = "running"
+        s["last_err"] = None
+        s["last_ended_at"] = None
+        s["last_tid"] = None  # 先占位,run_async 拿到 tid 后回填
+        save_cfg()
 
     tid = run_async("schedule:" + kind, fn)
-    now_str = _isofmt(_now())
     with CFG_LOCK:
         s = _find_by_id(sid)
         if s:
-            s["last_run_at"] = now_str
             s["last_tid"] = tid
-            s["last_status"] = "running"
-            s["last_err"] = None
-            s["last_ended_at"] = None
             save_cfg()
     log("⏰ 触发定时 %s [%s] → tid=%s" % (name, kind, tid))
 
@@ -308,6 +325,26 @@ def run_now(sid):
     return _fire(sid)
 
 
+def _reconcile_on_start():
+    """启动时清理上次进程残留的 running/watch_timeout 状态。
+    watch 线程与内存 TASKS 都随上个进程消失了,task_get 必返 None → 这些是僵死状态,
+    重置为 interrupted 让 UI 不再显示假"运行中",也让 _fire 不被残留卡死(配合 _fire 的 task_get 守卫双保险)。"""
+    from lib.tasks import task_get
+    with CFG_LOCK:
+        changed = False
+        for s in CFG.get("schedules", []):
+            if s.get("last_status") in ("running", "watch_timeout"):
+                prev = task_get(s.get("last_tid")) if s.get("last_tid") else None
+                if not (prev and prev.get("status") == "running"):
+                    s["last_status"] = "interrupted"
+                    s["last_err"] = "进程重启,上次运行结果未知"
+                    s["last_ended_at"] = _isofmt(_now())
+                    changed = True
+        if changed:
+            save_cfg()
+            log("⏰ 启动 reconcile:重置了残留的 running 状态")
+
+
 def _loop():
     """daemon thread 主循环:30s 一轮,对所有 enabled 且 is_due 的 schedule fire。"""
     log("⏰ scheduler 启动 (轮询 %ds)" % _POLL_SEC)
@@ -336,6 +373,10 @@ def start():
     global _LOOP_THREAD
     if _LOOP_THREAD and _LOOP_THREAD.is_alive():
         return
+    try:
+        _reconcile_on_start()
+    except Exception:
+        logger.exception("scheduler 启动 reconcile 失败(继续)")
     _LOOP_STOP.clear()
     _LOOP_THREAD = threading.Thread(target=_loop, daemon=True, name="scheduler")
     _LOOP_THREAD.start()

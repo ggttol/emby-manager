@@ -66,9 +66,14 @@ def exec_undo(undo_id):
         if op == "move":
             log("撤销移动 %s: %s ← %s" % (p["folder"], p["from"], p["to"]))
             return move_item(p["to"], p["folder"], p["from"], p.get("emby_id"))
-        if op == "delete":
-            return {"err": "删除已把 115 文件夹送入回收站,请先去 115 web 还原它,再用「扫描加新内容」补 strm",
-                    "lib": p.get("lib"), "folder": p.get("folder"),
-                    "hint": "115 web → 回收站 → 找「%s」→ 还原 → 来工具扫这个库" % p.get("folder", "")}
+        if op in ("delete", "smart_archive", "replace"):
+            # 这三类本质都是「删了某 folder 进 115 回收站」,不能程序反向 —— 统一给回收站还原引导,
+            # 而不是丢一句「不支持」让用户以为文件没了(review:smart_archive/replace 之前落到死路)。
+            folder = p.get("folder") or p.get("lose_folder") or ""
+            lib = p.get("lib") or p.get("from") or p.get("to") or ""
+            label = {"delete": "删除", "smart_archive": "智能归档删源", "replace": "全替换删旧版"}.get(op, op)
+            return {"err": "「%s」已把 115 文件夹送入回收站,请先去 115 web 还原它,再用「扫描加新内容」补 strm" % label,
+                    "lib": lib, "folder": folder,
+                    "hint": "115 web → 回收站 → 找「%s」→ 还原 → 来工具扫这个库" % folder}
         return {"err": "不支持撤销此操作: " + op}
     return {"err": "未知 undo id: " + undo_id}

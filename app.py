@@ -137,6 +137,9 @@ class H(BaseHTTPRequestHandler):
         for k, v in (extra_headers or []):
             self.send_header(k, v)
         self.end_headers()
+        # HEAD 请求:头照发(含 Content-Length),body 不写(do_HEAD 设 _suppress_body)
+        if getattr(self, "_suppress_body", False):
+            return
         self.wfile.write(body)
     def _json(self, obj, code=200, extra_headers=None):
         self._send(code, "application/json; charset=utf-8", json.dumps(obj, ensure_ascii=False), extra_headers)
@@ -149,10 +152,15 @@ class H(BaseHTTPRequestHandler):
             return m.value if m else None
         except Exception:
             return None
+    def _client_ip(self):
+        """真实客户端 IP(与 login 限流同一套解析:只有直连是受信反代才认 XFF)。"""
+        from lib.auth import client_ip_for_login
+        remote = self.client_address[0] if self.client_address else ""
+        return client_ip_for_login(remote, self.headers.get("X-Forwarded-For", ""), CFG.get("trusted_proxies") or [])
     def _auth(self):
         # 优先 cookie(HttpOnly),向后兼容 X-Token header(老版前端过渡)
         t = self._cookie_token() or self.headers.get("X-Token")
-        return _token_valid(t)
+        return _token_valid(t, ip=self._client_ip())
     def _csrf_ok(self):
         """非 safe method:校验 X-CSRF-Token 匹配 token 对应的 csrf。"""
         if self.command in SAFE_METHODS: return True
@@ -270,8 +278,11 @@ class H(BaseHTTPRequestHandler):
             stored = CFG.get("password_hash", "")
             if stored and _verify_password(pw, stored):
                 t, csrf = _token_new(ip)
-                # HttpOnly + SameSite=Strict + Max-Age 7d。Secure 没设(NAS 内网/反代场景,加了 http 反而不工作);走 HTTPS 反代时建议反代加 Secure
-                cookie = "emby_tok=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d" % (t, TOKEN_TTL)
+                # HttpOnly + SameSite=Strict + Max-Age 7d。
+                # 走 HTTPS 反代时(X-Forwarded-Proto=https)动态加 Secure → cookie 不再走明文回传;
+                # 纯 HTTP 直连(NAS 内网)不加,否则浏览器不回 cookie 直接登不上。
+                secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else ""
+                cookie = "emby_tok=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d%s" % (t, TOKEN_TTL, secure)
                 return self._json({"ok": True, "csrf": csrf}, extra_headers=[("Set-Cookie", cookie)])
             _login_record_fail(ip)
             log("登录失败 from %s" % ip)
@@ -416,18 +427,36 @@ class H(BaseHTTPRequestHandler):
             err_id = uuid.uuid4().hex[:8]
             logger.exception("内部错误 POST %s [errid=%s]", path, err_id)
             return self._json({"err": "内部错误,请把 errid 给运维: " + err_id}, 500)
+    def do_HEAD(self):
+        # SAFE_METHODS 列了 HEAD(探活/缓存客户端会用),但没实现 handler 会让 BaseHTTP 返 501。
+        # 走与 do_GET 相同的路由,只是 _send 时 body 不写出(由 _suppress_body 控制)。
+        self._suppress_body = True
+        try:
+            self.do_GET()
+        finally:
+            self._suppress_body = False
     def do_DELETE(self):
         if not self._auth(): return self._json({"err": "未登录"}, 401)
         if not self._csrf_ok(): return self._json({"err": "CSRF 校验失败,刷新页面重试"}, 403)
         b = self._body()
         p = urllib.parse.urlparse(self.path).path
-        if p == "/api/item":
-            try: return self._json(delete_item(b.get("lib"), b.get("folder"), b.get("id")))
-            except Exception as e: return self._json({"err": "%s" % e}, 500)
-        if p == "/api/user":
-            try: return self._json(delete_user(b.get("id")))
-            except Exception as e: return self._json({"err": "%s" % e}, 500)
-        return self._json({"err": "未知接口"}, 404)
+        # 与 do_POST 一致的分层脱敏:不把内部异常字符串(可能含 /volume1 路径)原样回客户端
+        try:
+            if p == "/api/item":
+                return self._json(delete_item(b.get("lib"), b.get("folder"), b.get("id")))
+            if p == "/api/user":
+                return self._json(delete_user(b.get("id")))
+            return self._json({"err": "未知接口"}, 404)
+        except ValueError as e:
+            logger.warning("用户错误 DELETE %s: %s", p, e)
+            return self._json({"err": str(e)}, 400)
+        except AppError as e:
+            logger.warning("业务错误 DELETE %s: %s", p, e.user_msg)
+            return self._json({"err": e.user_msg}, e.status)
+        except Exception as e:
+            err_id = uuid.uuid4().hex[:8]
+            logger.exception("内部错误 DELETE %s [errid=%s]", p, err_id)
+            return self._json({"err": "内部错误,请把 errid 给运维: " + err_id}, 500)
 
 
 if __name__ == "__main__":
