@@ -241,12 +241,16 @@ def update_user(uid, maxsessions=None, disabled=None, bitrate_mbps=None):
     verify = {}
     try:
         np = next((u.get("Policy", {}) for u in eget("/Users") if u["Id"] == uid), {})
+        # 只校验"设了限制(>0)"的;设 0=不限时 Emby 可能省略该字段,回读不必报警
         if maxsessions is not None and str(maxsessions) != "":
             want = max(0, int(maxsessions))
-            got = np.get("SimultaneousStreamLimit", np.get("MaxActiveSessions"))
-            verify["stream_limit_ok"] = (got == want)
+            if want:
+                got = np.get("SimultaneousStreamLimit", np.get("MaxActiveSessions"))
+                verify["stream_limit_ok"] = (got == want)
         if bitrate_mbps is not None and str(bitrate_mbps) != "":
-            verify["bitrate_ok"] = (np.get("RemoteClientBitrateLimit") == int(round(max(0.0, float(bitrate_mbps)) * 1000000)))
+            want_bps = int(round(max(0.0, float(bitrate_mbps)) * 1000000))
+            if want_bps:
+                verify["bitrate_ok"] = (np.get("RemoteClientBitrateLimit") == want_bps)
     except Exception:
         pass
     bad = [k for k, v in verify.items() if v is False]

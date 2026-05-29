@@ -119,19 +119,19 @@ def c115_snap_full(req_fn, url, pwd):
     items = list(d.get("list") or [])
     info = d.get("shareinfo") or {}
     # 分页:根层文件数 > 1000 时 snap 只返第一页 → 整季打包/合集会静默缺集。
-    # 循环把后续页取完(每页间 sleep 0.5s 保持风控友好),封顶 20 页(2 万项)兜底防失控。
-    total_n = info.get("file_count") or info.get("count") or 0
-    try: total_n = int(total_n)
-    except Exception: total_n = 0
+    # 判据用「上一页是否取满 limit」而非依赖 shareinfo 里某个猜测的 total 字段(那字段名不确定,
+    # 之前用 file_count 在多数响应里取不到 → 分页形同虚设)。每页 sleep 0.5s 保持风控友好,封顶 20 页。
+    LIMIT = 1000
+    last_chunk = len(d.get("list") or [])
     page = 1
-    while len(items) < total_n and len(d.get("list") or []) >= 1000 and page < 20:
-        import time as _t; _t.sleep(0.5)
-        nxt = c115_snap(req_fn, share, rc, offset=len(items), limit=1000)
+    import time as _t
+    while last_chunk >= LIMIT and page < 20:
+        _t.sleep(0.5)
+        nxt = c115_snap(req_fn, share, rc, offset=len(items), limit=LIMIT)
         if not nxt.get("state"): break
-        d = nxt.get("data") or {}
-        chunk = d.get("list") or []
+        chunk = nxt.get("data", {}).get("list") or []
         if not chunk: break
-        items.extend(chunk); page += 1
+        items.extend(chunk); last_chunk = len(chunk); page += 1
     files = []
     for it in items:
         # 115 share/snap:文件用 fid;文件夹无 fid,自身 id 在 cid

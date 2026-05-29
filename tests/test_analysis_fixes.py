@@ -64,6 +64,48 @@ class TestMountFuse(unittest.TestCase):
             self.assertEqual(r.get("orphans_cleaned", 0), 1)
 
 
+class TestAsyncScannerFuse(unittest.TestCase):
+    """review HIGH:scan_lib_async(手动扫描走的路径)也必须有挂载保险丝。"""
+    def test_async_scanner_skips_orphan_when_mount_dead(self):
+        with tempfile.TemporaryDirectory() as strm, tempfile.TemporaryDirectory() as cd:
+            fol = "电影"
+            d = os.path.join(strm, fol, "某片 (2024)"); os.makedirs(d)
+            sp = os.path.join(d, "x.strm")
+            with open(sp, "w") as f:
+                f.write("/media/电影/某片 (2024)/x.mkv")
+            fake_libs = {"电影": {"id": "1", "ctype": "movies", "folder": fol}}
+            lock = __import__("threading").Lock()
+            with patch.object(biz, "STRM", strm), patch.object(biz, "CD", cd), \
+                 patch.object(biz, "fetch_libs", return_value=fake_libs), \
+                 patch.object(biz, "_mount_alive", return_value=False), \
+                 patch.object(biz, "_lib_lock", lambda l: lock), \
+                 patch.object(biz, "epost", lambda *a, **k: 204), \
+                 patch.object(biz, "eget", lambda *a, **k: {"Items": []}), \
+                 patch.object(biz, "task_set", lambda *a, **k: None), \
+                 patch.object(biz, "task_is_cancelled", lambda t: False):
+                r = biz.scan_lib_async("tid1", "电影")
+            self.assertTrue(os.path.exists(sp), "挂载死时 async 扫描也绝不能删 strm")
+            self.assertEqual(r.get("orphans_cleaned", 0), 0)
+
+
+class TestSmartGuardSymmetric(unittest.TestCase):
+    """review HIGH:smart 归档 src_n=0 也要拦(否则删源真实 115 内容)。"""
+    def test_smart_refuses_when_src_strm_missing(self):
+        with tempfile.TemporaryDirectory() as strm, tempfile.TemporaryDirectory() as cd:
+            ff, tf = "追更", "完结"
+            # 源 115 folder 存在但无 strm(src_n=0);目标 115 folder 存在且有 strm(dst_n>0)
+            src = os.path.join(cd, ff, "某剧"); os.makedirs(src)
+            dst = os.path.join(cd, tf, "某剧"); os.makedirs(dst)
+            dstrm = os.path.join(strm, tf, "某剧"); os.makedirs(dstrm)
+            with open(os.path.join(dstrm, "S01E01.strm"), "w") as f: f.write("/media/x")
+            L = {"追更": {"id": "1", "ctype": "tvshows", "folder": ff},
+                 "完结": {"id": "2", "ctype": "tvshows", "folder": tf}}
+            with patch.object(biz, "STRM", strm), patch.object(biz, "CD", cd):
+                r = biz._move_item_locked("追更", "某剧", "完结", "eid", L, on_conflict="smart")
+            self.assertIn("err", r, "src strm 缺失时 smart 必须拒绝,不能删源")
+            self.assertTrue(os.path.isdir(src), "源 115 内容不能被删")
+
+
 class TestQscoreExtra(unittest.TestCase):
     def test_is_extra_detects_trailer_featurette(self):
         self.assertTrue(biz._is_extra("某片.预告.2160p.mkv"))

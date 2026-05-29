@@ -45,29 +45,38 @@ def load_cfg():
                 loaded = _try_load(CONFIG_FILE + ".bak")
                 logger.warning("已从 config.json.bak 恢复配置")
             except Exception:
-                logger.error("config.json.bak 也不可用,退回默认配置(请检查 config.json)")
+                logger.error("config.json.bak 也不可用,退回安全默认(127.0.0.1)。保留损坏文件到 .corrupt 供手工修复")
+                # 保留损坏原文件(否则 migrate 的 save_cfg 会用默认覆盖掉,可能本来漏个逗号就能救)
+                try:
+                    import shutil
+                    shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".corrupt")
+                except Exception:
+                    pass
     if loaded is not None:
         CFG.update(loaded)
         CONFIG_EXISTED = True
     else:
-        CONFIG_EXISTED = os.path.exists(CONFIG_FILE)  # 文件在但全坏 → 仍算"已存在"(别误判成新装走 127.0.0.1)
+        # 文件不存在 OR 损坏且 .bak 也救不回 → CONFIG_EXISTED=False。
+        # 关键安全点:损坏且无 bak 时**不能**当"旧装"走(否则 migrate 会设 host=0.0.0.0 + 无密码裸奔);
+        # 当新装处理 → host 默认 127.0.0.1(只 loopback),安全。
+        CONFIG_EXISTED = False
 
 def save_cfg():
     try:
-        # 存前先把当前好的 config.json 备份成 .bak(供下次损坏时回退)
-        if os.path.exists(CONFIG_FILE):
-            try:
-                import shutil
-                shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
-                os.chmod(CONFIG_FILE + ".bak", 0o600)
-            except Exception:
-                pass
-        # 原子写:先 tmp 再 rename,避免半写;chmod 0600 限只 owner 可读(护 cookie/api_key/密码)
+        # 原子写新 config.json(内容来自内存 CFG,一定是好的):先 tmp 再 rename,chmod 0600
         tmp = CONFIG_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(CFG, f, ensure_ascii=False, indent=1)
         os.chmod(tmp, 0o600)
         os.replace(tmp, CONFIG_FILE)
+        # 写成功后,把这份【刚写好的、保证合法】的 config.json 同步成 .bak。
+        # 不能在写之前拷贝旧 config.json:若旧文件已损坏会把唯一的好 .bak 也毁掉(review)。
+        try:
+            import shutil
+            shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
+            os.chmod(CONFIG_FILE + ".bak", 0o600)
+        except Exception:
+            pass
     except Exception:
         pass
 

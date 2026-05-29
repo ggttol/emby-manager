@@ -44,9 +44,15 @@ def qscore(s):
     return sc
 
 
-_EXTRA_RE = re.compile(r'花絮|预告|片花|彩蛋|特典|菜单|sample|trailer|preview|featurette|/sp\b|\bsp\d|\bnc\d?(op|ed)|\b(op|ed)\d', re.IGNORECASE)
+# 花絮/预告/样片识别。中文词 + 长英文词直接匹配;sp/op/ed/nc 这类短词易撞正片标题,
+# 要求它们是【独立 token】(前有分隔符、后跟数字+分隔符/扩展名/结尾)才算,降低误判(review)。
+_EXTRA_RE = re.compile(
+    r'花絮|预告|片花|彩蛋|特典|菜单|making[ ._-]?of|sample|trailer|preview|featurette'
+    r'|(?:^|[ ._/\-])(?:ncop|nced)\d{0,2}(?=[ ._\-]|\.[a-z0-9]+$|$)'
+    r'|(?:^|[ ._/\-])(?:sp|op|ed)\d{1,3}(?=[ ._\-]|\.[a-z0-9]+$|$)',
+    re.IGNORECASE)
 def _is_extra(name):
-    """是否花絮/预告/样片/SP/特典/menu —— 去重判画质时不拿它当正片(否则一个 2160p 预告污染整组)。"""
+    """是否花絮/预告/样片/SP/OP/ED —— 去重判画质时不拿它当正片(否则一个 2160p 预告污染整组)。"""
     return bool(_EXTRA_RE.search(name or ""))
 
 
@@ -111,37 +117,8 @@ def _scan_lib_locked(name, meta, keyword):
             new_folders[top] = len(missing)
         else:
             attention.append("%s (+%d个视频,无tmdbid且首次出现,需看一眼)" % (top, len(missing)))
-    # 顺便清孤儿 strm(指向 /media 已不存在的)—— 解决"换资源后扫描留旧"那种坑
-    # ⚠️ 灾难保险丝:115 挂载死时 os.path.exists(target) 对每个 strm 都返 False → 会删光全库 strm。
-    # 动手前探活;挂载探测失败直接跳过整段清孤儿(尤其定时 scan_all 半夜无人值守跑时)。
-    orphans = 0
-    if os.path.isdir(strm_base):
-        if not _mount_alive():
-            log("扫描[%s] 跳过清孤儿:115 挂载探测失败(防整库 strm 误删)" % name)
-        else:
-            aborted = False
-            for root, ds, fs in os.walk(strm_base):
-                if aborted: break
-                rel = os.path.relpath(root, strm_base)
-                top = rel.split(os.sep)[0] if rel != "." else None
-                if kw and top and kw not in top:           # 关键词模式只扫匹配的 top
-                    continue
-                for f in fs:
-                    if not f.endswith(".strm"):
-                        continue
-                    p = os.path.join(root, f)
-                    try:
-                        content = open(p, encoding="utf-8").read().strip()
-                    except Exception:
-                        continue
-                    if content.startswith("/media/"):
-                        target = CD + content[len("/media"):]
-                        if not os.path.exists(target):
-                            # 中途安全阀:删的异常多时(挂载可能扫到一半才死)重新探活,死了就停手
-                            if orphans >= 30 and not _mount_alive():
-                                log("扫描[%s] 清孤儿中止:删除数异常(已删 %d)且挂载探测失败,防整库误删" % (name, orphans))
-                                aborted = True; break
-                            os.remove(p); orphans += 1
+    # 清孤儿 strm —— 走共享 helper(挂载保险丝在里面,两个扫描器统一)
+    orphans = _cleanup_orphans(name, strm_base, kw)
     if new_files or orphans:
         epost("/Items/%s/Refresh" % meta["id"], {"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default"})
         log("扫描[%s] 新增 strm %d,清孤儿 %d" % (name, len(new_files), orphans))
@@ -341,6 +318,42 @@ def _mount_alive(timeout=5):
     return result["ok"]
 
 
+def _cleanup_orphans(name, strm_base, kw=None):
+    """清孤儿 strm(content 指向 /media 已不存在的)。**两个扫描器(_scan_lib_locked / scan_lib_async)共用这一个**,
+    保证挂载保险丝不会"加在一个漏在另一个"(review:scan_lib_async 曾漏加 → 手动扫描仍会删光全库)。
+    ⚠️ 灾难保险丝:115 挂载死时 os.path.exists(target) 对每个 strm 都返 False → 不加守卫会删光全库 strm。
+    返回清掉的孤儿数。"""
+    orphans = 0
+    if not os.path.isdir(strm_base):
+        return 0
+    if not _mount_alive():
+        log("扫描[%s] 跳过清孤儿:115 挂载探测失败(防整库 strm 误删)" % name)
+        return 0
+    for root, _ds, fs in os.walk(strm_base):
+        rel = os.path.relpath(root, strm_base)
+        top = rel.split(os.sep)[0] if rel != "." else None
+        if kw and top and kw not in top:           # 关键词模式只扫匹配的 top
+            continue
+        for f in fs:
+            if not f.endswith(".strm"):
+                continue
+            p = os.path.join(root, f)
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    content = fh.read().strip()
+            except Exception:
+                continue
+            if content.startswith("/media/"):
+                target = CD + content[len("/media"):]
+                if not os.path.exists(target):
+                    # 中途安全阀:删的异常多(挂载可能扫到一半才死)→ 节流重探活,死了就停手
+                    if orphans >= 30 and orphans % 25 == 0 and not _mount_alive():
+                        log("扫描[%s] 清孤儿中止:删除数异常(已删 %d)且挂载探测失败,防整库误删" % (name, orphans))
+                        return orphans
+                    os.remove(p); orphans += 1
+    return orphans
+
+
 def _count_strm(folder_path):
     """统计 folder 下 .strm 文件总数(衡量集数)。folder 不存在返 0。"""
     if not os.path.isdir(folder_path):
@@ -413,11 +426,10 @@ def _move_item_locked(from_lib, folder, to_lib, emby_id, L, on_conflict="error")
             # 比 strm 集数:source vs target
             src_n = _count_strm(os.path.join(STRM, ff, folder))
             dst_n = _count_strm(os.path.join(STRM, tf, folder))
-            # 护栏:目标 115 上有 folder(os.path.exists(dst) 为真才进到这)但 strm 数=0,
-            # 说明目标刚转存进来还没扫(strm 未生成)→ dst_n=0 会让下面误判"源更全"删掉目标真实 115 内容。
-            # strm 数不可信时退回 error,不拿集数做不可逆删除决策(review)。
-            if dst_n == 0:
-                return {"err": "目标已存在同名文件夹,但其 strm 未生成(可能刚转存未扫描)——拒绝智能判定以防误删,请先扫描目标库再归档"}
+            # 护栏:strm 数不可信(=0,可能刚转存未扫/被清)时,不拿集数做不可逆删除决策。
+            # 必须对称地防 src 和 dst:dst_n=0 会误删目标真实内容;src_n=0 会走 else 分支删源真实 115 内容(review)。
+            if dst_n == 0 or src_n == 0:
+                return {"err": "源或目标的 strm 未生成(可能刚转存未扫描)——拒绝智能判定以防误删,请先扫描相关库再归档"}
             # 集数相等(尤其单文件电影永远 1==1)时,纯比集数会无条件删源 → 改用画质 qscore tiebreak,
             # 否则刚转存的 2160p 源会被老的 720p 目标静默替换掉(review M4)。
             if src_n == dst_n:
@@ -1795,24 +1807,9 @@ def scan_lib_async(tid, name, keyword=None):
                 new_folders[top] = len(missing)
             else:
                 attention.append("%s (+%d个视频,无tmdbid且首次出现,需看一眼)" % (top, len(missing)))
-        # 清孤儿:用 os.scandir 优化,先列顶层子目录,关键词过滤后只 walk 命中的(对大库 IO 友好)
-        orphans = 0
+        # 清孤儿:走共享 helper(含挂载保险丝)。⚠️ 这里曾漏加保险丝 → 手动扫描在挂载死时会删光全库 strm(review)
         task_set(tid, status_text="清孤儿 strm…")
-        if os.path.isdir(strm_base):
-            for top_entry in os.scandir(strm_base):
-                if task_is_cancelled(tid): break
-                if not top_entry.is_dir(): continue
-                if kw and kw not in top_entry.name: continue
-                for root, ds, fs in os.walk(top_entry.path):
-                    for f in fs:
-                        if not f.endswith(".strm"): continue
-                        p = os.path.join(root, f)
-                        try: content = open(p, encoding="utf-8").read().strip()
-                        except Exception: continue
-                        if content.startswith("/media/"):
-                            target = CD + content[len("/media"):]
-                            if not os.path.exists(target):
-                                os.remove(p); orphans += 1
+        orphans = _cleanup_orphans(name, strm_base, kw)
         task_set(tid, progress=len(tops))
         if new_files or orphans:
             epost("/Items/%s/Refresh" % meta["id"], {"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default"})

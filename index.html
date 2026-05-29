@@ -2306,13 +2306,13 @@ function renderLogList(){
         : op === 'smart_archive'
           ? `<b>${esc(p.folder||'?')}</b> · 归档删源(${esc(p.from||'?')}→${esc(p.to||'?')})`
           : op === 'replace'
-            ? `<b>${esc(p.lose_folder||p.folder||'?')}</b> · 全替换删旧版(库 ${esc(p.lib||'?')})`
+            ? `<b>${esc(p.lose_was||'?')}</b> · 全替换删旧版(库 ${esc(p.lib||'?')},现为 ${esc(p.now_folder||'?')})`
             : op === 'rebind'
               ? `<b>${esc(p.name||p.id||'?')}</b> · tmdbid ${esc(p.old_tmdb||'无')} → ${esc(p.new_tmdb||'?')}`
               : `<span class="muted">${esc(JSON.stringify(p))}</span>`;
     const action = e.undone
       ? `<span class="badge" style="opacity:.6">已撤销</span>`
-      : op === 'move'
+      : (op === 'move' || op === 'rebind')
         ? `<button class="btn ghost" onclick='doUndo(${JSON.stringify(e.id)})'>↩️ 撤销</button>`
         : `<span class="muted" style="font-size:11px">删除已进 115 回收站,自行还原</span>`;
     return `<div class="item" style="padding:10px 4px">
@@ -2384,8 +2384,9 @@ async function addUser(){
   if(r.err){toast("出错: "+r.err);return;}
   // 建号成功弹可复制信息(账号+密码+登录地址),方便直接发给亲戚 —— 否则密码作者要自己记
   const loginUrl = location.origin.replace(/:\d+$/, ':8096');
+  // copyable 走 textarea.value,不解析 HTML,无 XSS 顾虑;不能 esc 否则用户名里的特殊字符变成 HTML 实体
   await UI.modal.alert({title:'✅ 用户已创建',
-    body:`Emby 账号:${esc(name)}\n登录密码:${pw||'(未设,首次登录可空)'}\nEmby 地址:${loginUrl}\n\n复制以上发给 TA 即可登录。`,
+    body:`Emby 账号:${name}\n登录密码:${pw||'(未设,首次登录可空)'}\nEmby 地址:${loginUrl}\n\n复制以上发给 TA 即可登录。`,
     copyable:true});
   $("#nuName").value="";$("#nuPw").value="";loadUsers();
 }
@@ -2442,14 +2443,13 @@ async function loadConfig(){
   }
 }
 async function saveConfig(which){
+  // 改密统一走 chPwModal(带旧密码),这里不再有 'pw' 分支(#setPw 已删,留着会引用空元素报错)
   const body={};
-  if(which==='pw'){if(!$("#setPw").value){toast("填新密码");return;}body.password=$("#setPw").value;}
-  else if(which==='c115'){const v=$("#setC115Ck").value.trim();if(!v){toast("贴 cookie");return;}body.c115_cookie=v;}
+  if(which==='c115'){const v=$("#setC115Ck").value.trim();if(!v){toast("贴 cookie");return;}body.c115_cookie=v;}
   else if(which==='c115cids'){const m={};document.querySelectorAll(".cidInp").forEach(i=>{if(i.value.trim())m[i.dataset.lib]=i.value.trim();});body.c115_cid_map=m;}
   else{body.emby_url=$("#setUrl").value.trim();body.api_key=$("#setKey").value.trim();}
   const r=await api("/api/config",{method:"POST",body:JSON.stringify(body)});
-  if(which==='pw'){toast("登录密码已改,下次登录用新密码");$("#setPw").value="";}
-  else if(which==='c115'){$("#setC115Ck").value="";toast("115 Cookie 已保存");loadConfig();}
+  if(which==='c115'){$("#setC115Ck").value="";toast("115 Cookie 已保存");loadConfig();}
   else if(which==='c115cids'){toast("库 cid 映射已保存");}
   else{$("#setOut").textContent=(r.emby&&r.emby.online)?`✓ 已保存,Emby 在线(${esc(r.emby.name)})`:"已保存,但 Emby 连接测试失败,检查地址/Key";start();}
 }

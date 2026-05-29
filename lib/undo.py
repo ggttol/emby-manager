@@ -91,10 +91,23 @@ def exec_undo(undo_id):
             if not r.get("err"):
                 _mark_undone(undo_id)
             return r
+        if op == "rebind":
+            # 改绑 tmdbid 的撤销 = 重新绑回旧 tmdb(旧值为空则没法回滚,提示去海报 tab 手动处理)
+            old = str(p.get("old_tmdb") or "").strip()
+            if not old:
+                return {"err": "原来就没绑定 tmdbid,无法自动回滚;请去「海报修复」tab 手动重绑"}
+            from lib.emby import apply_match
+            try:
+                apply_match(p.get("id"), old, p.get("type", "Series"), p.get("name", ""))
+                _mark_undone(undo_id)
+                log("撤销改绑 %s → 回到 tmdb %s" % (p.get("name") or p.get("id"), old))
+                return {"ok": True, "msg": "已改绑回 tmdb %s" % old}
+            except Exception as e:
+                return {"err": "回滚改绑失败: " + str(e)}
         if op in ("delete", "smart_archive", "replace"):
             # 这三类本质都是「删了某 folder 进 115 回收站」,不能程序反向 —— 统一给回收站还原引导,
             # 而不是丢一句「不支持」让用户以为文件没了(review:smart_archive/replace 之前落到死路)。
-            folder = p.get("folder") or p.get("lose_folder") or ""
+            folder = p.get("folder") or p.get("lose_was") or p.get("lose_folder") or ""
             lib = p.get("lib") or p.get("from") or p.get("to") or ""
             label = {"delete": "删除", "smart_archive": "智能归档删源", "replace": "全替换删旧版"}.get(op, op)
             return {"err": "「%s」已把 115 文件夹送入回收站,请先去 115 web 还原它,再用「扫描加新内容」补 strm" % label,
