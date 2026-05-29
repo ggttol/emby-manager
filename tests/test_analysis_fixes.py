@@ -141,7 +141,10 @@ class TestConfigBak(unittest.TestCase):
             with patch.object(config, "CONFIG_FILE", cfgf):
                 config.CFG.clear(); config.CFG.update({"v": 2})
                 config.save_cfg()
-                self.assertTrue(os.path.exists(cfgf + ".bak"), "save 前应备份旧 config 到 .bak")
+                # 新语义:写成功后把【刚写好的新内容】同步到 .bak(不是备份旧的)
+                self.assertTrue(os.path.exists(cfgf + ".bak"))
+                with open(cfgf + ".bak") as f:
+                    self.assertEqual(json.load(f).get("v"), 2, ".bak 应是刚写好的新配置,不是旧的")
         config.load_cfg()
 
 

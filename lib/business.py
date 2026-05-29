@@ -318,11 +318,11 @@ def _mount_alive(timeout=5):
     return result["ok"]
 
 
-def _cleanup_orphans(name, strm_base, kw=None):
+def _cleanup_orphans(name, strm_base, kw=None, cancel_cb=None):
     """清孤儿 strm(content 指向 /media 已不存在的)。**两个扫描器(_scan_lib_locked / scan_lib_async)共用这一个**,
     保证挂载保险丝不会"加在一个漏在另一个"(review:scan_lib_async 曾漏加 → 手动扫描仍会删光全库)。
     ⚠️ 灾难保险丝:115 挂载死时 os.path.exists(target) 对每个 strm 都返 False → 不加守卫会删光全库 strm。
-    返回清掉的孤儿数。"""
+    cancel_cb:可选回调,返 True 即中止(async 扫描传 task_is_cancelled,恢复中途取消)。返回清掉的孤儿数。"""
     orphans = 0
     if not os.path.isdir(strm_base):
         return 0
@@ -330,6 +330,8 @@ def _cleanup_orphans(name, strm_base, kw=None):
         log("扫描[%s] 跳过清孤儿:115 挂载探测失败(防整库 strm 误删)" % name)
         return 0
     for root, _ds, fs in os.walk(strm_base):
+        if cancel_cb and cancel_cb():
+            break
         rel = os.path.relpath(root, strm_base)
         top = rel.split(os.sep)[0] if rel != "." else None
         if kw and top and kw not in top:           # 关键词模式只扫匹配的 top
@@ -346,8 +348,9 @@ def _cleanup_orphans(name, strm_base, kw=None):
             if content.startswith("/media/"):
                 target = CD + content[len("/media"):]
                 if not os.path.exists(target):
-                    # 中途安全阀:删的异常多(挂载可能扫到一半才死)→ 节流重探活,死了就停手
-                    if orphans >= 30 and orphans % 25 == 0 and not _mount_alive():
+                    # 中途安全阀:删的异常多(挂载可能扫到一半才死)→ 节流重探活,死了就停手。
+                    # (orphans-30)%25 → 在 30,55,80… 触发,首探在 30(与文案一致,worst-case 多删≤25)
+                    if orphans >= 30 and (orphans - 30) % 25 == 0 and not _mount_alive():
                         log("扫描[%s] 清孤儿中止:删除数异常(已删 %d)且挂载探测失败,防整库误删" % (name, orphans))
                         return orphans
                     os.remove(p); orphans += 1
@@ -1809,7 +1812,7 @@ def scan_lib_async(tid, name, keyword=None):
                 attention.append("%s (+%d个视频,无tmdbid且首次出现,需看一眼)" % (top, len(missing)))
         # 清孤儿:走共享 helper(含挂载保险丝)。⚠️ 这里曾漏加保险丝 → 手动扫描在挂载死时会删光全库 strm(review)
         task_set(tid, status_text="清孤儿 strm…")
-        orphans = _cleanup_orphans(name, strm_base, kw)
+        orphans = _cleanup_orphans(name, strm_base, kw, cancel_cb=lambda: task_is_cancelled(tid))
         task_set(tid, progress=len(tops))
         if new_files or orphans:
             epost("/Items/%s/Refresh" % meta["id"], {"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default"})
