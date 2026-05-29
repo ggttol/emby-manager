@@ -464,6 +464,13 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
         <span id="setTPOut" class="muted" style="margin-left:6px"></span>
       </div>
 
+      <h2 style="font-size:14px;margin-top:18px">存储路径(高级,换机器才需改)</h2>
+      <div class="muted" style="font-size:12px;margin:2px 0 6px">这三个路径决定工具去哪读写 strm / 115 文件 / 调 docker。默认是群晖布局。<b style="color:var(--warn)">填错会让扫描/删除指向错地方,务必准确;改完要重启服务才生效。</b></div>
+      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">115 挂载根</span><input id="setCd" style="flex:1" placeholder="/volume1/docker/clouddrive2/CloudNAS/CloudDrive"></div>
+      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">strm 根</span><input id="setStrm" style="flex:1" placeholder="/volume1/strm"></div>
+      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">docker 路径</span><input id="setDocker" style="flex:1" placeholder="/usr/local/bin/docker"></div>
+      <div class="row" style="margin-bottom:18px"><button class="btn" onclick="savePaths()">保存路径</button><span id="setPathOut" class="muted" style="margin-left:6px"></span></div>
+
       <h2 style="font-size:14px;margin-top:18px">配置导出 / 导入</h2>
       <div class="muted" style="font-size:12px;margin:2px 0 6px">备份当前配置(密码 hash 和 cookie 会被替换为 <code>&lt;redacted&gt;</code>)或从 JSON 导入。schema 不匹配会被拒。</div>
       <div class="row">
@@ -2450,6 +2457,8 @@ async function loadConfig(){
     const tp = d.trusted_proxies;
     tpEl.value = Array.isArray(tp) ? tp.join(', ') : (typeof tp === 'string' ? tp : '');
   }
+  // 存储路径
+  if($("#setCd")){ $("#setCd").value=d.cd||''; $("#setStrm").value=d.strm||''; $("#setDocker").value=d.docker||''; }
   // 粘 cookie → 立即(不写 CFG)调 test_candidate 校验
   const ck = $("#setC115Ck");
   if (ck && !ck._pasteWired){
@@ -2521,6 +2530,21 @@ async function testC115(){
   $("#setC115State").innerHTML=r.ok?`<span class="badge g">✓ 已连</span> UID ${esc(r.uid)} ${r.used?'· 已用 '+esc(r.used):''}`:`<span class="badge warn">✗ ${esc(r.err)}</span>`;
 }
 
+async function savePaths(){
+  const cd=$("#setCd").value.trim(), strm=$("#setStrm").value.trim(), docker=$("#setDocker").value.trim();
+  const out=$("#setPathOut");
+  for(const [v,n] of [[cd,'115 挂载根'],[strm,'strm 根'],[docker,'docker 路径']]){
+    if(v && !v.startsWith('/')){ out.innerHTML=`<span class="badge warn">${n} 必须是绝对路径</span>`; return; }
+  }
+  out.innerHTML='<span class="spin"></span> 保存…';
+  const body={}; if(cd)body.cd=cd; if(strm)body.strm=strm; if(docker)body.docker=docker;
+  let r; try{ r=await api('/api/config',{method:'POST',body:JSON.stringify(body)}); }catch(e){ out.textContent='出错: '+e; return; }
+  if(r.err){ out.innerHTML=`<span class="badge warn">${esc(r.err)}</span>`; return; }
+  out.innerHTML='<span class="badge g">✓ 已存</span>';
+  if(r.restart_needed){
+    await UI.modal.alert({title:'路径已保存', body:'<div>'+esc(r.note||'存储路径已更新')+'</div><div class="muted" style="font-size:12px;margin-top:8px">扫描/删除/去重等功能在【重启 emby-manager 服务】后才用新路径。</div>'});
+  }
+}
 async function saveTrustedProxies(){
   const raw = ($("#setTrustedProxies").value||'').trim();
   const out = $("#setTPOut");

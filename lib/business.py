@@ -684,10 +684,14 @@ def system_info():
 def get_config():
     ck = CFG.get("c115_cookie", "")
     mask = (ck[:18] + "…" + ck[-18:]) if len(ck) > 50 else ck
+    from lib.config import _DEF_CD, _DEF_STRM, _DEF_DOCKER
     return {"emby_url": CFG["emby_url"], "api_key": CFG["api_key"], "port": CFG["port"],
             "c115_cookie_set": bool(ck), "c115_cookie_mask": mask,
             "c115_cid_map": CFG.get("c115_cid_map") or {},
-            "trusted_proxies": CFG.get("trusted_proxies") or []}
+            "trusted_proxies": CFG.get("trusted_proxies") or [],
+            # 存储路径(换机器改这三个,不用动代码;改完重启生效)
+            "cd": CFG.get("cd") or _DEF_CD, "strm": CFG.get("strm") or _DEF_STRM,
+            "docker": CFG.get("docker") or _DEF_DOCKER}
 
 
 def set_config(b):
@@ -732,9 +736,28 @@ def set_config(b):
             # 受信反代 IP 列表(影响登录限流的 XFF 信任)。只收字符串项,去空白。
             CFG["trusted_proxies"] = [str(x).strip() for x in b["trusted_proxies"] if str(x).strip()]
             changed.append("受信反代 IP")
+        # 存储路径(cd/strm/docker):必须绝对路径。写错会让扫描/删除指向错地方,严格校验。
+        path_changed = False
+        for k, name in (("cd", "115 挂载根"), ("strm", "strm 根"), ("docker", "docker 路径")):
+            v = b.get(k)
+            if v is not None and str(v).strip():
+                v = str(v).strip()
+                if not v.startswith("/"):
+                    return {"err": "%s 必须是绝对路径(以 / 开头): %r" % (name, v)}
+                CFG[k] = v; changed.append(name); path_changed = True
         save_cfg()
+    if path_changed:
+        try:
+            from lib.config import _apply_paths
+            _apply_paths()  # 同步 config.CD/STRM/DOCKER;已 import 的模块要重启才生效
+        except Exception:
+            pass
     log("修改配置: " + "、".join(changed))
-    return {"ok": True, "changed": changed, "emby": emby_online()}
+    r = {"ok": True, "changed": changed, "emby": emby_online()}
+    if path_changed:
+        r["restart_needed"] = True
+        r["note"] = "存储路径已存,但扫描/删除等用到路径的功能要【重启服务】才生效"
+    return r
 
 
 # ===== 配置导出/导入(剔密) =====

@@ -151,5 +151,45 @@ class TestConfigBak(unittest.TestCase):
             config.CFG.clear(); config.CFG.update(snap)
 
 
+class TestConfigurablePaths(unittest.TestCase):
+    """CD/STRM/DOCKER 从 config.json 取(换机器不用改代码);缺 key 时回落默认。"""
+    def test_defaults_when_absent(self):
+        from lib import config
+        snap = dict(config.CFG)
+        try:
+            for k in ("cd", "strm", "docker"):
+                config.CFG.pop(k, None)
+            config._apply_paths()
+            self.assertEqual(config.CD, config._DEF_CD)
+            self.assertEqual(config.STRM, config._DEF_STRM)
+            self.assertEqual(config.DOCKER, config._DEF_DOCKER)
+        finally:
+            config.CFG.clear(); config.CFG.update(snap); config._apply_paths()
+
+    def test_custom_paths_applied(self):
+        from lib import config
+        snap = dict(config.CFG)
+        try:
+            config.CFG["cd"] = "/mnt/115"; config.CFG["strm"] = "/mnt/strm"; config.CFG["docker"] = "/usr/bin/docker"
+            config._apply_paths()
+            self.assertEqual(config.CD, "/mnt/115")
+            self.assertEqual(config.STRM, "/mnt/strm")
+            self.assertEqual(config.DOCKER, "/usr/bin/docker")
+        finally:
+            config.CFG.clear(); config.CFG.update(snap); config._apply_paths()
+
+    def test_set_config_rejects_relative_path(self):
+        import lib.business as biz
+        from lib import config
+        snap = dict(config.CFG)
+        try:
+            r = biz.set_config({"cd": "relative/path"})
+            self.assertIn("err", r)
+            r2 = biz.set_config({"strm": "also/relative"})
+            self.assertIn("err", r2)
+        finally:
+            config.CFG.clear(); config.CFG.update(snap); config._apply_paths()
+
+
 if __name__ == "__main__":
     unittest.main()

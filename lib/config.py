@@ -5,16 +5,24 @@ CFG 是跨模块共享的 mutable dict —— 任何模块都 `from lib.config i
 import json, os, threading, time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根 = lib/ 上一层
-CD = "/volume1/docker/clouddrive2/CloudNAS/CloudDrive"   # 115 挂载根
-STRM = "/volume1/strm"
-DOCKER = "/var/packages/ContainerManager/target/usr/bin/docker"
+# 路径默认值(群晖 + strm + CloudDrive2 标准布局)。换机器只需在 config.json 填 cd/strm/docker 覆盖,不用改代码。
+_DEF_CD = "/volume1/docker/clouddrive2/CloudNAS/CloudDrive"   # 115 挂载根
+_DEF_STRM = "/volume1/strm"                                   # strm 文件根
+_DEF_DOCKER = "/var/packages/ContainerManager/target/usr/bin/docker"  # docker 可执行
+# 占位:load_cfg() 后由 _apply_paths() 按 CFG 重设。其他模块 `from lib.config import CD/STRM/DOCKER`
+# 拿到的是这之后的值(config.py 全部执行完才被别的模块 import)。改路径需重启生效。
+CD = _DEF_CD
+STRM = _DEF_STRM
+DOCKER = _DEF_DOCKER
 VE = (".mkv", ".mp4", ".ts", ".m2ts", ".avi", ".iso", ".mov", ".flv", ".wmv", ".rmvb")
 CONFIG_FILE = os.path.join(HERE, "config.json")
 
 # _DEFAULTS 只放"任何安装都通用"的兜底;**host 和 schema_version 不放**——
 # 它们要让 migrate_cfg 真看到 "key 不在 CFG" 才能区分新装 vs 旧装(旧装沿用 0.0.0.0,新装走 127.0.0.1)
+# cd/strm/docker 放进来:旧装(config.json 无这几个 key)→ 取默认值,行为不变(向后兼容)。
 _DEFAULTS = {"password_hash": "", "emby_url": "http://127.0.0.1:8096/emby",
-             "api_key": "0faf87b4f47148c9b92cb9d580d4e734", "port": 8097}
+             "api_key": "0faf87b4f47148c9b92cb9d580d4e734", "port": 8097,
+             "cd": _DEF_CD, "strm": _DEF_STRM, "docker": _DEF_DOCKER}
 WEAK_PWS = {"gaotao369", "celeron", "123456", "12345678", "password", "admin", "qwerty", "111111", "abc123"}
 
 CURRENT_SCHEMA = 4
@@ -80,8 +88,17 @@ def save_cfg():
     except Exception:
         pass
 
-# 模块加载即填充 CFG —— 其他模块 import 时 CFG 已就绪
+def _apply_paths():
+    """按 CFG 重设模块级 CD/STRM/DOCKER。load_cfg 后调用;set_config 改路径后也调(让 config.CD 同步,
+    但已 `from lib.config import CD` 的模块要重启才生效 —— 路径极少变,可接受)。空值回落默认。"""
+    global CD, STRM, DOCKER
+    CD = (CFG.get("cd") or _DEF_CD)
+    STRM = (CFG.get("strm") or _DEF_STRM)
+    DOCKER = (CFG.get("docker") or _DEF_DOCKER)
+
+# 模块加载即填充 CFG + 定路径 —— 其他模块 import 时 CFG/CD/STRM/DOCKER 已就绪
 load_cfg()
+_apply_paths()
 
 
 def _mig_to_v2():
