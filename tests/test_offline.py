@@ -16,10 +16,10 @@ class TestOfflineAdd(unittest.TestCase):
 
     def test_add_success_flow(self):
         req, calls = self._req(
-            {"state": True, "sign": "SIGN123", "time": 1780000000, "quota": 2997},
+            {"state": True, "sign": "SIGN123", "time": 1780000000},
             {"state": True, "info_hash": "abc123"})
         r = c115.c115_offline_add(req, "magnet:?xt=urn:btih:abc", "789", label="电影")
-        self.assertTrue(r["ok"]); self.assertEqual(r["info_hash"], "abc123"); self.assertEqual(r["quota"], 2997)
+        self.assertTrue(r["ok"]); self.assertEqual(r["info_hash"], "abc123")
         # 第一步拿 sign 用主站域名
         self.assertEqual(calls[0]["host"], c115.C115_SITE)
         self.assertEqual(calls[0]["params"], {"ct": "offline", "ac": "space"})
@@ -38,6 +38,13 @@ class TestOfflineAdd(unittest.TestCase):
         r = c115.c115_offline_add(req, "magnet:x", "1")
         self.assertFalse(r["ok"]); self.assertIn("sign", r["err"])
         self.assertEqual(len(calls), 1, "拿 sign 失败后不应再调 add")
+
+    def test_state_true_but_sign_missing_aborts(self):
+        # space 返 state:True 但无 sign/time → 不该带 sign=None 发真请求
+        req, calls = self._req({"state": True}, {"state": True, "info_hash": "x"})
+        r = c115.c115_offline_add(req, "magnet:x", "1")
+        self.assertFalse(r["ok"]); self.assertIn("sign", r["err"])
+        self.assertEqual(len(calls), 1, "sign 缺失后不应发 add")
 
     def test_add_rejected(self):
         req, _ = self._req({"state": True, "sign": "S", "time": 1},

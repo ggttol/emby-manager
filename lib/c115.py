@@ -238,14 +238,19 @@ def c115_offline_add(req_fn, url, cid, label=None):
     if not sp.get("state"):
         return {"ok": False, "err": "拿离线 sign 失败(cookie 失效或无离线权限): " + str(sp.get("error") or sp.get("_err") or sp)[:120]}
     sign, t = sp.get("sign"), sp.get("time")
-    quota = sp.get("quota")
+    # sign/time 必须非空才发真请求 —— 否则会带 sign=None 发出一次注定失败的真离线写请求(review)
+    if not sign or not t:
+        return {"ok": False, "err": "离线 sign/time 缺失(115 响应结构异常,可能接口变更): " + str(sp)[:120]}
     res = req_fn("/web/lixian/", params={"ct": "lixian", "ac": "add_task_url"},
                  post={"url": url, "wp_path_id": str(cid), "sign": sign, "time": t}, host=C115_SITE)
     ok = bool(res.get("state"))
     where = ("库「%s」" % label) if label else ("目录 cid=%s" % cid)
     log("115 离线 %s → %s: %s" % (url[:50], where, "✓ " + str(res.get("info_hash", "")) if ok else (res.get("error_msg") or res.get("error") or res.get("errtype") or res)))
     if ok:
-        return {"ok": True, "info_hash": res.get("info_hash"), "cid": cid, "lib": label, "quota": quota,
+        return {"ok": True, "info_hash": res.get("info_hash"), "cid": cid, "lib": label,
                 "msg": "已加入 115 离线下载队列(到 115 看进度)→ %s" % where}
-    return {"ok": False, "info_hash": res.get("info_hash"),
-            "err": res.get("error_msg") or res.get("error") or ("离线添加失败(errcode=%s)" % res.get("errcode")) or "未知"}
+    # 错误兜底:errcode 缺失时不显示无意义的「errcode=None」,回带原始响应片段
+    ec = res.get("errcode")
+    err = res.get("error_msg") or res.get("error") or res.get("errtype") or \
+          (("离线添加失败(errcode=%s)" % ec) if ec is not None else ("离线添加失败: " + str(res)[:120]))
+    return {"ok": False, "info_hash": res.get("info_hash"), "err": err}

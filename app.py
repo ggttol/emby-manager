@@ -353,11 +353,9 @@ class H(BaseHTTPRequestHandler):
                 ul = (url or "").lower()
                 is_offline = ul.startswith("magnet:") or ul.startswith("ed2k:") or \
                              (ul.startswith("http") and "/s/" not in ul)  # 非 115 分享的 http 直链也走离线
-                # 解析目标 cid:显式 cid 优先(必须正整数),否则用 lib 映射的 cid
+                # 解析目标 cid:显式 cid 优先,否则用 lib 映射的 cid
                 target_cid = None; label = b.get("label") or lib
                 if cid not in (None, ""):
-                    if not re.fullmatch(r"[1-9]\d*", str(cid)):
-                        return self._json({"ok": False, "err": "cid 必须是正整数(0=根目录,不允许)"}, 400)
                     target_cid = str(cid)
                 elif lib:
                     target_cid = (CFG.get("c115_cid_map") or {}).get(lib)
@@ -365,6 +363,10 @@ class H(BaseHTTPRequestHandler):
                         return self._json({"ok": False, "err": "库「%s」没配 115 cid,去设置页填" % lib}, 400)
                 else:
                     return self._json({"ok": False, "err": "未指定目标库或 cid"}, 400)
+                # 正整数校验:对【两条路径都生效】(显式 cid 和库映射来的 cid)。
+                # 防误配的 cid_map 值("0"=115 根目录 或 非数字)让离线下载(真下载/占配额)灌进根目录(review)
+                if not re.fullmatch(r"[1-9]\d*", str(target_cid)):
+                    return self._json({"ok": False, "err": "目标 cid 非法(必须正整数,0=根目录不允许;检查库的 cid 配置)"}, 400)
                 if is_offline:
                     return self._json(c115_offline_add(url, target_cid, label=label))
                 return self._json(c115_save_to_cid(url, pwd, target_cid, label=label))
