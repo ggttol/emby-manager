@@ -2646,14 +2646,16 @@ async function catalogTransfer(i){
   const cid = $("#catalogCid").value.trim();
   const lib = $("#catalogTarget").value;
   if(!cid && !lib){ UI.toast('先选目标库或填 cid', {type:'warn'}); return; }
+  if(cid && !/^[1-9]\d*$/.test(cid)){ UI.toast('自定义 cid 必须是正整数(0=根目录不允许)', {type:'warn'}); return; }
   const target = cid ? ('cid '+cid) : ('库「'+lib+'」');
   const ok = await UI.modal.confirm({
     danger: it.is_pkg,
     title: '转存到 '+target,
     body: `<div><b>${UI.esc(it.name)}</b></div>`+
-      (it.is_pkg?'<div style="margin-top:8px;color:var(--warn);font-size:12px">⚠️ 这是<b>整包合集</b>链接 —— 会把整个合集(可能几百部/几 TB)转进目标目录,不是单部!确认要整包?</div>':'')+
+      (it.is_pkg?'<div style="margin-top:8px;color:var(--warn);font-size:12px">⚠️ 这是<b>整包合集</b>链接 —— 会把整个合集(可能几百部/几 TB)转进目标目录,不是单部!打字确认。</div>':'')+
       `<div class="muted" style="font-size:12px;margin-top:8px">${UI.esc(it.link)}</div>`,
-    okText: '转存'
+    okText: '转存',
+    requireType: it.is_pkg ? '整包' : null   // 整包是 TB 级不可逆操作,打字确认(与本仓库高危操作惯例一致)
   });
   if(!ok) return;
   const body = cid ? {link:it.link, cid:cid, label:it.name} : {link:it.link, lib:lib};

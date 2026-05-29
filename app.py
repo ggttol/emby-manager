@@ -9,7 +9,7 @@ Emby 管理工具 v3 — 跑在 NAS,纯标准库,零依赖,以 root 运行。
 模块拆分:配置/日志/鉴权/任务/Emby/c115/业务/Undo 全部在 lib/ 下,本文件只剩 HTTP handler 和入口。
 **re-export 段是必须的**(末尾的 `from lib.* import ...`)—— 测试用 `import app; app.qscore` 这样的方式。
 """
-import hmac, json, os, sys, threading, time, urllib.parse, uuid
+import hmac, json, os, re, sys, threading, time, urllib.parse, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 
@@ -346,7 +346,10 @@ class H(BaseHTTPRequestHandler):
                 # 从资源库选中的分享链 → 转存到指定目录(lib 名 或 直接 cid)
                 lib = b.get("lib"); cid = b.get("cid")
                 url = b.get("link") or b.get("url", ""); pwd = b.get("pwd", "")
-                if cid:
+                if cid not in (None, ""):
+                    # cid 必须正整数:防 "0"(=115 根目录)误转 + 非数字注定失败的请求
+                    if not re.fullmatch(r"[1-9]\d*", str(cid)):
+                        return self._json({"ok": False, "err": "cid 必须是正整数(0=根目录,不允许;从 CloudDrive2 web 进目录看 URL 末尾数字)"}, 400)
                     return self._json(c115_save_to_cid(url, pwd, str(cid), label=b.get("label")))
                 if lib:
                     return self._json(c115_save_to_lib(url, pwd, lib))

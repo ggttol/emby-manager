@@ -17,13 +17,17 @@ def catalog_stats():
     if not catalog_available():
         return {"available": False}
     try:
-        con = sqlite3.connect("file:%s?mode=ro" % CATALOG_DB, uri=True)
-        n = con.execute("SELECT COUNT(*) FROM catalog").fetchone()[0]
-        npkg = con.execute("SELECT COUNT(*) FROM catalog WHERE is_pkg=1").fetchone()[0]
-        con.close()
+        with sqlite3.connect("file:%s?mode=ro" % CATALOG_DB, uri=True) as con:
+            n = con.execute("SELECT COUNT(*) FROM catalog").fetchone()[0]
+            npkg = con.execute("SELECT COUNT(*) FROM catalog WHERE is_pkg=1").fetchone()[0]
         return {"available": True, "total": n, "packages": npkg}
     except Exception as e:
         return {"available": False, "err": str(e)}
+
+
+def _like_escape(t):
+    r"""转义 LIKE 元字符 % _,否则真实片名里的 % / _ 会被当通配符(如「100%」)。配合 ESCAPE '\'。"""
+    return t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def catalog_search(q, limit=80):
@@ -35,17 +39,17 @@ def catalog_search(q, limit=80):
     if not catalog_available():
         return {"err": "资源库未部署(catalog_115.db 不在)"}
     terms = [t for t in re.split(r"\s+", q) if t][:6]  # 最多 6 个关键词,防滥用
-    if not terms:
-        return {"items": [], "total": 0}
-    where = " AND ".join(["name LIKE ?"] * len(terms))
-    args = ["%" + t + "%" for t in terms]
+    # 最小词长:单字符 term('%' 或 'a')会全表扫 15.7 万行 + filesort,挡掉
+    if not terms or all(len(t) < 2 for t in terms):
+        return {"items": [], "total": 0, "hint": "关键词太短,至少 2 个字符"}
+    where = " AND ".join(["name LIKE ? ESCAPE '\\'"] * len(terms))
+    args = ["%" + _like_escape(t) + "%" for t in terms]
     try:
-        con = sqlite3.connect("file:%s?mode=ro" % CATALOG_DB, uri=True)
-        # 多取一条判断是否截断;非整包优先(单片比整包好转),其次名字短的靠前
-        rows = con.execute(
-            "SELECT name,sheet,link,is_pkg FROM catalog WHERE %s ORDER BY is_pkg ASC, length(name) ASC LIMIT %d"
-            % (where, limit + 1), args).fetchall()
-        con.close()
+        with sqlite3.connect("file:%s?mode=ro" % CATALOG_DB, uri=True) as con:
+            # 多取一条判断是否截断;非整包优先(单片比整包好转),其次名字短的靠前
+            rows = con.execute(
+                "SELECT name,sheet,link,is_pkg FROM catalog WHERE %s ORDER BY is_pkg ASC, length(name) ASC LIMIT %d"
+                % (where, limit + 1), args).fetchall()
     except Exception as e:
         return {"err": "查询失败: " + str(e)}
     truncated = len(rows) > limit

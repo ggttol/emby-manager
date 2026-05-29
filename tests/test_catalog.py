@@ -50,6 +50,20 @@ class TestCatalog(unittest.TestCase):
         with patch.object(cat, "CATALOG_DB", self.db):
             self.assertEqual(cat.catalog_search("")["items"], [])
 
+    def test_short_term_rejected(self):
+        # 单字符词(含通配 %)挡掉,不全表扫
+        with patch.object(cat, "CATALOG_DB", self.db):
+            self.assertEqual(cat.catalog_search("%")["items"], [])
+            self.assertEqual(cat.catalog_search("a")["items"], [])
+
+    def test_like_wildcard_escaped(self):
+        # 含字面 % 的真实片名:% 不当通配符
+        _mkdb(self.db.replace("catalog_115", "c2"), [])  # noop to keep tmp
+        with patch.object(cat, "CATALOG_DB", self.db):
+            # 库里没有含 % 的名,搜 "100%"(>=2 字符)应命中 0 而非因 % 通配命中全部
+            r = cat.catalog_search("100%")
+            self.assertEqual(len(r["items"]), 0, "% 应被转义为字面量,不匹配全表")
+
     def test_missing_db_graceful(self):
         with patch.object(cat, "CATALOG_DB", "/nonexistent_catalog_xyz.db"):
             r = cat.catalog_search("沙丘")
