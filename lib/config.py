@@ -23,20 +23,45 @@ CFG = {}        # 占位,load_cfg() 填充
 CFG_LOCK = threading.RLock()  # 保护 CFG 并发读改写
 CONFIG_EXISTED = False  # load_cfg 时若 config.json 已存在 → True;migrate_cfg 据此区分新/旧装
 
+def _try_load(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
 def load_cfg():
-    """清掉旧内容、读 config.json 合并 defaults。**不 rebind CFG**(跨模块共享)。"""
+    """清掉旧内容、读 config.json 合并 defaults。**不 rebind CFG**(跨模块共享)。
+    config.json 损坏(半写/断电/手改漏逗号)时回退到 .bak,避免静默丢光 cookie/密码/schedules。"""
     global CONFIG_EXISTED
     CFG.clear()
     CFG.update(_DEFAULTS)
-    try:
-        with open(CONFIG_FILE, encoding="utf-8") as f:
-            CFG.update(json.load(f))
+    loaded = None
+    if os.path.exists(CONFIG_FILE):
+        try:
+            loaded = _try_load(CONFIG_FILE)
+        except Exception:
+            # 主文件坏了 → 试 .bak(上次成功保存的副本)
+            from lib.logger import logger
+            logger.error("config.json 解析失败,尝试回退 .bak")
+            try:
+                loaded = _try_load(CONFIG_FILE + ".bak")
+                logger.warning("已从 config.json.bak 恢复配置")
+            except Exception:
+                logger.error("config.json.bak 也不可用,退回默认配置(请检查 config.json)")
+    if loaded is not None:
+        CFG.update(loaded)
         CONFIG_EXISTED = True
-    except Exception:
-        CONFIG_EXISTED = False
+    else:
+        CONFIG_EXISTED = os.path.exists(CONFIG_FILE)  # 文件在但全坏 → 仍算"已存在"(别误判成新装走 127.0.0.1)
 
 def save_cfg():
     try:
+        # 存前先把当前好的 config.json 备份成 .bak(供下次损坏时回退)
+        if os.path.exists(CONFIG_FILE):
+            try:
+                import shutil
+                shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
+                os.chmod(CONFIG_FILE + ".bak", 0o600)
+            except Exception:
+                pass
         # 原子写:先 tmp 再 rename,避免半写;chmod 0600 限只 owner 可读(护 cookie/api_key/密码)
         tmp = CONFIG_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:

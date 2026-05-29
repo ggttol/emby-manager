@@ -120,7 +120,15 @@ def update_schedule(sid, patch):
             s["params"] = patch["params"] or {}
         if "schedule" in patch and patch["schedule"]:
             _validate_schedule(patch["schedule"])
-            s["schedule"] = dict(patch["schedule"])
+            old_sch = s.get("schedule") or {}
+            new_sch = dict(patch["schedule"])
+            s["schedule"] = new_sch
+            # 改了触发时刻 → 清 last_run_at,让本周期能按新时间重新触发(否则今天已跑过就要等明天,
+            # 用户视角是"我改了时间它没跑")。但若新时刻此刻已过,锚回 now 防"改完立即触发"。
+            if any(old_sch.get(k) != new_sch.get(k) for k in ("mode", "hour", "minute", "weekday", "day")):
+                s["last_run_at"] = None
+                if is_due(s, _now()):
+                    s["last_run_at"] = _isofmt(_now())
         if "enabled" in patch:
             s["enabled"] = bool(patch["enabled"])
         save_cfg()
@@ -293,7 +301,7 @@ def _fire(sid):
 
     # 监控线程:tasks 没原生 done-callback,自己轮询 + 写 last_*
     def watch():
-        deadline = time.time() + 6 * 3600  # 6h 防 watch 卡死
+        deadline = time.time() + 24 * 3600  # 24h:全库刷新(33k×0.5s≈4.6h)等长任务也不会被误标超时
         while time.time() < deadline:
             t = task_get(tid)
             if not t:
@@ -305,19 +313,35 @@ def _fire(sid):
                         s2["last_status"] = t["status"]
                         s2["last_err"] = t.get("err")
                         s2["last_ended_at"] = _isofmt(_now())
+                        s2["last_summary"] = _summarize_result(t.get("result"))  # 存"加了几部/修了几张"摘要
                         save_cfg()
-                log("⏰ 定时 %s 结束 [%s] · tid=%s" % (name, t["status"], tid))
+                log("⏰ 定时 %s 结束 [%s] · %s · tid=%s" % (name, t["status"], _summarize_result(t.get("result")), tid))
                 return
             time.sleep(2)
-        # 超时(任务跑了 >6h):标超时,不再 watch
+        # 超时(任务跑了 >24h):标超时,不再 watch
         with CFG_LOCK:
             s2 = _find_by_id(sid)
             if s2 and s2.get("last_tid") == tid:
                 s2["last_status"] = "watch_timeout"
-                s2["last_err"] = "watch 超时 6h"
+                s2["last_err"] = "watch 超时 24h"
                 save_cfg()
     threading.Thread(target=watch, daemon=True, name="sch-watch-" + sid).start()
     return tid
+
+
+def _summarize_result(result):
+    """把任务返回 dict 摘成一行人话(给定时卡片显示「昨晚到底干了啥」)。认得几种常见 kind 的字段。"""
+    if not isinstance(result, dict):
+        return ""
+    parts = []
+    if "new_count" in result: parts.append("新增 %d" % result.get("new_count", 0))
+    if "orphans_cleaned" in result: parts.append("清孤儿 %d" % result.get("orphans_cleaned", 0))
+    if "ok_count" in result and "total" in result: parts.append("✓%d/%d" % (result.get("ok_count", 0), result.get("total", 0)))
+    if "refresh_triggered_total" in result: parts.append("刷新 %d" % result.get("refresh_triggered_total", 0))
+    if "new_total" in result: parts.append("拿新集 %d" % result.get("new_total", 0))
+    if "libs_scanned" in result and isinstance(result["libs_scanned"], int): parts.append("扫 %d 库" % result["libs_scanned"])
+    if "err" in result and result.get("err"): parts.append("err: " + str(result["err"])[:60])
+    return " · ".join(parts)
 
 
 def run_now(sid):

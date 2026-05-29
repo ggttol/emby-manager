@@ -115,6 +115,16 @@ def apply_match(item_id, tmdb, typ, name):
     # tmdb 必须纯数字 —— 否则会被原样写进 Emby ProviderIds.Tmdb,再在前端列表里拼进 innerHTML 成存储型 XSS 源(review)
     if not re.fullmatch(r"\d+", str(tmdb or "")):
         raise AppError("tmdbid 必须是数字: %r" % tmdb, status=400)
+    # 记录旧绑定到 undo —— 绑定是唯一没 undo 的破坏性操作,误绑/批量绑错后能查回原 tmdb(review)
+    try:
+        from lib.undo import _undo_record
+        cur = eget("/Items", {"Ids": item_id, "Fields": "ProviderIds,Name"}).get("Items", [{}])[0]
+        old_tmdb = (cur.get("ProviderIds") or {}).get("Tmdb", "")
+        if str(old_tmdb) != str(tmdb):
+            _undo_record("rebind", {"id": item_id, "name": cur.get("Name") or name,
+                                    "old_tmdb": old_tmdb, "new_tmdb": str(tmdb), "type": typ})
+    except Exception:
+        pass
     epost("/Items/RemoteSearch/Apply/%s" % item_id, body={"ProviderIds": {"Tmdb": str(tmdb)}})
     epost("/Items/%s/Refresh" % item_id, {"MetadataRefreshMode": "FullRefresh", "ImageRefreshMode": "FullRefresh",
                                           "ReplaceAllMetadata": "true", "ReplaceAllImages": "true"})
@@ -224,7 +234,27 @@ def update_user(uid, maxsessions=None, disabled=None, bitrate_mbps=None):
         pol["IsDisabled"] = bool(disabled)
     code = epost("/Users/%s/Policy" % uid, body=pol)
     log("改用户策略 %s (同时播放=%s 码率Mbps=%s 停用=%s)" % (uid, maxsessions, bitrate_mbps, disabled))
-    return {"ok": code in (200, 204), "code": code}
+    if code not in (200, 204):
+        return {"ok": False, "code": code}
+    # 写后回读校验:Emby 对不认识的 Policy 字段会静默忽略(MaxActiveSessions 那次事故),
+    # 回读确认值真落库,避免"以为限了其实没限"。
+    verify = {}
+    try:
+        np = next((u.get("Policy", {}) for u in eget("/Users") if u["Id"] == uid), {})
+        if maxsessions is not None and str(maxsessions) != "":
+            want = max(0, int(maxsessions))
+            got = np.get("SimultaneousStreamLimit", np.get("MaxActiveSessions"))
+            verify["stream_limit_ok"] = (got == want)
+        if bitrate_mbps is not None and str(bitrate_mbps) != "":
+            verify["bitrate_ok"] = (np.get("RemoteClientBitrateLimit") == int(round(max(0.0, float(bitrate_mbps)) * 1000000)))
+    except Exception:
+        pass
+    bad = [k for k, v in verify.items() if v is False]
+    if bad:
+        log("⚠️ 用户策略回读不符 %s: %s(Emby 可能不支持该字段)" % (uid, bad))
+        return {"ok": True, "code": code, "verify": verify,
+                "warn": "已提交但回读发现未生效: %s(该 Emby 版本可能不支持此限制)" % ", ".join(bad)}
+    return {"ok": True, "code": code, "verify": verify}
 
 
 def delete_user(uid):

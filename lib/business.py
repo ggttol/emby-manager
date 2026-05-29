@@ -44,6 +44,12 @@ def qscore(s):
     return sc
 
 
+_EXTRA_RE = re.compile(r'花絮|预告|片花|彩蛋|特典|菜单|sample|trailer|preview|featurette|/sp\b|\bsp\d|\bnc\d?(op|ed)|\b(op|ed)\d', re.IGNORECASE)
+def _is_extra(name):
+    """是否花絮/预告/样片/SP/特典/menu —— 去重判画质时不拿它当正片(否则一个 2160p 预告污染整组)。"""
+    return bool(_EXTRA_RE.search(name or ""))
+
+
 # ===== 库列表 + 元信息汇总 =====
 def all_libraries():
     out = []
@@ -106,25 +112,36 @@ def _scan_lib_locked(name, meta, keyword):
         else:
             attention.append("%s (+%d个视频,无tmdbid且首次出现,需看一眼)" % (top, len(missing)))
     # 顺便清孤儿 strm(指向 /media 已不存在的)—— 解决"换资源后扫描留旧"那种坑
+    # ⚠️ 灾难保险丝:115 挂载死时 os.path.exists(target) 对每个 strm 都返 False → 会删光全库 strm。
+    # 动手前探活;挂载探测失败直接跳过整段清孤儿(尤其定时 scan_all 半夜无人值守跑时)。
     orphans = 0
     if os.path.isdir(strm_base):
-        for root, ds, fs in os.walk(strm_base):
-            rel = os.path.relpath(root, strm_base)
-            top = rel.split(os.sep)[0] if rel != "." else None
-            if kw and top and kw not in top:           # 关键词模式只扫匹配的 top
-                continue
-            for f in fs:
-                if not f.endswith(".strm"):
+        if not _mount_alive():
+            log("扫描[%s] 跳过清孤儿:115 挂载探测失败(防整库 strm 误删)" % name)
+        else:
+            aborted = False
+            for root, ds, fs in os.walk(strm_base):
+                if aborted: break
+                rel = os.path.relpath(root, strm_base)
+                top = rel.split(os.sep)[0] if rel != "." else None
+                if kw and top and kw not in top:           # 关键词模式只扫匹配的 top
                     continue
-                p = os.path.join(root, f)
-                try:
-                    content = open(p, encoding="utf-8").read().strip()
-                except Exception:
-                    continue
-                if content.startswith("/media/"):
-                    target = CD + content[len("/media"):]
-                    if not os.path.exists(target):
-                        os.remove(p); orphans += 1
+                for f in fs:
+                    if not f.endswith(".strm"):
+                        continue
+                    p = os.path.join(root, f)
+                    try:
+                        content = open(p, encoding="utf-8").read().strip()
+                    except Exception:
+                        continue
+                    if content.startswith("/media/"):
+                        target = CD + content[len("/media"):]
+                        if not os.path.exists(target):
+                            # 中途安全阀:删的异常多时(挂载可能扫到一半才死)重新探活,死了就停手
+                            if orphans >= 30 and not _mount_alive():
+                                log("扫描[%s] 清孤儿中止:删除数异常(已删 %d)且挂载探测失败,防整库误删" % (name, orphans))
+                                aborted = True; break
+                            os.remove(p); orphans += 1
     if new_files or orphans:
         epost("/Items/%s/Refresh" % meta["id"], {"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default"})
         log("扫描[%s] 新增 strm %d,清孤儿 %d" % (name, len(new_files), orphans))
@@ -147,7 +164,7 @@ def analyze_dups():
             mm = re.search(r'tmdbid[-_](\d+)', top, re.IGNORECASE)
             if not mm:
                 continue
-            medias = []; maxsc = 0
+            medias = []; maxsc = 0; main_scs = []
             for root, ds, fs in os.walk(tp):
                 for f in fs:
                     if f.endswith(".strm"):
@@ -155,8 +172,14 @@ def analyze_dups():
                             c = open(os.path.join(root, f), encoding="utf-8").read().strip()
                         except Exception:
                             c = f
-                        medias.append(c); maxsc = max(maxsc, qscore(c))
-            groups[mm.group(1)][(lib, top)] = {"medias": medias, "score": maxsc, "n": len(medias)}
+                        medias.append(c)
+                        sc = qscore(c)
+                        maxsc = max(maxsc, sc)
+                        if not _is_extra(c):     # 花絮/预告/样片不参与代表画质,防一个 2160p 预告把整组顶到 4000
+                            main_scs.append(sc)
+            # 代表画质用正片里的最高分;整组全是 extra 时退回 maxsc(不至于算 0)
+            rep = max(main_scs) if main_scs else maxsc
+            groups[mm.group(1)][(lib, top)] = {"medias": medias, "score": rep, "n": len(medias)}
     def eps(ms):
         e = set()
         for x in ms:
@@ -301,6 +324,23 @@ def delete_item(lib, folder, emby_id):
     return {"deleted": done, "folder": folder, "emby_gone": emby_gone}
 
 
+def _mount_alive(timeout=5):
+    """115 CloudDrive2 挂载是否真活着:带超时确认 CD 根可列且非空。
+    挂载半死(FUSE stat 卡 D-state)时 os.listdir 会 hang,故用子线程 + join 超时——超时即判死。
+    用途:任何会因『文件看似不存在』而触发删除/误判的操作,动手前先探活(防风控挂载死时误删整库)。"""
+    result = {"ok": False}
+    def probe():
+        try:
+            result["ok"] = os.path.isdir(CD) and len(os.listdir(CD)) > 0
+        except Exception:
+            result["ok"] = False
+    t = threading.Thread(target=probe, daemon=True)
+    t.start(); t.join(timeout)
+    if t.is_alive():
+        return False  # 超时 = 挂载卡死
+    return result["ok"]
+
+
 def _count_strm(folder_path):
     """统计 folder 下 .strm 文件总数(衡量集数)。folder 不存在返 0。"""
     if not os.path.isdir(folder_path):
@@ -373,6 +413,11 @@ def _move_item_locked(from_lib, folder, to_lib, emby_id, L, on_conflict="error")
             # 比 strm 集数:source vs target
             src_n = _count_strm(os.path.join(STRM, ff, folder))
             dst_n = _count_strm(os.path.join(STRM, tf, folder))
+            # 护栏:目标 115 上有 folder(os.path.exists(dst) 为真才进到这)但 strm 数=0,
+            # 说明目标刚转存进来还没扫(strm 未生成)→ dst_n=0 会让下面误判"源更全"删掉目标真实 115 内容。
+            # strm 数不可信时退回 error,不拿集数做不可逆删除决策(review)。
+            if dst_n == 0:
+                return {"err": "目标已存在同名文件夹,但其 strm 未生成(可能刚转存未扫描)——拒绝智能判定以防误删,请先扫描目标库再归档"}
             # 集数相等(尤其单文件电影永远 1==1)时,纯比集数会无条件删源 → 改用画质 qscore tiebreak,
             # 否则刚转存的 2160p 源会被老的 720p 目标静默替换掉(review M4)。
             if src_n == dst_n:
@@ -576,10 +621,20 @@ def system_info():
         pass
     total = mi.get("MemTotal", 0); avail = mi.get("MemAvailable", 0); used = total - avail
     swt = mi.get("SwapTotal", 0); swf = mi.get("SwapFree", 0)
+    # 磁盘:优先 /volume1(NAS),不存在则回落到 STRM 所在卷(VM/其他宿主无 /volume1,否则恒显 0)
+    dtot = dfree = 0; disk_path = "/volume1" if os.path.isdir("/volume1") else STRM
     try:
-        st = os.statvfs("/volume1"); dtot = st.f_blocks * st.f_frsize; dfree = st.f_bavail * st.f_frsize
+        st = os.statvfs(disk_path); dtot = st.f_blocks * st.f_frsize; dfree = st.f_bavail * st.f_frsize
     except Exception:
-        dtot = dfree = 0
+        pass
+    # 负载 + D-state 进程:115 风控的唯一早期信号(CLAUDE.md 铁律:mount dies → D-state hangs + load spike)
+    loadavg = None; ncpu = os.cpu_count() or 1; dstate = []
+    try:
+        with open("/proc/loadavg") as f:
+            parts = f.read().split()
+            loadavg = [float(parts[0]), float(parts[1]), float(parts[2])]
+    except Exception:
+        pass
     conts = []
     try:
         out = subprocess.run([DOCKER, "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"], capture_output=True, text=True, timeout=15).stdout
@@ -589,20 +644,24 @@ def system_info():
         conts = [{"name": "docker 读取失败", "status": str(e)[:60], "up": False}]
     procs = []
     try:
+        # 带 STAT 列(p[7]):标出 D-state(不可中断睡眠=卡在 115 FUSE IO,直接指认风控)
         out = subprocess.run(["ps", "aux", "--sort=-%mem"], capture_output=True, text=True, timeout=15).stdout
         for ln in out.splitlines()[1:9]:
             p = ln.split(None, 10)
             if len(p) >= 11:
-                procs.append({"mem": p[3], "rss_mb": int(p[5]) // 1024, "cmd": p[10][:54]})
+                stat = p[7]
+                procs.append({"mem": p[3], "rss_mb": int(p[5]) // 1024, "stat": stat, "cmd": p[10][:54]})
+                if "D" in stat:
+                    dstate.append(p[10][:54])
     except Exception:
         pass
-    try:
-        cd_ok = os.path.isdir(CD) and len(os.listdir(CD)) > 0
-    except Exception:
-        cd_ok = False
+    # 深度挂载探活(带超时,半死也判得出)替代浅层 isdir+listdir
+    cd_ok = _mount_alive()
     return {"mem": {"total": _gb(total), "used": _gb(used), "avail": _gb(avail), "pct": round(used * 100 / total) if total else 0},
             "swap": {"total": _gb(swt), "used": _gb(swt - swf), "pct": round((swt - swf) * 100 / swt) if swt else 0},
             "disk": {"total_tb": round(dtot / 1e12, 2), "free_tb": round(dfree / 1e12, 2), "pct": round((dtot - dfree) * 100 / dtot) if dtot else 0},
+            "load": {"avg": loadavg, "ncpu": ncpu, "per_core": round(loadavg[0] / ncpu, 2) if loadavg else None},
+            "dstate": dstate,
             "containers": conts, "procs": procs, "cd_ok": cd_ok}
 
 
@@ -612,7 +671,8 @@ def get_config():
     mask = (ck[:18] + "…" + ck[-18:]) if len(ck) > 50 else ck
     return {"emby_url": CFG["emby_url"], "api_key": CFG["api_key"], "port": CFG["port"],
             "c115_cookie_set": bool(ck), "c115_cookie_mask": mask,
-            "c115_cid_map": CFG.get("c115_cid_map") or {}}
+            "c115_cid_map": CFG.get("c115_cid_map") or {},
+            "trusted_proxies": CFG.get("trusted_proxies") or []}
 
 
 def set_config(b):
@@ -636,6 +696,14 @@ def set_config(b):
             CFG["password_hash"] = _hash_password(pw); CFG.pop("password", None)
             CFG["last_password_change_at"] = int(time.time())
             changed.append("登录密码")
+            # 改密即吊销所有现有会话 token(防"怀疑泄露改了密但旧 cookie 还能用满 7 天")。
+            # 当前会话也会失效 → 前端下次请求 401 → 自动跳登录,用新密码重登。
+            try:
+                from lib.auth import TOKENS, TOKENS_LOCK
+                with TOKENS_LOCK:
+                    TOKENS.clear()
+            except Exception:
+                pass
         if b.get("emby_url"):
             CFG["emby_url"] = b["emby_url"].strip(); changed.append("Emby地址")
         if b.get("api_key"):
@@ -645,6 +713,10 @@ def set_config(b):
         if isinstance(b.get("c115_cid_map"), dict):
             CFG["c115_cid_map"] = {k: str(v).strip() for k, v in b["c115_cid_map"].items() if str(v).strip()}
             changed.append("115 库 cid 映射")
+        if isinstance(b.get("trusted_proxies"), list):
+            # 受信反代 IP 列表(影响登录限流的 XFF 信任)。只收字符串项,去空白。
+            CFG["trusted_proxies"] = [str(x).strip() for x in b["trusted_proxies"] if str(x).strip()]
+            changed.append("受信反代 IP")
         save_cfg()
     log("修改配置: " + "、".join(changed))
     return {"ok": True, "changed": changed, "emby": emby_online()}
@@ -1003,7 +1075,10 @@ def gaps_scan_lib_async(tid, lib):
             rows.append({"name": s.get("Name", "?"), "id": s.get("Id"),
                          "err": str(e), "score": 0})
     rows.sort(key=lambda x: -x.get("score", 0))
-    copy_text = "\n".join("求 %s — %s" % (r["name"], r["fmt"]) for r in rows if "fmt" in r)
+    # 带上 tmdbid 让资源群对得上版本(rows 本就有 tmdb 字段)
+    copy_text = "\n".join(
+        "求 %s%s — %s" % (r["name"], (" [tmdb:%s]" % r["tmdb"]) if r.get("tmdb") else "", r["fmt"])
+        for r in rows if "fmt" in r)
     log("全库缺集扫描 [%s]: %d 部 → 有缺/落后 %d 部" % (lib, len(items), len(rows)))
     return {"lib": lib, "items": rows, "total": len(rows),
             "analyzed": len(items), "copy_text": copy_text}
@@ -1017,6 +1092,7 @@ def detect_mismatched_posters_async(tid):
     out = []
     cn_re = re.compile(r'[一-鿿]')
     tmdbid_re = re.compile(r'\s*\[tmdbid[-_]\d+\]\s*$', re.IGNORECASE)
+    tmdbid_cap = re.compile(r'tmdbid[-_](\d+)', re.IGNORECASE)
     year_re = re.compile(r'\s*\(\d{4}\)\s*$')
     for i, (lib, m) in enumerate(libs.items()):
         if task_is_cancelled(tid): break
@@ -1034,11 +1110,21 @@ def detect_mismatched_posters_async(tid):
             path = it.get("Path") or ""
             if sep not in path: continue
             folder = path.split(sep, 1)[1].split("/", 1)[0]
+            name = it.get("Name") or ""
+            actual_tmdb = (it.get("ProviderIds") or {}).get("Tmdb", "") or ""
+            # 确定性零误报信号:folder 名里声明了 [tmdbid-N],但 Emby 实际绑的是另一个 N → 100% 是绑错
+            declared = tmdbid_cap.search(folder)
+            if declared and actual_tmdb and declared.group(1) != str(actual_tmdb):
+                out.append({"id": it.get("Id"), "emby_name": name, "folder_clean": tmdbid_re.sub("", folder).strip(),
+                            "folder": folder, "lib": lib, "type": typ,
+                            "tmdb": actual_tmdb, "declared_tmdb": declared.group(1),
+                            "has_poster": bool((it.get("ImageTags") or {}).get("Primary")),
+                            "score": 100, "reasons": ["folder 声明 tmdbid-%s 但 Emby 绑了 %s(确定绑错)" % (declared.group(1), actual_tmdb)]})
+                continue
             # 去掉 [tmdbid-X] 后缀 + (YYYY) 年份
             fc = tmdbid_re.sub("", folder)
             fc = year_re.sub("", fc).strip()
             if not fc: continue
-            name = it.get("Name") or ""
             folder_cn = set(cn_re.findall(fc))
             name_cn = set(cn_re.findall(name))
             if not folder_cn:
@@ -1094,17 +1180,35 @@ def system_health_summary():
     elif mem_pct >= 80:
         warnings.append({"level": "warn", "category": "mem",
                          "msg": "🧠 内存已用 %d%%" % mem_pct})
+    # 负载飙高 + D-state 进程:115 风控的最直接信号(铁律)
+    load = base.get("load") or {}
+    per_core = load.get("per_core")
+    if per_core is not None and per_core >= 1.5:
+        warnings.append({"level": "danger", "category": "load",
+                         "msg": "🔥 负载/核 %.2f(%s)— 可能 115 风控压挂载,查 D-state 进程" % (per_core, "/".join(str(x) for x in (load.get("avg") or [])))})
+    elif per_core is not None and per_core >= 1.0:
+        warnings.append({"level": "warn", "category": "load", "msg": "🔥 负载/核 %.2f — 偏高" % per_core})
+    if base.get("dstate"):
+        warnings.append({"level": "danger", "category": "dstate",
+                         "msg": "⛔ %d 个进程卡在 D-state(不可中断 IO,典型 115 挂载卡死): %s" % (
+                             len(base["dstate"]), ", ".join(base["dstate"][:3]))})
     # 115 挂载
     if not base.get("cd_ok"):
         warnings.append({"level": "danger", "category": "c115",
                          "msg": "📦 CloudDrive2 挂载异常 — 115 暂时不可用",
                          "action": "settings"})
-    # Docker 异常容器(非 Up 状态)
-    bad_containers = [c for c in (base.get("containers") or []) if not c.get("up")]
+    # Docker 异常容器:只报 Restarting / 非 0 退出(Exited (0) 多是刻意停的/一次性 job,报了是噪音 → 警告疲劳)
+    def _abnormal(c):
+        s = c.get("status", "")
+        if c.get("up"): return False
+        if "Restarting" in s: return True
+        m = re.search(r"Exited \((\d+)\)", s)
+        return bool(m and m.group(1) != "0")
+    bad_containers = [c for c in (base.get("containers") or []) if _abnormal(c)]
     if bad_containers:
         names = ", ".join(c["name"] for c in bad_containers[:5])
         warnings.append({"level": "warn", "category": "docker",
-                         "msg": "🐳 %d 个 Docker 容器非 Up: %s" % (len(bad_containers), names)})
+                         "msg": "🐳 %d 个容器异常退出/重启中: %s" % (len(bad_containers), names)})
     # 115 cookie 状态(从 CFG 查,不实际调 API 慢的)
     if not CFG.get("c115_cookie"):
         warnings.append({"level": "warn", "category": "c115",
@@ -1158,6 +1262,9 @@ def cleanup_empty_folders_async(tid, lib):
     cd_base = os.path.join(CD, m["folder"])
     if not os.path.isdir(cd_base):
         return {"err": "115 库目录不存在: " + cd_base}
+    # 挂载死时整库 folder 都会"看似没视频文件"→ 误判全是空 folder。探活失败直接拒绝。
+    if not _mount_alive():
+        return {"err": "115 挂载探测失败,拒绝扫空 folder(挂载死时会把所有 folder 误判为空)"}
     tops = []
     try:
         tops = sorted([t for t in os.listdir(cd_base) if os.path.isdir(os.path.join(cd_base, t))])
@@ -1314,6 +1421,10 @@ def cleanup_suggest_async(tid, lib, top=80, min_score=20, dimensions=None):
     cd_lib = os.path.join(CD, m["folder"])
     # 只在 size 维度被启用时才算 size(否则跳过 _folder_size_bytes 走的 walk,大库快很多)
     need_size = "size" in enabled
+    # size 维度要对整库 stat,挂载死时 stat 风暴会压挂载且全返 0 → 探活失败就别算 size
+    if need_size and not _mount_alive():
+        need_size = False
+        log("智能清理[%s]:115 挂载探测失败,跳过占空间统计(size 维度本次不计分)" % lib)
     for idx, i in enumerate(items):
         if task_is_cancelled(tid):
             break
@@ -1511,7 +1622,8 @@ def zhuigeng_gaps_summary_async(tid):
     copy_lines = []
     for r in rows:
         if "fmt" in r:
-            copy_lines.append("求 %s — %s" % (r["name"], r["fmt"]))
+            tag = (" [tmdb:%s]" % r["tmdb"]) if r.get("tmdb") else ""
+            copy_lines.append("求 %s%s — %s" % (r["name"], tag, r["fmt"]))
     log("追更缺集汇总: %d 部有缺/落后" % len(rows))
     return {"items": rows, "total": len(rows),
             "copy_text": "\n".join(copy_lines)}
@@ -1589,20 +1701,34 @@ def add_new_pipeline_async(tid, items, default_lib, save_to_lib_fn):
             }
         except Exception as e:
             report["libs_scanned"][lib] = {"err": str(e)}
-    # Phase 3:等 Emby 刮削(给海报检查时间)
-    if libs_list and not task_is_cancelled(tid):
-        task_set(tid, progress=len(items) + len(libs_list), status_text="等 Emby 刮削 8s…")
-        for _ in range(8):
-            if task_is_cancelled(tid): break
-            time.sleep(1)
-    # Phase 4:海报检查(过滤涉及库)
+    # Phase 3+4:轮询等刮削 + 海报检查合一。
+    # 旧实现固定 sleep 8s 远不够(strm 走代理刮削慢),导致没刮完的全被报"无海报"再诱导一键修(误导+加负载)。
+    # 改成:每 6s 拉一次涉及库的无海报数,连续两轮不再下降(刮削稳定)或封顶 ~60s 才定稿。
     if not task_is_cancelled(tid):
-        task_set(tid, progress=len(items) + len(libs_list) + 1, status_text="检查海报")
-        try:
-            np_all = list_noposter()
-            report["noposter"] = [x for x in np_all if x.get("lib") in affected_libs]
-        except Exception as e:
-            report["noposter_err"] = str(e)
+        np_affected = []
+        prev = None; stable = 0
+        for round_i in range(10):  # 最多 10×6s=60s
+            if task_is_cancelled(tid): break
+            task_set(tid, progress=len(items) + len(libs_list),
+                     status_text="等 Emby 刮削…(无海报 %s)" % (len(np_affected) if prev is not None else "?"))
+            for _ in range(6):
+                if task_is_cancelled(tid): break
+                time.sleep(1)
+            try:
+                np_all = list_noposter()
+                np_affected = [x for x in np_all if x.get("lib") in affected_libs]
+            except Exception as e:
+                report["noposter_err"] = str(e); break
+            cur = len(np_affected)
+            if prev is not None and cur >= prev:   # 不再下降 = 刮削基本稳定
+                stable += 1
+                if stable >= 2 or cur == 0:
+                    break
+            else:
+                stable = 0
+            prev = cur
+        report["noposter"] = np_affected
+        task_set(tid, progress=len(items) + len(libs_list) + 1, status_text="海报检查完成")
     # Phase 5:重复检查(只标涉及库的新 dup)
     if not task_is_cancelled(tid):
         task_set(tid, progress=len(items) + len(libs_list) + 2, status_text="检查重复")

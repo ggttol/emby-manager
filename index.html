@@ -351,7 +351,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
       <div class="row">
         <h2>🩺 NAS 健康</h2>
         <span style="flex:1"></span>
-        <label class="muted" style="white-space:nowrap"><input type="checkbox" id="sysAutoRefresh" checked onchange="toggleSysAuto()"> 每 30s 自动刷新</label>
+        <label class="muted" style="white-space:nowrap"><input type="checkbox" id="sysAutoRefresh" onchange="toggleSysAuto()"> 每 30s 自动刷新</label>
         <button class="btn ghost" onclick="loadSystem()">立即刷新</button>
       </div>
       <div id="sysOut" class="muted">加载中…</div>
@@ -406,7 +406,7 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   <section id="settings" class="hide">
     <div class="card"><h2>⚙️ 设置</h2><div style="max-width:540px">
       <h2 style="font-size:14px;margin-top:6px">工具登录密码</h2>
-      <div class="row"><input id="setPw" type="password" placeholder="新登录密码" style="flex:1"><button class="btn" onclick="saveConfig('pw')">改密码</button></div>
+      <div class="row"><button class="btn" onclick="chPwModal()">🔑 修改登录密码</button><span class="muted" style="font-size:12px">改密需输旧密码(防他人借会话改密)</span></div>
       <h2 style="font-size:14px;margin-top:18px">Emby 连接</h2>
       <div class="row" style="margin-bottom:8px"><span class="muted" style="width:80px">地址</span><input id="setUrl" style="flex:1" placeholder="http://127.0.0.1:8096/emby"></div>
       <div class="row" style="margin-bottom:8px"><span class="muted" style="width:80px">API Key</span><input id="setKey" style="flex:1"></div>
@@ -1357,20 +1357,22 @@ async function start(){
     const icon = l.type === 'tvshows' ? '📺' : l.type === 'movies' ? '🎬' : '📁';
     return `<div class="lib" style="cursor:pointer" onclick="tab('manage');setTimeout(()=>{const sel=document.querySelector('#mgLib');if(sel){sel.value=${JSON.stringify(l.name)};loadItems();}},80)" title="点击跳到管理"><div class="n">${icon} ${esc(l.name)}</div><div class="c">${l.count}</div><div class="s">${l.sub}</div></div>`;
   }).join("");
-  // v3:excluded 库列表
+  // v3:excluded 库列表(先删旧的,否则每次 start() insertAdjacentHTML 会堆重复链接)
+  document.querySelector('#excludedHint')?.remove();
   if (d.excluded && d.excluded.length){
     $("#libGrid").insertAdjacentHTML('afterend',
-      `<p class="muted" style="margin-top:10px;text-align:center"><a href="#" onclick="event.preventDefault();showExcluded()" style="color:var(--blue)">ℹ️ ${d.excluded.length} 个库被忽略 →</a></p>`);
+      `<p id="excludedHint" class="muted" style="margin-top:10px;text-align:center"><a href="#" onclick="event.preventDefault();showExcluded()" style="color:var(--blue)">ℹ️ ${d.excluded.length} 个库被忽略 →</a></p>`);
     window._excluded = d.excluded;
   }
   const opts=LIBS.map(l=>`<option>${esc(l.name)}</option>`).join("");
   $("#scanLib").innerHTML=opts;$("#mgLib").innerHTML=opts;
-  // v3:一次性 init B4 shell + TaskCenter + health 卡
+  // v3:一次性 init B4 shell + TaskCenter
   if (!window._v3Init){
     window._v3Init = true;
     initShell();
-    loadHealthCard();
   }
+  // 健康卡每次 start() 都刷(Emby 掉线/115 cookie 过期/挂载死要能及时变红,不能只在首屏快照)
+  loadHealthCard();
   // 仪表盘待办(每次 start 都刷,确保数据新)
   loadDashTodo();
 }
@@ -1439,14 +1441,15 @@ async function loadHealthCard(){
     const r = await fetch('/health',{credentials:'same-origin'}).then(x=>x.json());
     const dot = (b) => b ? '<span style="color:var(--green)">●</span>' : '<span style="color:var(--red)">○</span>';
     const hrs = Math.floor((r.uptime||0)/3600), mins = Math.floor(((r.uptime||0)%3600)/60);
-    const card = `<div class="card" id="healthCard" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:13px">
+    const card = `<div class="card" style="display:flex;gap:18px;flex-wrap:wrap;align-items:center;font-size:13px">
       <span>${dot(r.emby_online)} Emby</span>
       <span>${dot(r.c115_cookie_set)} 115 cookie</span>
       <span>${dot(r.cd_mounted)} CloudDrive 挂载</span>
       <span class="muted">v${UI.esc(r.version||'?')} · 已运行 ${hrs}h${mins}m</span>
     </div>`;
-    const dash = document.querySelector('#dash');
-    if (dash && !document.querySelector('#healthCard')) dash.insertAdjacentHTML('afterbegin', card);
+    // 写进固定占位容器(可重复刷新不堆叠),取代之前 afterbegin + _v3Init 一次性快照
+    const slot = document.querySelector('#dashHealth');
+    if (slot) slot.innerHTML = card;
   } catch (e) {}
 }
 
@@ -1952,10 +1955,11 @@ async function loadSystem(){
   h+=`<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
     <div class="lib"><div class="n">内存</div><div class="s">${d.mem.used}/${d.mem.total} GB · 可用 ${d.mem.avail}G</div>${bar(d.mem.pct,mc)}<div class="s" style="margin-top:4px">已用 ${d.mem.pct}%</div></div>
     <div class="lib"><div class="n">Swap</div><div class="s">${d.swap.used}/${d.swap.total} GB</div>${bar(d.swap.pct,'var(--blue)')}<div class="s" style="margin-top:4px">已用 ${d.swap.pct}%</div></div>
-    <div class="lib"><div class="n">磁盘 /volume1</div><div class="s">空闲 ${d.disk.free_tb}/${d.disk.total_tb} TB</div>${bar(d.disk.pct,d.disk.pct>90?'var(--red)':'var(--green)')}<div class="s" style="margin-top:4px">已用 ${d.disk.pct}%</div></div>
-    <div class="lib"><div class="n">115 挂载</div><div class="c" style="font-size:20px;color:${d.cd_ok?'var(--green)':'var(--red)'}">${d.cd_ok?'● 正常':'○ 异常'}</div></div></div>`;
+    <div class="lib"><div class="n">磁盘</div><div class="s">空闲 ${d.disk.free_tb}/${d.disk.total_tb} TB</div>${bar(d.disk.pct,d.disk.pct>90?'var(--red)':'var(--green)')}<div class="s" style="margin-top:4px">已用 ${d.disk.pct}%</div></div>
+    ${d.load&&d.load.avg?`<div class="lib"><div class="n">负载(1/5/15min)</div><div class="s">${d.load.avg.join(' / ')} · ${d.load.ncpu} 核</div><div class="c" style="font-size:18px;color:${d.load.per_core>=1.5?'var(--red)':d.load.per_core>=1?'var(--gold)':'var(--green)'}">${d.load.per_core!=null?d.load.per_core+' /核':'—'}</div></div>`:''}
+    <div class="lib"><div class="n">115 挂载</div><div class="c" style="font-size:20px;color:${d.cd_ok?'var(--green)':'var(--red)'}">${d.cd_ok?'● 正常':'○ 异常'}</div>${d.dstate&&d.dstate.length?`<div class="s" style="color:var(--red)">⛔ ${d.dstate.length} 个 D-state 卡死</div>`:''}</div></div>`;
   h+=`<div class="card" style="margin-top:12px"><h2>Docker 容器</h2>`+d.containers.map(c=>`<div class="row" style="padding:4px 0"><span class="badge ${c.up?'g':'warn'}">${c.up?'运行':'停止'}</span>${esc(c.name)} <span class="muted">${esc(c.status)}</span></div>`).join("")+`</div>`;
-  h+=`<div class="card"><h2>占内存最多的进程</h2>`+d.procs.map(p=>`<div class="row" style="padding:3px 0"><span class="badge">${p.rss_mb} MB</span><span class="muted">${p.mem}%</span> ${esc(p.cmd)}</div>`).join("")+`</div>`;
+  h+=`<div class="card"><h2>占内存最多的进程</h2>`+d.procs.map(p=>`<div class="row" style="padding:3px 0"><span class="badge">${p.rss_mb} MB</span><span class="muted">${p.mem}%</span>${p.stat&&p.stat.includes('D')?' <span class="badge warn" title="不可中断 IO,可能卡 115">D</span>':''} ${esc(p.cmd)}</div>`).join("")+`</div>`;
   o.innerHTML=h;
   // 顺带刷"最近任务"卡
   loadRecentTasks();
@@ -2294,18 +2298,27 @@ function renderLogList(){
     const ts = e.ts ? new Date(e.ts*1000).toLocaleString('zh-CN', {hour12:false}) : '?';
     const op = e.op || '?';
     const p = e.payload || {};
+    const opLabel = {move:'移动',delete:'删除',smart_archive:'智能归档(删源)',replace:'全替换(删旧版)',rebind:'改绑 tmdbid'}[op]||op;
     const desc = op === 'move'
-      ? `<b>${esc(p.folder||'?')}</b> · <span class="badge">${esc(p.from||'?')}</span> → <span class="badge">${esc(p.to||'?')}</span>`
+      ? `<b>${esc(p.folder||'?')}</b> · 移动 <span class="badge">${esc(p.from||'?')}</span> → <span class="badge">${esc(p.to||'?')}</span>`
       : op === 'delete'
         ? `<b>${esc(p.folder||'?')}</b> · 库 <span class="badge">${esc(p.lib||'?')}</span> 删除`
-        : `<span class="muted">${esc(JSON.stringify(p))}</span>`;
-    const action = op === 'move'
-      ? `<button class="btn ghost" onclick='doUndo(${JSON.stringify(e.id)})'>↩️ 撤销</button>`
-      : `<span class="muted" style="font-size:11px">删除已进 115 回收站,自行还原</span>`;
+        : op === 'smart_archive'
+          ? `<b>${esc(p.folder||'?')}</b> · 归档删源(${esc(p.from||'?')}→${esc(p.to||'?')})`
+          : op === 'replace'
+            ? `<b>${esc(p.lose_folder||p.folder||'?')}</b> · 全替换删旧版(库 ${esc(p.lib||'?')})`
+            : op === 'rebind'
+              ? `<b>${esc(p.name||p.id||'?')}</b> · tmdbid ${esc(p.old_tmdb||'无')} → ${esc(p.new_tmdb||'?')}`
+              : `<span class="muted">${esc(JSON.stringify(p))}</span>`;
+    const action = e.undone
+      ? `<span class="badge" style="opacity:.6">已撤销</span>`
+      : op === 'move'
+        ? `<button class="btn ghost" onclick='doUndo(${JSON.stringify(e.id)})'>↩️ 撤销</button>`
+        : `<span class="muted" style="font-size:11px">删除已进 115 回收站,自行还原</span>`;
     return `<div class="item" style="padding:10px 4px">
       <div class="main">
         <div style="font-size:13px">${desc}</div>
-        <div class="meta" style="margin-top:3px">${esc(ts)} · op:${esc(op)} · id:${esc(e.id||'')}</div>
+        <div class="meta" style="margin-top:3px">${esc(ts)} · ${esc(opLabel)} · id:${esc(e.id||'')}</div>
       </div>
       ${action}
     </div>`;
@@ -2358,7 +2371,7 @@ async function loadUsers(){
     <div class="nm">${esc(u.name)} ${u.admin?'<span class="badge">管理员</span>':''} ${u.disabled?'<span class="badge warn">已停用</span>':''}</div>
     <div class="meta">同时播放: ${sl?sl+' 路':'不限'} · 限速: ${br?br+' Mbps':'不限'} · 最后活跃: <span class="muted">${esc(act||'未记录')}</span></div></div>
     <label class="muted" style="font-size:11px">同时播放<input id="ms${u.id}" type="number" min="0" value="${sl}" style="width:54px;margin-left:3px" title="同时能开几路播放,0=不限"></label>
-    <label class="muted" style="font-size:11px">限速Mbps<input id="br${u.id}" type="number" min="0" step="0.5" value="${br}" style="width:60px;margin-left:3px" title="远程串流码率上限,0=不限。参考:1080p≈8,4K≈25"></label>
+    <label class="muted" style="font-size:11px">限速Mbps<input id="br${u.id}" type="number" min="0" step="0.5" value="${br}" style="width:60px;margin-left:3px" title="远程串流码率上限,0=不限。参考:1080p≈8,4K≈25。⚠️ 设得低于源码率会触发实时转码吃 NAS CPU,别设太狠"></label>
     <button class="btn ghost" onclick="updateUser('${u.id}')">存</button>
     <button class="btn ghost" onclick="updateUser('${u.id}',${u.disabled?0:1})">${u.disabled?'启用':'停用'}</button>
     ${u.admin?'':`<button class="btn danger" onclick="delUser('${u.id}','${esc(u.name)}')">删</button>`}</div>`;
@@ -2368,7 +2381,13 @@ async function addUser(){
   const name=$("#nuName").value.trim(),pw=$("#nuPw").value;
   if(!name){toast("填用户名");return;}
   const r=await api("/api/users/new",{method:"POST",body:JSON.stringify({name,pw})});
-  if(r.err)toast("出错: "+r.err);else{toast("已加用户 "+r.name);$("#nuName").value="";$("#nuPw").value="";loadUsers();}
+  if(r.err){toast("出错: "+r.err);return;}
+  // 建号成功弹可复制信息(账号+密码+登录地址),方便直接发给亲戚 —— 否则密码作者要自己记
+  const loginUrl = location.origin.replace(/:\d+$/, ':8096');
+  await UI.modal.alert({title:'✅ 用户已创建',
+    body:`Emby 账号:${esc(name)}\n登录密码:${pw||'(未设,首次登录可空)'}\nEmby 地址:${loginUrl}\n\n复制以上发给 TA 即可登录。`,
+    copyable:true});
+  $("#nuName").value="";$("#nuPw").value="";loadUsers();
 }
 async function updateUser(id,toggleDisabled){
   const body={id};
@@ -2378,7 +2397,8 @@ async function updateUser(id,toggleDisabled){
     const bl=$("#br"+id); if(bl) body.bitrate_mbps=bl.value;
   }
   const r=await api("/api/users/update",{method:"POST",body:JSON.stringify(body)});
-  if (r.ok) UI.toast('已保存', {type:'ok', ms:1500});
+  if (r.ok && r.warn) UI.toast('⚠️ '+r.warn, {type:'warn', ms:6000});  // 回读发现未生效(如免费版不支持)
+  else if (r.ok) UI.toast('已保存', {type:'ok', ms:1500});
   else UI.toast('失败' + (r.err?': '+r.err:''), {type:'error'});
   loadUsers();
 }
@@ -2728,7 +2748,7 @@ function showWizardReport(rep){
 
   // 3. 海报检查
   html += `<div class="card" style="margin-bottom:12px"><h2 style="font-size:14px">🖼️ 涉及库的无海报项 (${np.length})`;
-  if (np.length) html += ` <button class="btn ghost" onclick="UI.tasks.openDrawer&&UI.tasks.openDrawer();posterFromWizard(${JSON.stringify(np.map(x=>x.id)).replace(/"/g,'&quot;')})">一键全部自动修</button>`;
+  if (np.length) html += ` <button class="btn ghost" onclick="UI.tasks.openDrawer&&UI.tasks.openDrawer();posterFromWizard(${JSON.stringify(np.map(x=>({id:x.id,type:x.type}))).replace(/"/g,'&quot;')})">一键全部自动修</button>`;
   html += `</h2><div style="font-size:13px;max-height:200px;overflow:auto">`;
   if (!np.length) html += '<p class="muted">✓ 涉及库的所有项目都有海报</p>';
   else np.slice(0, 30).forEach(x=>{
@@ -2888,16 +2908,24 @@ function wzSkipDup(gi){
   UI.toast('保留两份(以后可在去重 tab 手动处理)', {type:'info'});
 }
 
-async function posterFromWizard(ids){
-  if (!ids || !ids.length){UI.toast('没有要修的',{type:'info'});return;}
-  // 分剧/电影两批(后端按 type)— 这里默认全 Series(已知偏 series 多)
-  if(!(await UI.modal.confirm({title:'批量自动修海报',body:`将对 <b>${ids.length}</b> 个项目按"名字含原文件夹关键词 + 有图"自动匹配 TMDb 候选。<br>不确定的项目跳过(不会乱绑)。约 ${Math.ceil(ids.length*0.7)} 秒。`,okText:'开始'})))return;
+async function posterFromWizard(items){
+  if (!items || !items.length){UI.toast('没有要修的',{type:'info'});return;}
+  // 按 type 分两批:电影必须用 Movie 搜,否则当 Series 搜永远命中不了(review)
+  const seriesIds = items.filter(x=>x.type!=='Movie').map(x=>x.id);
+  const movieIds  = items.filter(x=>x.type==='Movie').map(x=>x.id);
+  const total = seriesIds.length + movieIds.length;
+  if(!(await UI.modal.confirm({title:'批量自动修海报',body:`将对 <b>${total}</b> 个项目(剧 ${seriesIds.length} / 电影 ${movieIds.length})按"名字含原文件夹关键词 + 有图"自动匹配 TMDb 候选。<br>不确定的项目跳过(不会乱绑)。`,okText:'开始'})))return;
   try{
-    const r = await api('/api/fixposter_batch',{method:'POST',body:JSON.stringify({ids,type:'Series',async:true})});
-    if(r.tid) UI.tasks.start(r.tid,{label:'海报批量自动('+ids.length+')',onDone:t=>{
-      const x = t.result || {};
-      UI.toast(`海报修复 ✓${x.ok_count||0}/共${x.total||0}`,{type:(x.ok_count||0)?'ok':'warn',ms:5000});
-    }});
+    const batches = [];
+    if(seriesIds.length) batches.push(['Series', seriesIds]);
+    if(movieIds.length)  batches.push(['Movie', movieIds]);
+    for(const [typ, ids] of batches){
+      const r = await api('/api/fixposter_batch',{method:'POST',body:JSON.stringify({ids,type:typ,async:true})});
+      if(r.tid) UI.tasks.start(r.tid,{label:`海报批量自动 ${typ}(${ids.length})`,onDone:t=>{
+        const x = t.result || {};
+        UI.toast(`${typ} 海报 ✓${x.ok_count||0}/共${x.total||0}`,{type:(x.ok_count||0)?'ok':'warn',ms:5000});
+      }});
+    }
   }catch(e){UI.toast('启动失败:'+e,{type:'error'});}
 }
 

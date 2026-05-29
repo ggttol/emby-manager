@@ -93,10 +93,10 @@ def c115_parse_url(url, pwd=None):
     return share, rc
 
 
-def c115_snap(req_fn, share_code, receive_code):
+def c115_snap(req_fn, share_code, receive_code, offset=0, limit=1000):
     return req_fn("/share/snap", params={
         "share_code": share_code, "receive_code": receive_code or "",
-        "cid": 0, "offset": 0, "limit": 1000,
+        "cid": 0, "offset": offset, "limit": limit,
     })
 
 
@@ -116,8 +116,22 @@ def c115_snap_full(req_fn, url, pwd):
     if not snap.get("state"):
         return {"ok": False, "err": snap.get("error") or snap.get("msg") or "snap 失败", "share": share, "rc": rc}
     d = snap.get("data") or {}
-    items = d.get("list") or []
+    items = list(d.get("list") or [])
     info = d.get("shareinfo") or {}
+    # 分页:根层文件数 > 1000 时 snap 只返第一页 → 整季打包/合集会静默缺集。
+    # 循环把后续页取完(每页间 sleep 0.5s 保持风控友好),封顶 20 页(2 万项)兜底防失控。
+    total_n = info.get("file_count") or info.get("count") or 0
+    try: total_n = int(total_n)
+    except Exception: total_n = 0
+    page = 1
+    while len(items) < total_n and len(d.get("list") or []) >= 1000 and page < 20:
+        import time as _t; _t.sleep(0.5)
+        nxt = c115_snap(req_fn, share, rc, offset=len(items), limit=1000)
+        if not nxt.get("state"): break
+        d = nxt.get("data") or {}
+        chunk = d.get("list") or []
+        if not chunk: break
+        items.extend(chunk); page += 1
     files = []
     for it in items:
         # 115 share/snap:文件用 fid;文件夹无 fid,自身 id 在 cid

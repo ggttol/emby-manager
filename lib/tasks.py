@@ -8,6 +8,10 @@ from lib.logger import logger
 TASKS = {}  # tid -> {tid, kind, status, progress, total, started, ended, result, err, cancelled, status_text}
 TASKS_LOCK = threading.Lock()
 TASKS_MAX = 100
+# 全局并发上限:多个全库 walk / 扫描 / c115 批量同时起会压垮 NAS、撞 115 风控。
+# 超额的任务在 worker 线程里阻塞排队(状态先标"排队中"),不拒绝、不丢。家用单管理员 3 路足够。
+TASK_CONCURRENCY = 3
+_TASK_SLOTS = threading.BoundedSemaphore(TASK_CONCURRENCY)
 
 
 def task_new(kind):
@@ -56,6 +60,10 @@ def run_async(kind, fn, *args, **kwargs):
     """fn(tid, *args, **kwargs) 返回 result;tid 注入第一个参数,fn 内部可用 task_set / task_is_cancelled。"""
     tid = task_new(kind)
     def wrapper():
+        # 超过并发上限就在这里排队(不占 HTTP 线程,tid 已返回前端);取不到槽时标"排队中"
+        if not _TASK_SLOTS.acquire(blocking=False):
+            task_set(tid, status_text="排队中(并发已满)…")
+            _TASK_SLOTS.acquire()
         try:
             result = fn(tid, *args, **kwargs)
             with TASKS_LOCK:
@@ -69,5 +77,8 @@ def run_async(kind, fn, *args, **kwargs):
                 t = TASKS.get(tid)
                 if t:
                     t["status"] = "error"; t["ended"] = time.time(); t["err"] = str(e)
+        finally:
+            try: _TASK_SLOTS.release()
+            except Exception: pass
     threading.Thread(target=wrapper, daemon=True, name="task-%s-%s" % (kind, tid)).start()
     return tid
