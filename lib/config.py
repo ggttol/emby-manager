@@ -25,7 +25,7 @@ _DEFAULTS = {"password_hash": "", "emby_url": "http://127.0.0.1:8096/emby",
              "cd": _DEF_CD, "strm": _DEF_STRM, "docker": _DEF_DOCKER}
 WEAK_PWS = {"gaotao369", "celeron", "123456", "12345678", "password", "admin", "qwerty", "111111", "abc123"}
 
-CURRENT_SCHEMA = 4
+CURRENT_SCHEMA = 5
 
 CFG = {}        # 占位,load_cfg() 填充
 CFG_LOCK = threading.RLock()  # 保护 CFG 并发读改写
@@ -142,8 +142,26 @@ def _mig_to_v4():
     if "username" not in CFG:
         CFG["username"] = "admin"
 
+def _mig_to_v5():
+    """v4 → v5:加 autostrm(CD2 webhook 自动生成 strm)配置。
+    全部默认安全关闭:auto_strm_enabled=False + 密钥空 → webhook 即使被打也 403/忽略,
+    对现有手动扫描零影响。密钥**不放 _DEFAULTS**(空=功能关,要用户在设置页主动配)。"""
+    from lib.logger import logger
+    defaults = {
+        "cd2_webhook_secret": "",          # 空 = 功能关;webhook 没密钥一律 403
+        "cd2_mount_prefix": "/CloudNAS/CloudDrive",  # CD2 命名空间前缀,反映射时剥掉(实测校正)
+        "auto_strm_enabled": False,        # 总开关
+        "auto_strm_fullauto": False,       # True=无 tmdbid 文件夹也生成 strm 并尝试自动绑定
+        "auto_strm_debounce_sec": 8,       # 防抖静默窗口(秒):一个 burst 合并成一次生成
+    }
+    added = [k for k in defaults if k not in CFG]
+    for k, v in defaults.items():
+        CFG.setdefault(k, v)
+    if added:
+        logger.info("schema v5: 加 autostrm 配置 %s(默认全关,在设置页开启)", added)
+
 # 注册表:版本 → 升级函数。新加字段往 _DEFAULTS 加;改语义在这里写新 migration 函数。
-MIGRATIONS = [(2, _mig_to_v2), (3, _mig_to_v3), (4, _mig_to_v4)]
+MIGRATIONS = [(2, _mig_to_v2), (3, _mig_to_v3), (4, _mig_to_v4), (5, _mig_to_v5)]
 
 def migrate_cfg():
     """按 schema_version 顺序跑所有 pending migration,完整迁移后写回。"""

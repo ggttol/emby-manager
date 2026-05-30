@@ -276,5 +276,26 @@ class TestOverlapGuard(_SchedulerTestBase):
         self.assertEqual(u["name"], "renamed")     # name 改了
 
 
+class TestMonitorIncrementalKind(_SchedulerTestBase):
+    """autostrm 增量补扫调度 kind 注册 + fn 签名(_fire 只传 tid)。"""
+
+    def test_monitor_incremental_registered(self):
+        from lib.business import SCHEDULE_KINDS
+        self.assertIn("monitor_incremental", SCHEDULE_KINDS)
+        self.assertTrue(callable(SCHEDULE_KINDS["monitor_incremental"]["fn"]))
+
+    def test_monitor_incremental_fn_arity_is_tid_only(self):
+        # _fire 调 run_async("schedule:"+kind, fn) → fn(tid)。监控 fn 只能收 tid(其余读 CFG)。
+        import inspect
+        from lib.business import monitor_incremental_async
+        self.assertEqual(list(inspect.signature(monitor_incremental_async).parameters), ["tid"])
+
+    def test_can_add_schedule_with_kind(self):
+        from lib import scheduler
+        s = scheduler.add_schedule("夜间增量补扫", "monitor_incremental",
+                                   {"mode": "daily", "hour": 4, "minute": 0})
+        self.assertEqual(s["kind"], "monitor_incremental")
+
+
 if __name__ == "__main__":
     unittest.main()

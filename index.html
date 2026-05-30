@@ -476,6 +476,20 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
         <span id="setTPOut" class="muted" style="margin-left:6px"></span>
       </div>
 
+      <h2 style="font-size:14px;margin-top:18px">🛰️ 自动 strm(CD2 webhook 实时入库)</h2>
+      <div class="muted" style="font-size:12px;margin:2px 0 6px">CloudDrive2 挂载有新文件 → 自动生成 strm 并通知 Emby 入库。需在 CD2 配置 webhook 指向下方地址。<b style="color:#34d399">改完即时生效,无需重启。</b></div>
+      <div class="row" style="margin-bottom:6px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="setAsEnabled"> 启用自动 strm(总开关)</label></div>
+      <div class="row" style="margin-bottom:6px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="setAsFullauto"> 全自动入库(无 tmdbid 文件夹也生成 + 自动绑 TMDb;关=只处理带 tmdbid / 已知文件夹)</label></div>
+      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">CD2 挂载前缀</span><input id="setAsPrefix" style="flex:1" placeholder="/CloudNAS/CloudDrive"></div>
+      <div class="muted" style="font-size:11px;margin:0 0 6px">webhook 推送的 source_file 里、库名前面那段(剥掉它才能定位到 库/路径)。配错会"未映射",见下方状态。</div>
+      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">webhook 密钥</span><input id="setAsSecret" placeholder="留空=关闭功能;已设留空=不改" style="flex:1" oninput="buildAsUrl()"><button class="btn ghost" onclick="genAsSecret()">🎲 生成</button></div>
+      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">防抖窗口</span><input id="setAsDebounce" type="number" min="1" max="120" style="width:80px"><span class="muted" style="font-size:11px;margin-left:6px">秒 — 一批文件合并成一次生成(剧集包别每集刷一次)</span></div>
+      <div class="row" style="margin-bottom:6px"><button class="btn" onclick="saveAutostrm()">保存</button><span id="setAsOut" class="muted" style="margin-left:6px"></span></div>
+      <div class="muted" style="font-size:12px;margin:8px 0 4px">把这条 URL 填进 CD2 的 <code>webhook.toml</code>(<code>[file_system_watcher]</code> 的 url),CD2 与本工具同机:</div>
+      <div class="row" style="margin-bottom:6px"><input id="setAsWebhookUrl" readonly style="flex:1;font-family:monospace;font-size:11px" onclick="this.select()"><button class="btn ghost" onclick="copyAsUrl()">复制</button></div>
+      <div class="row" style="margin-top:10px"><button class="btn ghost" onclick="loadAutostrmStatus()">🔄 刷新状态</button><span id="setAsStatus" class="muted" style="margin-left:6px"></span></div>
+      <div id="setAsStatusBox" style="margin-top:6px;font-size:12px"></div>
+
       <h2 style="font-size:14px;margin-top:18px">存储路径(高级,换机器才需改)</h2>
       <div class="muted" style="font-size:12px;margin:2px 0 6px">这三个路径决定工具去哪读写 strm / 115 文件 / 调 docker。默认是群晖布局。<b style="color:var(--warn)">填错会让扫描/删除指向错地方,务必准确;改完要重启服务才生效。</b></div>
       <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">115 挂载根</span><input id="setCd" style="flex:1" placeholder="/volume1/docker/clouddrive2/CloudNAS/CloudDrive"></div>
@@ -2581,6 +2595,16 @@ async function loadConfig(){
   }
   // 存储路径
   if($("#setCd")){ $("#setCd").value=d.cd||''; $("#setStrm").value=d.strm||''; $("#setDocker").value=d.docker||''; }
+  // autostrm
+  if($("#setAsEnabled")){
+    $("#setAsEnabled").checked = !!d.auto_strm_enabled;
+    $("#setAsFullauto").checked = !!d.auto_strm_fullauto;
+    $("#setAsPrefix").value = d.cd2_mount_prefix || '/CloudNAS/CloudDrive';
+    $("#setAsDebounce").value = (d.auto_strm_debounce_sec!=null ? d.auto_strm_debounce_sec : 8);
+    const sec=$("#setAsSecret");
+    sec.placeholder = d.cd2_webhook_secret_set ? '已设置 — 留空=不改;输新值覆盖' : '留空=关闭功能;建议随机串';
+    buildAsUrl();
+  }
   // 粘 cookie → 立即(不写 CFG)调 test_candidate 校验
   const ck = $("#setC115Ck");
   if (ck && !ck._pasteWired){
@@ -2611,6 +2635,63 @@ async function saveConfig(which){
   if(which==='c115'){$("#setC115Ck").value="";toast("115 Cookie 已保存");loadConfig();}
   else if(which==='c115cids'){toast("库 cid 映射已保存");}
   else{$("#setOut").textContent=(r.emby&&r.emby.online)?`✓ 已保存,Emby 在线(${esc(r.emby.name)})`:"已保存,但 Emby 连接测试失败,检查地址/Key";start();}
+}
+// ===== autostrm(自动 strm)=====
+function buildAsUrl(){
+  const el=$("#setAsWebhookUrl"); if(!el) return;
+  const sec=($("#setAsSecret").value||'').trim();
+  const key=sec || '你设置的密钥';
+  el.value = `${location.origin}/api/cd2/webhook?key=${key}`;
+}
+function genAsSecret(){
+  const a=new Uint8Array(24); crypto.getRandomValues(a);
+  const hex=Array.from(a).map(b=>b.toString(16).padStart(2,'0')).join('');
+  $("#setAsSecret").value=hex; buildAsUrl();
+}
+function copyAsUrl(){
+  const el=$("#setAsWebhookUrl"); el.select();
+  navigator.clipboard?.writeText(el.value).then(()=>toast('已复制 webhook URL')).catch(()=>toast('请手动复制'));
+}
+async function saveAutostrm(){
+  const body={
+    auto_strm_enabled: $("#setAsEnabled").checked,
+    auto_strm_fullauto: $("#setAsFullauto").checked,
+    cd2_mount_prefix: $("#setAsPrefix").value.trim() || '/CloudNAS/CloudDrive',
+    auto_strm_debounce_sec: parseInt($("#setAsDebounce").value,10)||8,
+  };
+  const sec=($("#setAsSecret").value||'').trim();
+  if(sec) body.cd2_webhook_secret=sec;   // 留空 = 不改(不覆盖已设密钥)
+  const out=$("#setAsOut"); out.textContent='保存中…';
+  try{
+    const r=await api("/api/config",{method:"POST",body:JSON.stringify(body)});
+    out.innerHTML='<span class="badge g">✓ 已保存</span>';
+    $("#setAsSecret").value='';   // 清空输入框(已写后端)
+    loadConfig();
+  }catch(e){ out.innerHTML=`<span class="badge warn">✗ ${esc(String(e))}</span>`; }
+}
+async function loadAutostrmStatus(){
+  const box=$("#setAsStatusBox"), st=$("#setAsStatus");
+  st.innerHTML='<span class="spin"></span> 加载…';
+  let d; try{ d=await api("/api/autostrm/status"); }catch(e){ st.innerHTML=`<span class="badge warn">✗ ${esc(String(e))}</span>`; return; }
+  st.innerHTML = d.enabled
+    ? `<span class="badge g">● 已启用</span>${d.fullauto?' <span class="badge">全自动</span>':''} 待生成 ${d.pending_gen} · 待匹配 ${d.pending_match}${d.dropped?` · <span class="badge warn">丢弃 ${d.dropped}</span>`:''}`
+    : '<span class="badge warn">○ 未启用</span>';
+  const fmt=ts=>new Date(ts*1000).toLocaleTimeString();
+  let h='';
+  if((d.recent||[]).length){
+    h+='<div style="margin-top:6px"><b>近期处理</b></div>';
+    h+=d.recent.slice(0,12).map(r=>`<div class="muted" style="font-family:monospace">${fmt(r.ts)} [${esc(r.lib)}] ${esc(r.top)} ${r.new_count?('+'+r.new_count):''} ${esc(r.match||'')}${r.skipped?(' ·'+esc(r.skipped)):''}${r.err?(' ·'+esc(r.err)):''}</div>`).join('');
+  }
+  if((d.unmatched||[]).length){
+    h+='<div style="margin-top:6px;color:var(--warn)"><b>未自动匹配('+d.unmatched.length+')</b> — 去 🖼️ 海报修复 手动绑</div>';
+    h+=d.unmatched.slice(0,20).map(u=>`<div class="muted" style="font-family:monospace">[${esc(u.lib)}] ${esc(u.top)}${u.name?(' → '+esc(u.name)):''}</div>`).join('');
+  }
+  if((d.unmapped||[]).length){
+    h+='<div style="margin-top:6px;color:var(--warn)"><b>未映射事件('+d.unmapped.length+')</b> — CD2 挂载前缀可能配错,对照下方实际路径改上面的"CD2 挂载前缀"</div>';
+    h+=d.unmapped.slice(0,8).map(u=>`<div class="muted" style="font-family:monospace">${esc(u.source_file)}</div>`).join('');
+  }
+  if(!h) h='<div class="muted">暂无记录(还没收到 webhook 事件)</div>';
+  box.innerHTML=h;
 }
 function _autoCidApply(r){
   if(!r.ok){$("#setCidOut").innerHTML=`<span class="badge warn">${esc(r.err||'失败')}</span>`;return;}

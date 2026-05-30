@@ -351,5 +351,67 @@ class TaskTests(unittest.TestCase):
         self.assertIn("err", b)
 
 
+# ============================================================
+# 12) CD2 webhook:免登录但密钥保护,绝不走 _auth/_csrf
+# ============================================================
+class Cd2WebhookTests(unittest.TestCase):
+    SECRET = "test_webhook_secret_abc123"
+
+    def setUp(self):
+        self._saved_secret = CFG.get("cd2_webhook_secret")
+        self._saved_enabled = CFG.get("auto_strm_enabled")
+        CFG["cd2_webhook_secret"] = self.SECRET
+        CFG["auto_strm_enabled"] = True
+
+    def tearDown(self):
+        if self._saved_secret is None: CFG.pop("cd2_webhook_secret", None)
+        else: CFG["cd2_webhook_secret"] = self._saved_secret
+        if self._saved_enabled is None: CFG.pop("auto_strm_enabled", None)
+        else: CFG["auto_strm_enabled"] = self._saved_enabled
+
+    def _payload(self):
+        return {"data": [{"action": "create", "is_dir": False,
+                          "source_file": "/CloudNAS/CloudDrive/电影/片 (2024)/a.mkv"}]}
+
+    def test_no_secret_403(self):
+        # 不带 key,且不带任何 cookie/csrf → 直接 403(密钥层,不是 401 未登录)
+        s, h, b = req("POST", "/api/cd2/webhook", self._payload())
+        self.assertEqual(s, 403)
+        self.assertEqual(b.get("err"), "forbidden")
+
+    def test_wrong_secret_403(self):
+        s, h, b = req("POST", "/api/cd2/webhook?key=WRONG", self._payload())
+        self.assertEqual(s, 403)
+
+    def test_correct_secret_but_disabled_200_ignored(self):
+        CFG["auto_strm_enabled"] = False
+        s, h, b = req("POST", "/api/cd2/webhook?key=" + self.SECRET, self._payload())
+        self.assertEqual(s, 200)
+        self.assertEqual(b.get("ignored"), "disabled")
+
+    def test_correct_secret_enabled_200_ok(self):
+        # 正确密钥 + 启用 → 200 ok(emby 离线时 fetch_libs 空 → queued 可能 0,但路由通)
+        s, h, b = req("POST", "/api/cd2/webhook?key=" + self.SECRET, self._payload())
+        self.assertEqual(s, 200)
+        self.assertTrue(b.get("ok"))
+        self.assertIn("queued", b)
+
+    def test_secret_via_header(self):
+        c = HTTPConnection("127.0.0.1", SERVER_PORT, timeout=10)
+        c.request("POST", "/api/cd2/webhook",
+                  json.dumps(self._payload()).encode(),
+                  {"Content-Type": "application/json", "X-Webhook-Secret": self.SECRET})
+        r = c.getresponse(); body = json.loads(r.read().decode()); c.close()
+        self.assertEqual(r.status, 200)
+        self.assertTrue(body.get("ok"))
+
+    def test_webhook_never_requires_auth(self):
+        # 即使 secret 为空(功能未配),也走密钥层 403,绝不是 401 未登录(证明在 _auth 之前分流)
+        CFG["cd2_webhook_secret"] = ""
+        s, h, b = req("POST", "/api/cd2/webhook?key=anything", self._payload())
+        self.assertEqual(s, 403)
+        self.assertNotEqual(b.get("err"), "未登录")
+
+
 if __name__ == "__main__":
     unittest.main()

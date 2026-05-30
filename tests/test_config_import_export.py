@@ -15,8 +15,8 @@ TMPDIR = tempfile.mkdtemp(prefix="embymgr_imexp_")
 lib.config.HERE = TMPDIR
 lib.config.CONFIG_FILE = os.path.join(TMPDIR, "config.json")
 
-from lib.config import CFG
-from lib.business import export_config, import_config, SENSITIVE_KEYS
+from lib.config import CFG, CURRENT_SCHEMA
+from lib.business import export_config, import_config, SENSITIVE_KEYS, PROTECTED_IMPORT_KEYS
 from lib.logger import AppError
 
 
@@ -26,10 +26,11 @@ def reset_cfg(**kw):
     CFG.update({
         "password_hash": "pbkdf2_sha256$200000$abcd$1234",
         "c115_cookie": "UID=real_uid_123; SEID=real_seid",
+        "cd2_webhook_secret": "supersecret_webhook_key",
         "emby_url": "http://127.0.0.1:8096/emby",
         "api_key": "real_api_key",
         "port": 8097, "host": "127.0.0.1",
-        "schema_version": 4,
+        "schema_version": CURRENT_SCHEMA,
         "last_password_change_at": 1700000000,
         "username": "admin",
         "trusted_proxies": [],
@@ -57,6 +58,13 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(d["password_hash"], "")
         self.assertEqual(d["c115_cookie"], "")
 
+    def test_cd2_webhook_secret_redacted(self):
+        # autostrm webhook 密钥导出时必须脱敏(否则备份泄露=任何人可打 webhook)
+        reset_cfg()
+        d = export_config()
+        self.assertEqual(d["cd2_webhook_secret"], "<redacted>")
+        self.assertIn("cd2_webhook_secret", SENSITIVE_KEYS)
+
 
 class ImportTests(unittest.TestCase):
 
@@ -80,10 +88,10 @@ class ImportTests(unittest.TestCase):
 
     def test_schema_field_ignored_when_matching(self):
         reset_cfg()
-        r = import_config({"cfg": {"schema_version": 4, "emby_url": "http://new"}, "confirm": True})
+        r = import_config({"cfg": {"schema_version": CURRENT_SCHEMA, "emby_url": "http://new"}, "confirm": True})
         self.assertTrue(r["ok"])
         # schema_version 字段本身不能被覆盖(始终是 PROTECTED)
-        self.assertEqual(CFG["schema_version"], 4)
+        self.assertEqual(CFG["schema_version"], CURRENT_SCHEMA)
         self.assertEqual(CFG["emby_url"], "http://new")
 
     def test_redacted_kept_original(self):
@@ -140,6 +148,16 @@ class ImportTests(unittest.TestCase):
         orig = CFG["c115_cookie"]
         import_config({"cfg": {"c115_cookie": "UID=attacker; SEID=fake"}, "confirm": True})
         self.assertEqual(CFG["c115_cookie"], orig)
+
+    def test_cd2_webhook_secret_protected(self):
+        """webhook 密钥不能被 import 覆盖(防恶意备份植入攻击者已知密钥后远程打 webhook)"""
+        reset_cfg()
+        orig = CFG["cd2_webhook_secret"]
+        r = import_config({"cfg": {"cd2_webhook_secret": "attacker_known_key",
+                                   "emby_url": "http://new"}, "confirm": True})
+        self.assertEqual(CFG["cd2_webhook_secret"], orig)
+        self.assertIn("cd2_webhook_secret", PROTECTED_IMPORT_KEYS)
+        self.assertIn("cd2_webhook_secret", r["skipped_protected"])
 
     def test_username_protected(self):
         """username 也保护(单用户场景影响小,但攻击面)"""

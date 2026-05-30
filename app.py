@@ -53,6 +53,7 @@ from lib import business as _biz
 from lib.undo import UNDO_FILE, UNDO_MAX, UNDO_LOCK, _undo_record, list_undo, exec_undo
 from lib import scheduler as _sched
 from lib import catalog as _catalog
+from lib import autostrm as _autostrm
 
 
 # ===== 版本缓存:_version() 读 VERSION 文件并缓存到模块级(每次 do_GET 不要 fs hit) =====
@@ -180,6 +181,10 @@ class H(BaseHTTPRequestHandler):
         return bool(expected) and hmac.compare_digest(sent, expected)
     def _body(self):
         ln = int(self.headers.get("Content-Length", 0) or 0)
+        # 1MB 上限:防超大/慢速 body 拖死 handler 线程(所有 POST 含 webhook;协议 HTTP/1.0 无 keep-alive,
+        # 不读 body 直接回 → 连接关闭丢弃剩余字节,不会串包)
+        if ln > 1048576:
+            return {}
         try: return json.loads(self.rfile.read(ln).decode("utf-8")) if ln else {}
         except Exception: return {}
     def do_GET(self):
@@ -277,6 +282,8 @@ class H(BaseHTTPRequestHandler):
                 kinds = [{"kind": k, "label": v["label"], "desc": v.get("desc", "")}
                          for k, v in SCHEDULE_KINDS.items()]
                 return self._json({"schedules": rows, "kinds": kinds})
+            if path == "/api/autostrm/status":
+                return self._json(_autostrm.status())
             return self._json({"err": "未知接口"}, 404)
         return self._send(404, "text/plain", "404")
     def do_POST(self):
@@ -305,6 +312,23 @@ class H(BaseHTTPRequestHandler):
             t = self._cookie_token() or self.headers.get("X-Token")
             if t: _token_drop(t)
             return self._json({"ok": True}, extra_headers=[("Set-Cookie", "emby_tok=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")])
+        if path == "/api/cd2/webhook":
+            # CD2 不会带登录 cookie/CSRF → 用共享密钥鉴权(?key= 或 X-Webhook-Secret 头),放在 auth 之前。
+            # 立即返回(只反映射 + 入队),绝不内联生成 → 防 CD2 超时重试风暴。
+            secret = CFG.get("cd2_webhook_secret") or ""
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            sent = self.headers.get("X-Webhook-Secret", "") or (q.get("key", [""])[0])
+            # 字节级 constant-time 比较(避免非 ASCII 密钥让 hmac.compare_digest 抛 TypeError)
+            if not secret or not hmac.compare_digest(sent.encode("utf-8"), secret.encode("utf-8")):
+                return self._json({"err": "forbidden"}, 403)
+            if not CFG.get("auto_strm_enabled"):
+                return self._json({"ok": True, "ignored": "disabled"})
+            try:
+                accepted = _autostrm.handle_cd2_event(b)
+            except Exception:
+                logger.exception("autostrm webhook 处理失败")
+                accepted = 0
+            return self._json({"ok": True, "queued": accepted})
         if not self._auth(): return self._json({"err": "未登录"}, 401)
         if not self._csrf_ok(): return self._json({"err": "CSRF 校验失败,刷新页面重试"}, 403)
         try:
@@ -501,6 +525,7 @@ if __name__ == "__main__":
     migrate_cfg()
     threading.Thread(target=_token_reaper, daemon=True, name="token-reaper").start()
     _sched.start()  # 定时任务循环
+    _autostrm.start()  # autostrm 守护(CD2 webhook 生成防抖 + 延迟匹配)
     host = CFG.get("host", "127.0.0.1"); port = CFG["port"]
     log("服务启动 @ %s:%d" % (host, port))
     print("Emby 管理工具: http://%s:%d  (schema v%d)" % (host, port, CFG.get("schema_version", 1)), file=sys.stderr)

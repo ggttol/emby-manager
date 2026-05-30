@@ -83,6 +83,35 @@ def scan_lib(name, keyword=None):
         lock.release()
 
 
+def _missing_strm_in_top(src_base, strm_base, tp):
+    """walk 单个 top 目录 tp,返回缺 strm 的 [(rel, filename)]。rel 相对 src_base。
+    _scan_lib_locked(全库) 与 gen_strm_for_lib_path(增量) 共用,保证两条路径找缺的逻辑一致。"""
+    missing = []
+    for root, _ds, fs in os.walk(tp):
+        rel = os.path.relpath(root, src_base)
+        for f in sorted(fs):
+            if f.lower().endswith(VE):
+                sp = os.path.join(strm_base, rel, os.path.splitext(f)[0] + ".strm")
+                if not os.path.exists(sp):
+                    missing.append((rel, f))
+    return missing
+
+
+def _write_strm(strm_base, media, rel, filename):
+    """写一个 .strm,内容 = /media/<folder>/<rel>/<filename>(本地路径,SenPlayer 可读)。
+    已存在 → 返回 None(不覆盖,幂等);新写 → 返回 strm 路径。
+    ⚠️ 调用方必须持 _lib_lock(name)(全库扫描 / webhook / 增量轮询同库不能并发写)。
+    全库扫描与 webhook 增量都走这一个,保证产出的 strm content 字节一致。"""
+    dd = os.path.join(strm_base, rel)
+    os.makedirs(dd, exist_ok=True)
+    sp = os.path.join(dd, os.path.splitext(filename)[0] + ".strm")
+    if os.path.exists(sp):
+        return None
+    with open(sp, "w", encoding="utf-8") as w:
+        w.write(media + "/" + os.path.join(rel, filename))
+    return sp
+
+
 def _scan_lib_locked(name, meta, keyword):
     folder = meta["folder"]
     src_base = os.path.join(CD, folder); strm_base = os.path.join(STRM, folder); media = "/media/" + folder
@@ -97,23 +126,14 @@ def _scan_lib_locked(name, meta, keyword):
         if not os.path.isdir(tp):
             continue
         matched += 1
-        missing = []
-        for root, ds, fs in os.walk(tp):
-            rel = os.path.relpath(root, src_base)
-            for f in sorted(fs):
-                if f.lower().endswith(VE):
-                    sp = os.path.join(strm_base, rel, os.path.splitext(f)[0] + ".strm")
-                    if not os.path.exists(sp):
-                        missing.append((rel, f))
+        missing = _missing_strm_in_top(src_base, strm_base, tp)
         if not missing:
             continue
         # 带 tmdbid 的新文件夹,或"已有 strm 的已知文件夹"(如海贼王老剧补新集)→ 照常生成
         if re.search(r'tmdbid[-_]\d+', top, re.IGNORECASE) or os.path.isdir(os.path.join(strm_base, top)):
             for rel, f in missing:
-                dd = os.path.join(strm_base, rel); os.makedirs(dd, exist_ok=True)
-                with open(os.path.join(dd, os.path.splitext(f)[0] + ".strm"), "w", encoding="utf-8") as w:
-                    w.write(media + "/" + os.path.join(rel, f))
-                new_files.append(f)
+                if _write_strm(strm_base, media, rel, f):
+                    new_files.append(f)
             new_folders[top] = len(missing)
         else:
             attention.append("%s (+%d个视频,无tmdbid且首次出现,需看一眼)" % (top, len(missing)))
@@ -123,6 +143,93 @@ def _scan_lib_locked(name, meta, keyword):
         epost("/Items/%s/Refresh" % meta["id"], {"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default"})
         log("扫描[%s] 新增 strm %d,清孤儿 %d" % (name, len(new_files), orphans))
     return {"lib": name, "keyword": kw, "matched": matched, "new_count": len(new_files), "new_folders": new_folders, "attention": attention, "orphans_cleaned": orphans, "refreshed": bool(new_files or orphans)}
+
+
+# ===== 增量生成(webhook / 增量轮询共用)=====
+def gen_strm_for_lib_path(name, top, fullauto=None, do_refresh=True):
+    """为 CD/<folder>/<top> 下所有缺 strm 的视频生成 strm。webhook + 增量轮询共用。
+    do_refresh=False:只生成不发 Emby Refresh(批处理时由调用方对整库刷一次,避免一个 burst 跨多 top 刷 N 次)。
+    与 _scan_lib_locked(全库)的区别:
+      - 只处理单个 top(增量,不整库 walk);
+      - **绝不清孤儿**(webhook 路径只新增不删 → 防 115 挂载抖动时把整库 strm 误删;清孤儿仍只在手动/定时全扫做);
+      - 全自动模式(fullauto)下:无 tmdbid 文件夹也生成 strm,并返回 needs_match=True 交给延迟匹配。
+    持 _lib_lock + _mount_alive 守护。fullauto 默认读 CFG['auto_strm_fullauto']。"""
+    if fullauto is None:
+        fullauto = bool(CFG.get("auto_strm_fullauto"))
+    L = fetch_libs()
+    if name not in L:
+        return {"lib": name, "top": top, "new_count": 0, "err": "未知库 " + str(name)}
+    meta = L[name]; folder = meta["folder"]
+    src_base = os.path.join(CD, folder); strm_base = os.path.join(STRM, folder); media = "/media/" + folder
+    # path-guard:top 来自 webhook 上报路径,必须在 src_base 下(防 ../ 注入)。
+    # 只用 _safe_under 校验(它返 realpath;若 CD 路径含 symlink,realpath 会让后续 relpath 算错 → 用 plain join 走)
+    try:
+        _safe_under(src_base, top)
+    except ValueError:
+        log("autostrm[%s] 非法 top 拒绝: %r" % (name, top))
+        return {"lib": name, "top": top, "new_count": 0, "err": "非法 top"}
+    tp = os.path.join(src_base, top)
+    with _lib_lock(name):
+        if not _mount_alive():
+            log("autostrm[%s/%s] 跳过:115 挂载探测失败" % (name, top))
+            return {"lib": name, "top": top, "new_count": 0, "skipped": "mount_dead"}
+        if not os.path.isdir(tp):
+            return {"lib": name, "top": top, "new_count": 0, "skipped": "no_such_dir"}
+        missing = _missing_strm_in_top(src_base, strm_base, tp)
+        if not missing:
+            return {"lib": name, "top": top, "new_count": 0, "needs_match": False}
+        has_tmdb = bool(re.search(r'tmdbid[-_]\d+', top, re.IGNORECASE)) or os.path.isdir(os.path.join(strm_base, top))
+        if not has_tmdb and not fullauto:
+            # 非全自动 + 无 tmdbid 首现:沿用谨慎策略,不生成,只标记需关注
+            return {"lib": name, "top": top, "new_count": 0, "needs_match": False,
+                    "attention": "%s 无 tmdbid 首现,未自动生成(全自动关)" % top}
+        new = []
+        for rel, f in missing:
+            if _write_strm(strm_base, media, rel, f):
+                new.append(f)
+        if new:
+            if do_refresh:
+                epost("/Items/%s/Refresh" % meta["id"],
+                      {"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default"})
+            log("autostrm[%s] 新增 strm %d (%s)%s" % (name, len(new), top, "" if do_refresh else " [批量,稍后统一刷新]"))
+        return {"lib": name, "top": top, "new_count": len(new),
+                "needs_match": bool(new) and not has_tmdb,
+                "lib_id": meta["id"], "folder": folder}
+
+
+def autostrm_try_match(lib_id, folder, top):
+    """找 top 对应的新 Emby 项;若 Emby 没自己匹配上(无海报)则跑保守自动匹配(复用 _fix_poster_one)。
+    返回 state:
+      pending      — Emby 还没导入这个项(调用方稍后重试)
+      already      — Emby 自己已匹配上(有海报),不动
+      matched      — 我们保守匹配成功
+      no_candidate — 找到项但没合适 TMDb 候选(留给面板"无海报"人工)
+      error        — 异常
+    """
+    LIMIT = 200000  # 大库(动漫已 1.8w+,留足余量)避免新项排在 30000 外被截断而永远匹配不到
+    try:
+        resp = eget("/Items", {"ParentId": lib_id, "Recursive": "true",
+                               "IncludeItemTypes": "Series,Movie",
+                               "Fields": "Path,ProviderIds,ImageTags", "Limit": LIMIT})
+        items = resp.get("Items", [])
+        if resp.get("TotalRecordCount", 0) > LIMIT:
+            logger.warning("autostrm 匹配查询截断:库 %s 共 %d 项 > %d,新项可能找不到",
+                           lib_id, resp.get("TotalRecordCount"), LIMIT)
+    except Exception as e:
+        return {"state": "error", "top": top, "err": str(e)}
+    sep = "/" + folder + "/"
+    target = None
+    for it in items:
+        p = it.get("Path") or ""
+        if sep in p and p.split(sep, 1)[1].split("/")[0] == top:
+            target = it; break
+    if not target:
+        return {"state": "pending", "top": top}            # Emby 还没导入 → 稍后重试
+    if (target.get("ImageTags") or {}).get("Primary"):
+        return {"state": "already", "top": top, "id": target["Id"], "name": target.get("Name")}
+    r = _fix_poster_one(target["Id"], target["Type"])
+    return {"state": "matched" if r.get("ok") else "no_candidate", "top": top,
+            "id": target["Id"], "name": r.get("name"), "tmdb": r.get("tmdb", "")}
 
 
 # ===== 去重分析 =====
@@ -741,6 +848,12 @@ def get_config():
             "c115_cookie_set": bool(ck), "c115_cookie_mask": mask,
             "c115_cid_map": CFG.get("c115_cid_map") or {},
             "trusted_proxies": CFG.get("trusted_proxies") or [],
+            # autostrm(CD2 webhook 自动生成 strm):密钥只回 _set 布尔(不回显原值,同 cookie)
+            "auto_strm_enabled": bool(CFG.get("auto_strm_enabled")),
+            "auto_strm_fullauto": bool(CFG.get("auto_strm_fullauto")),
+            "cd2_mount_prefix": CFG.get("cd2_mount_prefix") or "/CloudNAS/CloudDrive",
+            "auto_strm_debounce_sec": CFG.get("auto_strm_debounce_sec", 8),
+            "cd2_webhook_secret_set": bool(CFG.get("cd2_webhook_secret")),
             # 存储路径(换机器改这三个,不用动代码;改完重启生效)
             "cd": CFG.get("cd") or _DEF_CD, "strm": CFG.get("strm") or _DEF_STRM,
             "docker": CFG.get("docker") or _DEF_DOCKER}
@@ -788,6 +901,25 @@ def set_config(b):
             # 受信反代 IP 列表(影响登录限流的 XFF 信任)。只收字符串项,去空白。
             CFG["trusted_proxies"] = [str(x).strip() for x in b["trusted_proxies"] if str(x).strip()]
             changed.append("受信反代 IP")
+        # autostrm(CD2 webhook 自动生成 strm)开关组
+        if b.get("cd2_webhook_secret") is not None:
+            # 只写不回显(同 cookie)。空串 = 关闭功能(webhook 一律 403)
+            CFG["cd2_webhook_secret"] = str(b["cd2_webhook_secret"]).strip(); changed.append("CD2 webhook 密钥")
+        if b.get("cd2_mount_prefix") is not None and str(b["cd2_mount_prefix"]).strip():
+            v = str(b["cd2_mount_prefix"]).strip()
+            if not v.startswith("/"):
+                return {"err": "CD2 挂载前缀必须以 / 开头: %r" % v}
+            CFG["cd2_mount_prefix"] = v.rstrip("/") or "/"; changed.append("CD2 挂载前缀")
+        if b.get("auto_strm_enabled") is not None:
+            CFG["auto_strm_enabled"] = bool(b["auto_strm_enabled"]); changed.append("自动 strm 开关")
+        if b.get("auto_strm_fullauto") is not None:
+            CFG["auto_strm_fullauto"] = bool(b["auto_strm_fullauto"]); changed.append("自动 strm 全自动")
+        if b.get("auto_strm_debounce_sec") is not None:
+            try:
+                CFG["auto_strm_debounce_sec"] = max(1, min(120, int(b["auto_strm_debounce_sec"])))
+                changed.append("防抖窗口")
+            except Exception:
+                pass
         # 存储路径(cd/strm/docker):必须绝对路径。写错会让扫描/删除指向错地方,严格校验。
         path_changed = False
         for k, name in (("cd", "115 挂载根"), ("strm", "strm 根"), ("docker", "docker 路径")):
@@ -813,7 +945,7 @@ def set_config(b):
 
 
 # ===== 配置导出/导入(剔密) =====
-SENSITIVE_KEYS = ("password_hash", "c115_cookie")
+SENSITIVE_KEYS = ("password_hash", "c115_cookie", "cd2_webhook_secret")
 # PROTECTED_IMPORT_KEYS:import 时**永远跳过**,无论用户传什么值。
 # 包括 schema_version(不让绕 migration)、敏感字段(防直接覆盖植入)、
 # **last_password_change_at(防 grace 复活提权)**、username(防越权)。
@@ -821,7 +953,7 @@ SENSITIVE_KEYS = ("password_hash", "c115_cookie")
 # 或 trusted_proxies=[攻击者IP](伪造 XFF 绕过登录限流)。这俩是运行时安全开关,只能在设置页手改(review)。
 PROTECTED_IMPORT_KEYS = ("schema_version", "password_hash", "c115_cookie",
                          "last_password_change_at", "username",
-                         "host", "trusted_proxies")
+                         "host", "trusted_proxies", "cd2_webhook_secret")
 
 
 def export_config():
@@ -2059,6 +2191,49 @@ def scheduled_refresh_no_rating_all_async(tid):
             "refresh_triggered_total": sum(ok_count.values())}
 
 
+def monitor_incremental_async(tid):
+    """增量监控补扫(autostrm webhook 的兜底):只处理 mtime 比上次记录新的 top 目录,
+    补 webhook 漏掉的(CD2 宕了/漏推)。与 webhook 走同一个 gen_strm_for_lib_path + 延迟匹配,
+    并共享 autostrm 的 seen 状态防重复处理。gen 幂等(只写缺的 strm),首次跑对已完整的库不会乱生成/乱匹配。
+    ⚠️ 只看 top 级 mtime:已存在剧集里加新集(嵌套)由 webhook 实时 + scan_all 夜扫覆盖,这里主要抓新 top。"""
+    from lib import autostrm
+    if not _mount_alive():
+        return {"err": "115 挂载探测失败,跳过", "new_count": 0}
+    libs = fetch_libs()
+    task_set(tid, total=len(libs) or 1)
+    tot_new = 0; processed = 0; out = []
+    for i, (name, meta) in enumerate(libs.items()):
+        if task_is_cancelled(tid): break
+        task_set(tid, progress=i, status_text="增量扫 " + name)
+        src_base = os.path.join(CD, meta["folder"])
+        try:
+            tops = sorted(os.listdir(src_base))
+        except Exception:
+            task_set(tid, progress=i + 1); continue
+        for top in tops:
+            if task_is_cancelled(tid): break
+            tp = os.path.join(src_base, top)
+            try:
+                if not os.path.isdir(tp): continue
+                mt = os.path.getmtime(tp)
+            except Exception:
+                continue
+            if not autostrm.seen_is_new(name, top, mt):
+                continue
+            r = gen_strm_for_lib_path(name, top)
+            autostrm.seen_mark(name, top, mt)
+            processed += 1
+            nc = r.get("new_count", 0); tot_new += nc
+            if nc:
+                out.append({"lib": name, "top": top, "new": nc})
+            if r.get("needs_match"):
+                autostrm.enqueue_match(name, top, r.get("lib_id"), r.get("folder"))
+        task_set(tid, progress=i + 1)
+    autostrm.seen_save()
+    log("⏰ 增量监控补扫: 处理 %d 个变更 top,新增 strm %d" % (processed, tot_new))
+    return {"new_count": tot_new, "tops_processed": processed, "details": out[:50]}
+
+
 # 定时任务 kind 注册表:scheduler 从这里查 fn。kind 字符串是 schedule.kind 的值,**改名要兼容旧 schedule**。
 SCHEDULE_KINDS = {
     "scan_all": {
@@ -2080,5 +2255,10 @@ SCHEDULE_KINDS = {
         "label": "🔄 无评分剧刷新(全库)",
         "desc": "对所有无评分剧调 emby Refresh 重拉 TMDb 评分/海报/简介",
         "fn": scheduled_refresh_no_rating_all_async,
+    },
+    "monitor_incremental": {
+        "label": "🛰️ 增量监控补扫",
+        "desc": "autostrm webhook 兜底:只扫 mtime 变新的 top 目录,补漏掉的新内容(轻量,建议每日跑)",
+        "fn": monitor_incremental_async,
     },
 }
