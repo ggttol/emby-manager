@@ -19,20 +19,22 @@
   --danger-bg:#3a1c22;--ok-bg:#0f3324;--skeleton-bg:#1b2433;--overlay:rgba(4,7,12,.62);--focus:#4d92ff;
   --radius:13px;--radius-sm:9px;
   --shadow:0 2px 8px rgba(0,0,0,.28);--shadow-lg:0 12px 32px rgba(0,0,0,.42);
+  --header-bg:linear-gradient(180deg,rgba(20,28,44,.82),rgba(13,18,29,.9));--header-ink:#e9eef7;--header-sub:#97a3ba;--header-hover:rgba(255,255,255,.12);
   --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;}
 body[data-theme="light"]{
   --bg:#f4f6fb;--bg2:#eceff6;--card:#ffffff;--card2:#f7f9fd;--line:#e3e8f0;--line2:#d5dce8;
   --ink:#111827;--sub:#5b6678;--blue:#2f6df0;--accent:#2f6df0;--accent2:#6366f1;
   --field-bg:#ffffff;--field-ink:#111827;
   --skeleton-bg:#e6eaf2;--overlay:rgba(17,24,39,.34);--danger-bg:#fee2e2;--ok-bg:#dcfce7;
-  --shadow:0 1px 3px rgba(16,24,40,.08);--shadow-lg:0 12px 32px rgba(16,24,40,.14);}
+  --shadow:0 1px 3px rgba(16,24,40,.08);--shadow-lg:0 12px 32px rgba(16,24,40,.14);
+  --header-bg:linear-gradient(180deg,#ffffff,#eef2f9);--header-ink:#1f2937;--header-sub:#5b6678;--header-hover:rgba(15,23,42,.06);}
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;color:var(--ink);font-size:14px;-webkit-font-smoothing:antialiased;line-height:1.5;background:radial-gradient(1100px 460px at 80% -160px,rgba(77,146,255,.10),transparent 60%),radial-gradient(820px 380px at -5% -40px,rgba(109,108,240,.08),transparent 55%),var(--bg);background-attachment:fixed}
 /* 顶栏(全宽,玻璃质感) */
-header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:11px 20px;background:linear-gradient(180deg,rgba(20,28,44,.78),rgba(13,18,29,.86));backdrop-filter:saturate(150%) blur(10px);border-bottom:1px solid var(--line);position:relative;z-index:20}
+header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:11px 20px;background:var(--header-bg);backdrop-filter:saturate(150%) blur(10px);border-bottom:1px solid var(--line);position:relative;z-index:20}
 header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,transparent,rgba(77,146,255,.35),transparent)}
-header h1{font-size:16px;font-weight:700;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
-.stat{margin-left:auto;font-size:12px;color:var(--sub)}
+header h1{font-size:16px;font-weight:700;letter-spacing:.2px;display:flex;align-items:center;gap:8px;color:var(--header-ink)}
+.stat{margin-left:auto;font-size:12px;color:var(--header-sub)}
 /* 布局:侧边栏 + 内容 */
 .layout{display:flex;align-items:flex-start}
 nav{flex:0 0 var(--nav-w,220px);align-self:stretch;display:flex;flex-direction:column;gap:1px;background:var(--bg2);border-right:1px solid var(--line);padding:12px 11px 26px;position:sticky;top:0;max-height:100vh;overflow-y:auto;overflow-x:hidden;transition:flex-basis .18s ease}
@@ -195,8 +197,8 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
 :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 
 .ui-header-right{margin-left:auto;display:flex;gap:4px;align-items:center}
-.ui-header-right button{background:none;border:none;color:#fff;cursor:pointer;padding:6px 10px;border-radius:6px;font-size:14px}
-.ui-header-right button:hover{background:rgba(255,255,255,.15)}
+.ui-header-right button{background:none;border:none;color:var(--header-ink);cursor:pointer;padding:6px 10px;border-radius:6px;font-size:14px}
+.ui-header-right button:hover{background:var(--header-hover)}
 .ui-header-right .ui-bell{padding:6px 10px}
 
 .ui-menu{position:absolute;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 0;min-width:160px;z-index:200;box-shadow:0 8px 24px rgba(0,0,0,.4)}
@@ -1694,7 +1696,7 @@ async function loadHealthCard(){
 function initShell(){
   // 主题
   const applyTheme = (t)=>{ document.body.dataset.theme = t==='light'?'light':'dark'; localStorage.setItem('theme',t); };
-  applyTheme(localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'));
+  applyTheme(localStorage.getItem('theme') || 'light');
   try{ if(localStorage.getItem('navCollapsed')==='1'){ document.body.classList.add('nav-collapsed'); const _ni=document.getElementById('navCollapseIco'); if(_ni)_ni.textContent='»'; } }catch(e){}
   const themeBtn = document.querySelector('#hdrTheme');
   if (themeBtn) themeBtn.addEventListener('click', ()=>applyTheme(document.body.dataset.theme==='light'?'dark':'light'));
