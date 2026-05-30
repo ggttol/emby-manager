@@ -11,46 +11,98 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Emby 管">
 <style>
-:root{--bg:#0f1420;--card:#19202e;--line:#2a3346;--ink:#e6eaf2;--sub:#8b95a8;--blue:#3b82f6;--green:#22c55e;--red:#ef4444;--gold:#eab308;--field-bg:#0f1420;--field-ink:#e6eaf2;
-  /* v3.0 新增 */
-  --warn:#f59e0b;--danger-bg:#3a1f1f;--ok-bg:#13351f;
-  --skeleton-bg:#1f2937;--overlay:rgba(0,0,0,.5);--focus:#3b82f6;}
-body[data-theme="light"]{--bg:#f8fafc;--card:#fff;--line:#e2e8f0;--ink:#0f172a;--sub:#64748b;--skeleton-bg:#e2e8f0;--overlay:rgba(15,23,42,.4);--danger-bg:#fee2e2;--ok-bg:#dcfce7;--field-bg:#fff;--field-ink:#0f172a;}
+:root{
+  --bg:#0a0e16;--bg2:#0d121d;--card:#141b28;--card2:#1a2231;--line:#222c3d;--line2:#2e3a4f;
+  --ink:#e9eef7;--sub:#828ea6;--blue:#4d92ff;--accent:#4d92ff;--accent2:#6d6cf0;
+  --green:#2bd576;--red:#ff5d6c;--gold:#f0b429;--warn:#f0b429;
+  --field-bg:#0c1119;--field-ink:#e9eef7;
+  --danger-bg:#3a1c22;--ok-bg:#0f3324;--skeleton-bg:#1b2433;--overlay:rgba(4,7,12,.62);--focus:#4d92ff;
+  --radius:13px;--radius-sm:9px;
+  --shadow:0 2px 8px rgba(0,0,0,.28);--shadow-lg:0 12px 32px rgba(0,0,0,.42);
+  --mono:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;}
+body[data-theme="light"]{
+  --bg:#f4f6fb;--bg2:#eceff6;--card:#ffffff;--card2:#f7f9fd;--line:#e3e8f0;--line2:#d5dce8;
+  --ink:#111827;--sub:#5b6678;--blue:#2f6df0;--accent:#2f6df0;--accent2:#6366f1;
+  --field-bg:#ffffff;--field-ink:#111827;
+  --skeleton-bg:#e6eaf2;--overlay:rgba(17,24,39,.34);--danger-bg:#fee2e2;--ok-bg:#dcfce7;
+  --shadow:0 1px 3px rgba(16,24,40,.08);--shadow-lg:0 12px 32px rgba(16,24,40,.14);}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--ink);font-size:14px}
-header{background:linear-gradient(120deg,#1e3a5f,#2563eb);padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
-header h1{font-size:18px}.stat{margin-left:auto;font-size:12px;opacity:.9}
-nav{display:flex;gap:4px;background:#141a26;padding:0 12px;border-bottom:1px solid var(--line);overflow-x:auto}
-nav button{background:none;border:none;color:var(--sub);padding:12px 15px;cursor:pointer;font-size:14px;border-bottom:2px solid transparent;white-space:nowrap}
-nav button.on{color:#fff;border-bottom-color:var(--blue)}
-.wrap{max-width:1100px;margin:0 auto;padding:18px 16px 60px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:12px}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
-.lib{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
-.lib .n{font-size:16px;font-weight:600}.lib .c{font-size:26px;font-weight:700;margin:6px 0;color:var(--blue)}.lib .s{font-size:12px;color:var(--sub)}
-select,input,textarea{background:var(--field-bg);color:var(--field-ink);border:1px solid var(--line);border-radius:8px;padding:9px 11px;font-size:14px}
-select option{background:var(--field-bg);color:var(--field-ink)}
+body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",Segoe UI,sans-serif;color:var(--ink);font-size:14px;-webkit-font-smoothing:antialiased;line-height:1.5;background:radial-gradient(1100px 460px at 80% -160px,rgba(77,146,255,.10),transparent 60%),radial-gradient(820px 380px at -5% -40px,rgba(109,108,240,.08),transparent 55%),var(--bg);background-attachment:fixed}
+/* 顶栏(全宽,玻璃质感) */
+header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:11px 20px;background:linear-gradient(180deg,rgba(20,28,44,.78),rgba(13,18,29,.86));backdrop-filter:saturate(150%) blur(10px);border-bottom:1px solid var(--line);position:relative;z-index:20}
+header::after{content:"";position:absolute;left:0;right:0;bottom:-1px;height:1px;background:linear-gradient(90deg,transparent,rgba(77,146,255,.35),transparent)}
+header h1{font-size:16px;font-weight:700;letter-spacing:.2px;display:flex;align-items:center;gap:8px}
+.stat{margin-left:auto;font-size:12px;color:var(--sub)}
+/* 布局:侧边栏 + 内容 */
+.layout{display:flex;align-items:flex-start}
+nav{flex:0 0 var(--nav-w,220px);align-self:stretch;display:flex;flex-direction:column;gap:1px;background:var(--bg2);border-right:1px solid var(--line);padding:12px 11px 26px;position:sticky;top:0;max-height:100vh;overflow-y:auto;overflow-x:hidden;transition:flex-basis .18s ease}
+nav::-webkit-scrollbar{width:7px}nav::-webkit-scrollbar-thumb{background:var(--line2);border-radius:8px}nav::-webkit-scrollbar-track{background:transparent}
+.nav-group{font-size:10.5px;font-weight:700;letter-spacing:.11em;text-transform:uppercase;color:var(--sub);opacity:.5;padding:15px 12px 6px;user-select:none}
+.nav-group:first-child{padding-top:4px}
+nav button{display:flex;align-items:center;gap:11px;width:100%;text-align:left;background:none;border:none;color:var(--sub);padding:8.5px 12px;cursor:pointer;font-size:13.5px;border-radius:var(--radius-sm);white-space:nowrap;transition:background .14s,color .14s,box-shadow .14s;font-family:inherit}
+nav button .ico{font-size:15px;width:20px;flex:0 0 20px;text-align:center;filter:saturate(.85)}
+nav button:hover{background:var(--card);color:var(--ink)}
+nav button.on{color:#fff;background:linear-gradient(100deg,var(--accent),var(--accent2));box-shadow:0 5px 16px rgba(77,146,255,.34)}
+nav button.on .ico{filter:none}
+.nav-foot{margin-top:auto;padding-top:12px}
+.nav-collapse{display:flex;align-items:center;gap:11px;width:100%;background:none;border:none;color:var(--sub);font-size:12.5px;padding:8px 12px;cursor:pointer;border-radius:var(--radius-sm);font-family:inherit}
+.nav-collapse:hover{background:var(--card);color:var(--ink)}
+.nav-collapse .ico{font-size:15px;width:20px;flex:0 0 20px;text-align:center}
+body.nav-collapsed nav{--nav-w:62px;padding-left:9px;padding-right:9px}
+body.nav-collapsed .nav-label,body.nav-collapsed .nav-group{display:none}
+body.nav-collapsed nav button,body.nav-collapsed .nav-collapse{justify-content:center;gap:0;padding:9px 0}
+.wrap{flex:1;min-width:0;max-width:1180px;padding:22px 26px 72px;animation:pageIn .28s ease}
+@keyframes pageIn{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;margin-bottom:14px;box-shadow:var(--shadow)}
+h2{font-size:15px;font-weight:700;margin-bottom:10px;letter-spacing:.2px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:13px}
+.lib{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:15px 16px;box-shadow:var(--shadow);transition:transform .15s,border-color .15s,box-shadow .15s;cursor:pointer}
+.lib:hover{transform:translateY(-2px);border-color:var(--line2);box-shadow:var(--shadow-lg)}
+.lib .n{font-size:15px;font-weight:600}.lib .c{font-size:27px;font-weight:800;margin:7px 0 2px;color:var(--blue);letter-spacing:-.5px;font-variant-numeric:tabular-nums}.lib .s{font-size:12px;color:var(--sub)}
+select,input,textarea{background:var(--field-bg);color:var(--field-ink);border:1px solid var(--line);border-radius:var(--radius-sm);padding:9px 11px;font-size:14px;font-family:inherit;transition:border-color .14s,box-shadow .14s}
+select:focus,input:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(77,146,255,.18)}
+select option{background:var(--card);color:var(--field-ink)}
 input::placeholder,textarea::placeholder{color:var(--sub);opacity:.7}
-button.btn{background:var(--blue);color:#fff;border:none;border-radius:8px;padding:9px 16px;cursor:pointer;font-size:14px}
-button.btn:hover{filter:brightness(1.1)}button.btn:disabled{opacity:.5;cursor:default}
-button.danger{background:var(--red)}button.ok{background:var(--green)}button.ghost{background:#2a3346}
+code{font-family:var(--mono);font-size:.92em;background:var(--card2);border:1px solid var(--line);padding:1px 6px;border-radius:5px}
+button.btn{background:linear-gradient(100deg,var(--accent),var(--accent2));color:#fff;border:none;border-radius:var(--radius-sm);padding:9px 16px;cursor:pointer;font-size:13.5px;font-weight:600;font-family:inherit;box-shadow:0 3px 10px rgba(77,146,255,.26);transition:filter .14s,transform .08s,box-shadow .14s}
+button.btn:hover{filter:brightness(1.08)}button.btn:active{transform:translateY(1px)}button.btn:disabled{opacity:.45;cursor:default;box-shadow:none;filter:grayscale(.3)}
+button.danger{background:linear-gradient(100deg,#ff5d6c,#e0344a);box-shadow:0 3px 10px rgba(255,93,108,.28)}
+button.ok{background:linear-gradient(100deg,#2bd576,#16a34a);box-shadow:0 3px 10px rgba(43,213,118,.26)}
+button.ghost{background:var(--card2);color:var(--ink);border:1px solid var(--line);box-shadow:none}button.ghost:hover{border-color:var(--line2);filter:none;background:var(--line)}
 .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.item{display:flex;gap:12px;align-items:center;border-bottom:1px solid var(--line);padding:10px 2px}
+.item{display:flex;gap:12px;align-items:center;border-bottom:1px solid var(--line);padding:11px 2px}
 .item:last-child{border-bottom:none}.item .main{flex:1;min-width:0}
 .item .nm{font-weight:600}.item .meta{font-size:12px;color:var(--sub);margin-top:2px;word-break:break-all}
-.badge{font-size:11px;padding:2px 8px;border-radius:20px;background:#243049;color:#9db4e6;margin-right:6px}
-.badge.warn{background:#3a2f12;color:var(--gold)}.badge.g{background:#13351f;color:#6ee7a0}
+.badge{font-size:11px;padding:2px 9px;border-radius:20px;background:var(--card2);border:1px solid var(--line);color:#9db4e6;margin-right:6px;font-weight:500}
+.badge.warn{background:rgba(240,180,41,.12);border-color:rgba(240,180,41,.3);color:var(--gold)}.badge.g{background:rgba(43,213,118,.13);border-color:rgba(43,213,118,.3);color:#6ee7a0}
 .muted{color:var(--sub)}.hide{display:none}
-.log{background:#0b0f17;border:1px solid var(--line);border-radius:8px;padding:10px;font-family:ui-monospace,Menlo,monospace;font-size:12px;white-space:pre-wrap;max-height:420px;overflow:auto}
-.cand{display:flex;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:8px;margin-top:6px;cursor:pointer}
-.cand:hover{border-color:var(--blue)}.cand img{width:46px;height:68px;object-fit:cover;border-radius:4px;background:#222}
+.log{background:var(--bg);border:1px solid var(--line);border-radius:var(--radius-sm);padding:12px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;max-height:440px;overflow:auto}
+.cand{display:flex;gap:10px;align-items:center;border:1px solid var(--line);border-radius:var(--radius-sm);padding:8px;margin-top:6px;cursor:pointer;transition:border-color .14s,background .14s}
+.cand:hover{border-color:var(--accent);background:var(--card2)}.cand img{width:46px;height:68px;object-fit:cover;border-radius:4px;background:#222}
 .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#222c3e;border:1px solid var(--line);color:#fff;padding:12px 20px;border-radius:10px;z-index:99;max-width:90%}
-#login{max-width:340px;margin:80px auto;text-align:center}h2{font-size:16px;margin-bottom:10px}
+#login{max-width:360px;margin:14vh auto;text-align:center;box-shadow:var(--shadow-lg)}
 .spin{display:inline-block;width:14px;height:14px;border:2px solid #fff5;border-top-color:#fff;border-radius:50%;animation:s .7s linear infinite;vertical-align:-2px}
 @keyframes s{to{transform:rotate(360deg)}}
+/* 设置页:子分区导航 */
+.set-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}.set-head h2{margin:0;font-size:19px}
+.set-tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+.set-tab{background:var(--card);border:1px solid var(--line);color:var(--sub);padding:8px 15px;border-radius:20px;cursor:pointer;font-size:13px;font-weight:500;font-family:inherit;transition:all .14s}
+.set-tab:hover{color:var(--ink);border-color:var(--line2)}
+.set-tab.on{background:linear-gradient(100deg,var(--accent),var(--accent2));color:#fff;border-color:transparent;box-shadow:0 4px 12px rgba(77,146,255,.3)}
+.set-panel{animation:pageIn .22s ease}.set-panel .card h2{font-size:14.5px}
+.set-panel .card .sub{font-size:12px;color:var(--sub);margin:2px 0 10px;line-height:1.55}
+@media (max-width:860px){
+  /* 侧边栏 → 顶部横向条 */
+  .layout{flex-direction:column}
+  nav{flex-basis:auto;flex-direction:row;align-self:auto;position:static;max-height:none;overflow-x:auto;overflow-y:hidden;border-right:none;border-bottom:1px solid var(--line);padding:7px 10px;gap:3px}
+  .nav-group,.nav-foot{display:none}
+  nav button{width:auto;flex:0 0 auto;font-size:13px}
+  body.nav-collapsed nav{--nav-w:auto}
+  body.nav-collapsed .nav-label{display:inline}
+  body.nav-collapsed nav button{gap:11px;padding:8.5px 12px;justify-content:flex-start}
+  .wrap{padding:16px 14px 50px;max-width:none}
+}
 @media (max-width:640px){
-  /* nav: 12 个 tab 横排太挤,缩小按钮尺寸,横向滚动已由原 nav 提供 */
-  nav button{padding:10px 12px;font-size:13px}
   /* wrap: 缩内边距,把屏幕宽度让给内容 */
   .wrap{padding:12px 10px 40px}
   /* .row 内的表单控件让其撑满剩余宽度,避免被压缩成一小条 */
@@ -184,23 +236,28 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
     <button id="hdrUser" title="账户" aria-label="账户菜单">👤 admin</button>
   </div>
 </header>
+<div class="layout">
 <nav>
-  <button data-tab="dash" class="on" onclick="tab('dash')">📊 仪表盘</button>
-  <button data-tab="scan" onclick="tab('scan')">➕ 扫描加新内容</button>
-  <button data-tab="c115" onclick="tab('c115')">⬇️ 115 转存</button>
-  <button data-tab="catalog" onclick="tab('catalog')">📚 找资源</button>
-  <button data-tab="zhuigeng" onclick="tab('zhuigeng')">🔄 追更检查</button>
-  <button data-tab="gaps" onclick="tab('gaps')">🔍 缺集检查</button>
-  <button data-tab="poster" onclick="tab('poster')">🖼️ 海报修复</button>
-  <button data-tab="subs" onclick="tab('subs')">📝 字幕</button>
-  <button data-tab="dedup" onclick="tab('dedup')">🧹 去重</button>
-  <button data-tab="manage" onclick="tab('manage')">🗂️ 删除/移动</button>
-  <button data-tab="cleanup" onclick="tab('cleanup')">🧹 智能清理</button>
-  <button data-tab="system" onclick="tab('system')">🩺 系统</button>
-  <button data-tab="schedule" onclick="tab('schedule')">⏰ 定时</button>
-  <button data-tab="log" onclick="tab('log')">📜 日志</button>
-  <button data-tab="users" onclick="tab('users')">👥 用户</button>
-  <button data-tab="settings" onclick="tab('settings')">⚙️ 设置</button>
+  <div class="nav-group">媒体</div>
+  <button data-tab="dash" class="on" onclick="tab('dash')"><span class="ico">📊</span><span class="nav-label">仪表盘</span></button>
+  <button data-tab="scan" onclick="tab('scan')"><span class="ico">➕</span><span class="nav-label">扫描加片</span></button>
+  <button data-tab="c115" onclick="tab('c115')"><span class="ico">⬇️</span><span class="nav-label">115 转存</span></button>
+  <button data-tab="catalog" onclick="tab('catalog')"><span class="ico">📚</span><span class="nav-label">找资源</span></button>
+  <div class="nav-group">维护</div>
+  <button data-tab="zhuigeng" onclick="tab('zhuigeng')"><span class="ico">🔄</span><span class="nav-label">追更检查</span></button>
+  <button data-tab="gaps" onclick="tab('gaps')"><span class="ico">🔍</span><span class="nav-label">缺集检查</span></button>
+  <button data-tab="poster" onclick="tab('poster')"><span class="ico">🖼️</span><span class="nav-label">海报修复</span></button>
+  <button data-tab="subs" onclick="tab('subs')"><span class="ico">📝</span><span class="nav-label">字幕</span></button>
+  <button data-tab="dedup" onclick="tab('dedup')"><span class="ico">🧹</span><span class="nav-label">去重</span></button>
+  <button data-tab="manage" onclick="tab('manage')"><span class="ico">🗂️</span><span class="nav-label">删除 / 移动</span></button>
+  <button data-tab="cleanup" onclick="tab('cleanup')"><span class="ico">🧽</span><span class="nav-label">智能清理</span></button>
+  <div class="nav-group">系统</div>
+  <button data-tab="system" onclick="tab('system')"><span class="ico">🩺</span><span class="nav-label">系统</span></button>
+  <button data-tab="schedule" onclick="tab('schedule')"><span class="ico">⏰</span><span class="nav-label">定时任务</span></button>
+  <button data-tab="log" onclick="tab('log')"><span class="ico">📜</span><span class="nav-label">日志</span></button>
+  <button data-tab="users" onclick="tab('users')"><span class="ico">👥</span><span class="nav-label">用户</span></button>
+  <button data-tab="settings" onclick="tab('settings')"><span class="ico">⚙️</span><span class="nav-label">设置</span></button>
+  <div class="nav-foot"><button class="nav-collapse" onclick="toggleNav()"><span class="ico" id="navCollapseIco">«</span><span class="nav-label">收起侧栏</span></button></div>
 </nav>
 <div class="wrap">
 
@@ -443,71 +500,98 @@ body[data-theme="light"] .ui-skeleton{background:linear-gradient(90deg,#e2e8f0 0
   </section>
 
   <section id="settings" class="hide">
-    <div class="card"><h2>⚙️ 设置</h2><div style="max-width:540px">
-      <h2 style="font-size:14px;margin-top:6px">工具登录密码</h2>
-      <div class="row"><button class="btn" onclick="chPwModal()">🔑 修改登录密码</button><span class="muted" style="font-size:12px">改密需输旧密码(防他人借会话改密)</span></div>
-      <h2 style="font-size:14px;margin-top:18px">Emby 连接</h2>
-      <div class="row" style="margin-bottom:8px"><span class="muted" style="width:80px">地址</span><input id="setUrl" style="flex:1" placeholder="http://127.0.0.1:8096/emby"></div>
-      <div class="row" style="margin-bottom:8px"><span class="muted" style="width:80px">API Key</span><input id="setKey" style="flex:1"></div>
-      <div class="row" style="margin-bottom:18px"><button class="btn" onclick="saveConfig('emby')">保存并测试</button><span id="setOut" class="muted"></span></div>
+    <div class="set-head"><h2>⚙️ 设置</h2></div>
+    <div class="set-tabs">
+      <button class="set-tab on" data-set="conn" onclick="setTab('conn')">🔗 连接</button>
+      <button class="set-tab" data-set="auto" onclick="setTab('auto')">🛰️ 自动化</button>
+      <button class="set-tab" data-set="sec" onclick="setTab('sec')">🔐 账户与安全</button>
+      <button class="set-tab" data-set="adv" onclick="setTab('adv')">🧰 高级</button>
+    </div>
 
-      <h2 style="font-size:14px;margin-top:6px">115 网盘 Cookie</h2>
-      <div class="muted" style="font-size:12px;margin:2px 0 6px">浏览器登录 <a href="https://115.com" target="_blank" style="color:#0ea5e9">115.com</a> → F12 → Network → 任一 webapi 请求 → Headers → 复制整条 <code>Cookie:</code>(必须包含 UID/CID/SEID)粘进来。当前: <span id="setC115State">…</span></div>
-      <div class="row" style="margin-bottom:14px">
-        <input id="setC115Ck" placeholder="UID=...; CID=...; SEID=...; KID=..." style="flex:1">
-        <button class="btn" onclick="saveConfig('c115')">保存</button>
-        <button class="btn ghost" onclick="testC115()">测连接</button>
+    <div class="set-panel" id="set-conn">
+      <div class="card">
+        <h2>Emby 连接</h2>
+        <div class="row" style="margin-bottom:8px"><span class="muted" style="width:80px">地址</span><input id="setUrl" style="flex:1" placeholder="http://127.0.0.1:8096/emby"></div>
+        <div class="row" style="margin-bottom:8px"><span class="muted" style="width:80px">API Key</span><input id="setKey" style="flex:1"></div>
+        <div class="row"><button class="btn" onclick="saveConfig('emby')">保存并测试</button><span id="setOut" class="muted"></span></div>
       </div>
-
-      <h2 style="font-size:14px">115 库目录 cid 映射</h2>
-      <div class="muted" style="font-size:12px;margin:2px 0 6px">Cookie 填好后点「🔍 自动检测」按 emby 库名扫 115 目录前两层填入;手动备选:115.com 进入目录 → URL 里 <code>?cid=XXXXXXXX</code>。</div>
-      <div id="setC115Cids" style="margin-top:6px"><span class="muted">加载中…</span></div>
-      <div class="row" style="margin-top:8px">
-        <button class="btn ghost" onclick="autoCid()">🔍 自动检测</button>
-        <button class="btn" onclick="saveConfig('c115cids')">保存映射</button>
-        <span id="setCidOut" class="muted" style="margin-left:6px"></span>
+      <div class="card">
+        <h2>115 网盘 Cookie</h2>
+        <div class="sub">浏览器登录 <a href="https://115.com" target="_blank" style="color:#0ea5e9">115.com</a> → F12 → Network → 任一 webapi 请求 → Headers → 复制整条 <code>Cookie:</code>(必须包含 UID/CID/SEID)粘进来。当前: <span id="setC115State">…</span></div>
+        <div class="row">
+          <input id="setC115Ck" placeholder="UID=...; CID=...; SEID=...; KID=..." style="flex:1">
+          <button class="btn" onclick="saveConfig('c115')">保存</button>
+          <button class="btn ghost" onclick="testC115()">测连接</button>
+        </div>
       </div>
-
-      <h2 style="font-size:14px;margin-top:18px">反代信任 IP（trusted_proxies)</h2>
-      <div class="muted" style="font-size:12px;margin:2px 0 6px">如果本工具跑在 Nginx/Caddy 后,需要把反代 IP 加这里,登录失败计数才会按真实客户端 IP 计(而不是反代 IP)。逗号分隔多个,留空 = 不读 X-Forwarded-For。</div>
-      <div class="row">
-        <input id="setTrustedProxies" placeholder="192.168.2.1, 10.0.0.1" style="flex:1">
-        <button class="btn" onclick="saveTrustedProxies()">保存</button>
-        <span id="setTPOut" class="muted" style="margin-left:6px"></span>
+      <div class="card">
+        <h2>115 库目录 cid 映射</h2>
+        <div class="sub">Cookie 填好后点「🔍 自动检测」按 emby 库名扫 115 目录前两层填入;手动备选:115.com 进入目录 → URL 里 <code>?cid=XXXXXXXX</code>。</div>
+        <div id="setC115Cids" style="margin-top:6px"><span class="muted">加载中…</span></div>
+        <div class="row" style="margin-top:8px">
+          <button class="btn ghost" onclick="autoCid()">🔍 自动检测</button>
+          <button class="btn" onclick="saveConfig('c115cids')">保存映射</button>
+          <span id="setCidOut" class="muted" style="margin-left:6px"></span>
+        </div>
       </div>
+    </div>
 
-      <h2 style="font-size:14px;margin-top:18px">🛰️ 自动 strm(CD2 webhook 实时入库)</h2>
-      <div class="muted" style="font-size:12px;margin:2px 0 6px">CloudDrive2 挂载有新文件 → 自动生成 strm 并通知 Emby 入库。需在 CD2 配置 webhook 指向下方地址。<b style="color:#34d399">改完即时生效,无需重启。</b></div>
-      <div class="row" style="margin-bottom:6px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="setAsEnabled"> 启用自动 strm(总开关)</label></div>
-      <div class="row" style="margin-bottom:6px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="setAsFullauto"> 全自动入库(无 tmdbid 文件夹也生成 + 自动绑 TMDb;关=只处理带 tmdbid / 已知文件夹)</label></div>
-      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">CD2 挂载前缀</span><input id="setAsPrefix" style="flex:1" placeholder="/CloudNAS/CloudDrive"></div>
-      <div class="muted" style="font-size:11px;margin:0 0 6px">webhook 推送的 source_file 里、库名前面那段(剥掉它才能定位到 库/路径)。配错会"未映射",见下方状态。</div>
-      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">webhook 密钥</span><input id="setAsSecret" placeholder="留空=关闭功能;已设留空=不改" style="flex:1" oninput="buildAsUrl()"><button class="btn ghost" onclick="genAsSecret()">🎲 生成</button></div>
-      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">防抖窗口</span><input id="setAsDebounce" type="number" min="1" max="120" style="width:80px"><span class="muted" style="font-size:11px;margin-left:6px">秒 — 一批文件合并成一次生成(剧集包别每集刷一次)</span></div>
-      <div class="row" style="margin-bottom:6px"><button class="btn" onclick="saveAutostrm()">保存</button><span id="setAsOut" class="muted" style="margin-left:6px"></span></div>
-      <div class="muted" style="font-size:12px;margin:8px 0 4px">把这条 URL 填进 CD2 的 <code>webhook.toml</code>(<code>[file_system_watcher]</code> 的 url),CD2 与本工具同机:</div>
-      <div class="row" style="margin-bottom:6px"><input id="setAsWebhookUrl" readonly style="flex:1;font-family:monospace;font-size:11px" onclick="this.select()"><button class="btn ghost" onclick="copyAsUrl()">复制</button></div>
-      <div class="row" style="margin-top:10px"><button class="btn ghost" onclick="loadAutostrmStatus()">🔄 刷新状态</button><span id="setAsStatus" class="muted" style="margin-left:6px"></span></div>
-      <div id="setAsStatusBox" style="margin-top:6px;font-size:12px"></div>
-
-      <h2 style="font-size:14px;margin-top:18px">存储路径(高级,换机器才需改)</h2>
-      <div class="muted" style="font-size:12px;margin:2px 0 6px">这三个路径决定工具去哪读写 strm / 115 文件 / 调 docker。默认是群晖布局。<b style="color:var(--warn)">填错会让扫描/删除指向错地方,务必准确;改完要重启服务才生效。</b></div>
-      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">115 挂载根</span><input id="setCd" style="flex:1" placeholder="/volume1/docker/clouddrive2/CloudNAS/CloudDrive"></div>
-      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">strm 根</span><input id="setStrm" style="flex:1" placeholder="/volume1/strm"></div>
-      <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">docker 路径</span><input id="setDocker" style="flex:1" placeholder="/usr/local/bin/docker"></div>
-      <div class="row" style="margin-bottom:18px"><button class="btn" onclick="savePaths()">保存路径</button><span id="setPathOut" class="muted" style="margin-left:6px"></span></div>
-
-      <h2 style="font-size:14px;margin-top:18px">配置导出 / 导入</h2>
-      <div class="muted" style="font-size:12px;margin:2px 0 6px">备份当前配置(密码 hash 和 cookie 会被替换为 <code>&lt;redacted&gt;</code>)或从 JSON 导入。schema 不匹配会被拒。</div>
-      <div class="row">
-        <button class="btn ghost" onclick="exportConfig()">📤 导出 .json</button>
-        <input type="file" id="importCfgFile" accept=".json" style="flex:1" onchange="importConfigFromFile(event)">
-        <span id="setExpImpOut" class="muted" style="margin-left:6px"></span>
+    <div class="set-panel hide" id="set-auto">
+      <div class="card">
+        <h2>🛰️ 自动 strm(CD2 webhook 实时入库)</h2>
+        <div class="sub">CloudDrive2 挂载有新文件 → 自动生成 strm 并通知 Emby 入库。需在 CD2 配置 webhook 指向下方地址。<b style="color:#34d399">改完即时生效,无需重启。</b></div>
+        <div class="row" style="margin-bottom:6px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="setAsEnabled"> 启用自动 strm(总开关)</label></div>
+        <div class="row" style="margin-bottom:6px"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="setAsFullauto"> 全自动入库(无 tmdbid 文件夹也生成 + 自动绑 TMDb;关=只处理带 tmdbid / 已知文件夹)</label></div>
+        <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">CD2 挂载前缀</span><input id="setAsPrefix" style="flex:1" placeholder="/CloudNAS/CloudDrive"></div>
+        <div class="muted" style="font-size:11px;margin:0 0 6px">webhook 推送的 source_file 里、库名前面那段(剥掉它才能定位到 库/路径)。配错会"未映射",见下方状态。</div>
+        <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">webhook 密钥</span><input id="setAsSecret" placeholder="留空=关闭功能;已设留空=不改" style="flex:1" oninput="buildAsUrl()"><button class="btn ghost" onclick="genAsSecret()">🎲 生成</button></div>
+        <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">防抖窗口</span><input id="setAsDebounce" type="number" min="1" max="120" style="width:80px"><span class="muted" style="font-size:11px;margin-left:6px">秒 — 一批文件合并成一次生成(剧集包别每集刷一次)</span></div>
+        <div class="row" style="margin-bottom:6px"><button class="btn" onclick="saveAutostrm()">保存</button><span id="setAsOut" class="muted" style="margin-left:6px"></span></div>
+        <div class="muted" style="font-size:12px;margin:8px 0 4px">把这条 URL 填进 CD2 的 <code>webhook.toml</code>(<code>[file_system_watcher]</code> 的 url),CD2 与本工具同机:</div>
+        <div class="row" style="margin-bottom:6px"><input id="setAsWebhookUrl" readonly style="flex:1;font-family:var(--mono);font-size:11px" onclick="this.select()"><button class="btn ghost" onclick="copyAsUrl()">复制</button></div>
+        <div class="row" style="margin-top:10px"><button class="btn ghost" onclick="loadAutostrmStatus()">🔄 刷新状态</button><span id="setAsStatus" class="muted" style="margin-left:6px"></span></div>
+        <div id="setAsStatusBox" style="margin-top:6px;font-size:12px"></div>
       </div>
-    </div></div>
+    </div>
+
+    <div class="set-panel hide" id="set-sec">
+      <div class="card">
+        <h2>工具登录密码</h2>
+        <div class="row"><button class="btn" onclick="chPwModal()">🔑 修改登录密码</button><span class="muted" style="font-size:12px">改密需输旧密码(防他人借会话改密)</span></div>
+      </div>
+      <div class="card">
+        <h2>反代信任 IP(trusted_proxies)</h2>
+        <div class="sub">如果本工具跑在 Nginx/Caddy 后,需要把反代 IP 加这里,登录失败计数才会按真实客户端 IP 计(而不是反代 IP)。逗号分隔多个,留空 = 不读 X-Forwarded-For。</div>
+        <div class="row">
+          <input id="setTrustedProxies" placeholder="192.168.2.1, 10.0.0.1" style="flex:1">
+          <button class="btn" onclick="saveTrustedProxies()">保存</button>
+          <span id="setTPOut" class="muted" style="margin-left:6px"></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="set-panel hide" id="set-adv">
+      <div class="card">
+        <h2>存储路径(换机器才需改)</h2>
+        <div class="sub">这三个路径决定工具去哪读写 strm / 115 文件 / 调 docker。默认是群晖布局。<b style="color:var(--warn)">填错会让扫描/删除指向错地方,务必准确;改完要重启服务才生效。</b></div>
+        <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">115 挂载根</span><input id="setCd" style="flex:1" placeholder="/volume1/docker/clouddrive2/CloudNAS/CloudDrive"></div>
+        <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">strm 根</span><input id="setStrm" style="flex:1" placeholder="/volume1/strm"></div>
+        <div class="row" style="margin-bottom:6px"><span class="muted" style="width:96px">docker 路径</span><input id="setDocker" style="flex:1" placeholder="/usr/local/bin/docker"></div>
+        <div class="row"><button class="btn" onclick="savePaths()">保存路径</button><span id="setPathOut" class="muted" style="margin-left:6px"></span></div>
+      </div>
+      <div class="card">
+        <h2>配置导出 / 导入</h2>
+        <div class="sub">备份当前配置(密码 hash 和 cookie 会被替换为 <code>&lt;redacted&gt;</code>)或从 JSON 导入。schema 不匹配会被拒。</div>
+        <div class="row">
+          <button class="btn ghost" onclick="exportConfig()">📤 导出 .json</button>
+          <input type="file" id="importCfgFile" accept=".json" style="flex:1" onchange="importConfigFromFile(event)">
+          <span id="setExpImpOut" class="muted" style="margin-left:6px"></span>
+        </div>
+      </div>
+    </div>
   </section>
 
-</div></div>
+</div></div></div>
 <div id="toast" class="toast hide"></div>
 
 <script>
@@ -1445,6 +1529,16 @@ async function logout(){
   CSRF=""; sessionStorage.removeItem("emby_csrf");
   $("#app").classList.add("hide"); $("#login").classList.remove("hide");
 }
+function toggleNav(){
+  const c = document.body.classList.toggle('nav-collapsed');
+  try{ localStorage.setItem('navCollapsed', c?'1':'0'); }catch(e){}
+  const ico=document.getElementById('navCollapseIco'); if(ico) ico.textContent = c?'»':'«';
+}
+// 设置页子分区切换
+function setTab(name){
+  document.querySelectorAll('.set-tab').forEach(b=>b.classList.toggle('on', b.dataset.set===name));
+  document.querySelectorAll('.set-panel').forEach(p=>p.classList.toggle('hide', p.id!=='set-'+name));
+}
 function tab(name){
   document.querySelectorAll("nav button").forEach(b=>b.classList.toggle("on",b.dataset.tab===name));
   document.querySelectorAll("section").forEach(s=>s.classList.toggle("hide",s.id!==name));
@@ -1601,6 +1695,7 @@ function initShell(){
   // 主题
   const applyTheme = (t)=>{ document.body.dataset.theme = t==='light'?'light':'dark'; localStorage.setItem('theme',t); };
   applyTheme(localStorage.getItem('theme') || (matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'));
+  try{ if(localStorage.getItem('navCollapsed')==='1'){ document.body.classList.add('nav-collapsed'); const _ni=document.getElementById('navCollapseIco'); if(_ni)_ni.textContent='»'; } }catch(e){}
   const themeBtn = document.querySelector('#hdrTheme');
   if (themeBtn) themeBtn.addEventListener('click', ()=>applyTheme(document.body.dataset.theme==='light'?'dark':'light'));
 
