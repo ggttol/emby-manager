@@ -73,6 +73,13 @@ def _version():
 _c115_req = _c115._c115_req
 
 
+class BodyError(Exception):
+    def __init__(self, status, msg):
+        super().__init__(msg)
+        self.status = status
+        self.msg = msg
+
+
 def c115_test(cookie_override=None):
     return _c115.c115_test(_c115_req, cookie_override)
 
@@ -184,9 +191,16 @@ class H(BaseHTTPRequestHandler):
         # 1MB 上限:防超大/慢速 body 拖死 handler 线程(所有 POST 含 webhook;协议 HTTP/1.0 无 keep-alive,
         # 不读 body 直接回 → 连接关闭丢弃剩余字节,不会串包)
         if ln > 1048576:
+            raise BodyError(413, "请求体过大")
+        if not ln:
             return {}
-        try: return json.loads(self.rfile.read(ln).decode("utf-8")) if ln else {}
-        except Exception: return {}
+        try:
+            obj = json.loads(self.rfile.read(ln).decode("utf-8"))
+        except Exception:
+            raise BodyError(400, "JSON 解析失败")
+        if not isinstance(obj, dict):
+            raise BodyError(400, "JSON body 必须是对象")
+        return obj
     def do_GET(self):
         u = urllib.parse.urlparse(self.path); path = u.path
         if path in ("/", "/index.html"):
@@ -288,7 +302,11 @@ class H(BaseHTTPRequestHandler):
             return self._json({"err": "未知接口"}, 404)
         return self._send(404, "text/plain", "404")
     def do_POST(self):
-        path = urllib.parse.urlparse(self.path).path; b = self._body()
+        path = urllib.parse.urlparse(self.path).path
+        try:
+            b = self._body()
+        except BodyError as e:
+            return self._json({"err": e.msg}, e.status)
         if path == "/api/login":
             # 反代场景:client_address[0] 是反代 IP,真客户端 IP 走 X-Forwarded-For 但只在 client_address 在 trusted_proxies 时才信
             from lib.auth import client_ip_for_login
@@ -501,7 +519,10 @@ class H(BaseHTTPRequestHandler):
     def do_DELETE(self):
         if not self._auth(): return self._json({"err": "未登录"}, 401)
         if not self._csrf_ok(): return self._json({"err": "CSRF 校验失败,刷新页面重试"}, 403)
-        b = self._body()
+        try:
+            b = self._body()
+        except BodyError as e:
+            return self._json({"err": e.msg}, e.status)
         p = urllib.parse.urlparse(self.path).path
         # 与 do_POST 一致的分层脱敏:不把内部异常字符串(可能含 /volume1 路径)原样回客户端
         try:

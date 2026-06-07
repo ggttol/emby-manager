@@ -91,6 +91,44 @@ def req(method, path, body=None, cookie=None, csrf=None, raw=False, timeout=10):
     return r.status, dict(r.getheaders()), parsed
 
 
+def req_bytes(method, path, body_bytes, cookie=None, csrf=None, timeout=10):
+    c = HTTPConnection("127.0.0.1", SERVER_PORT, timeout=timeout)
+    headers = {"Content-Type": "application/json"}
+    if cookie:
+        headers["Cookie"] = cookie
+    if csrf:
+        headers["X-CSRF-Token"] = csrf
+    c.request(method, path, body_bytes, headers)
+    r = c.getresponse()
+    raw = r.read()
+    c.close()
+    try:
+        parsed = json.loads(raw.decode("utf-8", "ignore")) if raw else {}
+    except Exception:
+        parsed = {}
+    return r.status, dict(r.getheaders()), parsed
+
+
+def req_declared_length(method, path, content_length, cookie=None, csrf=None, timeout=10):
+    c = HTTPConnection("127.0.0.1", SERVER_PORT, timeout=timeout)
+    c.putrequest(method, path)
+    c.putheader("Content-Type", "application/json")
+    c.putheader("Content-Length", str(content_length))
+    if cookie:
+        c.putheader("Cookie", cookie)
+    if csrf:
+        c.putheader("X-CSRF-Token", csrf)
+    c.endheaders()
+    r = c.getresponse()
+    raw = r.read()
+    c.close()
+    try:
+        parsed = json.loads(raw.decode("utf-8", "ignore")) if raw else {}
+    except Exception:
+        parsed = {}
+    return r.status, dict(r.getheaders()), parsed
+
+
 def parse_set_cookie(headers):
     """提取 Set-Cookie 中 emby_tok=... 的值"""
     sc = headers.get("Set-Cookie", "")
@@ -147,6 +185,35 @@ class AuthGateTests(unittest.TestCase):
         # 非 login/logout 的 POST 也得先 auth
         s, h, b = req("POST", "/api/scan", {"lib": "x"})
         self.assertEqual(s, 401)
+
+
+# ============================================================
+# 2.5) JSON body 错误应明确返回 400/413,不能静默当 {}
+# ============================================================
+class BodyParsingTests(unittest.TestCase):
+    def test_malformed_json_login_returns_400(self):
+        clear_login_fail()
+        s, h, b = req_bytes("POST", "/api/login", b"{bad json")
+        self.assertEqual(s, 400)
+        self.assertEqual(b.get("err"), "JSON 解析失败")
+
+    def test_json_array_body_returns_400(self):
+        clear_login_fail()
+        s, h, b = req_bytes("POST", "/api/login", b"[]")
+        self.assertEqual(s, 400)
+        self.assertEqual(b.get("err"), "JSON body 必须是对象")
+
+    def test_oversized_json_body_returns_413(self):
+        s, h, b = req_declared_length("POST", "/api/login", 1048576 + 1)
+        self.assertEqual(s, 413)
+        self.assertEqual(b.get("err"), "请求体过大")
+
+    def test_malformed_json_delete_returns_400_after_auth(self):
+        tok, csrf = login_get_token_csrf()
+        s, h, b = req_bytes("DELETE", "/api/item", b"{bad json",
+                            cookie="emby_tok=" + tok, csrf=csrf)
+        self.assertEqual(s, 400)
+        self.assertEqual(b.get("err"), "JSON 解析失败")
 
 
 # ============================================================
