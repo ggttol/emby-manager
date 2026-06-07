@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import lib.business as biz
 
 
-def _run_replace(win, lose, make_rename_strm=False):
+def _run_replace(win, lose, make_bad_perms=False):
     """搭 CD/STRM 临时目录跑 replace_folder,返回 epost 收到的 Updates 列表。"""
     fol = "电视剧追更"
     captured = {}
@@ -18,8 +18,12 @@ def _run_replace(win, lose, make_rename_strm=False):
         # win 的 strm 必在(replace 要么删要么改名它)
         win_strm = os.path.join(strm, fol, win)
         os.makedirs(win_strm)
-        with open(os.path.join(win_strm, "S01E01.strm"), "w") as f:
+        sp = os.path.join(win_strm, "S01E01.strm")
+        with open(sp, "w") as f:
             f.write("/media/%s/%s/S01E01.mkv" % (fol, win))
+        if make_bad_perms:
+            os.chmod(win_strm, 0o700)
+            os.chmod(sp, 0o600)
         L = {"电视剧追更": {"id": "1", "ctype": "tvshows", "folder": fol}}
 
         def fake_epost(path, body=None, **k):
@@ -32,7 +36,13 @@ def _run_replace(win, lose, make_rename_strm=False):
              patch.object(biz, "epost", fake_epost), \
              patch.object(biz, "_undo_record", lambda *a, **k: None):
             r = biz.replace_folder("电视剧追更", win, lose)
-    return r, captured.get("updates", []), fol
+            kept = os.path.join(strm, fol, r.get("kept_as", ""))
+            if os.path.isdir(kept):
+                captured["kept_dir_mode"] = os.stat(kept).st_mode & 0o777
+                kept_file = os.path.join(kept, "S01E01.strm")
+                if os.path.exists(kept_file):
+                    captured["kept_file_mode"] = os.stat(kept_file).st_mode & 0o777
+    return r, captured.get("updates", []), fol, captured
 
 
 def _find(updates, path_suffix):
@@ -47,7 +57,7 @@ class TestReplaceFolderNotify(unittest.TestCase):
         """留原名、删 (1):被删的 (1) 路径必须发 Deleted(原 bug 发的是 Modified → 孤儿)。"""
         win = "某剧(2026)[tmdbid-9]"
         lose = "某剧(2026)[tmdbid-9](1)"
-        r, updates, fol = _run_replace(win, lose)
+        r, updates, fol, _ = _run_replace(win, lose)
         self.assertTrue(r.get("ok"))
         self.assertEqual(r.get("kept_as"), win)  # 没改名
         self.assertEqual(_find(updates, "/%s/%s" % (fol, lose)), "Deleted",
@@ -59,7 +69,7 @@ class TestReplaceFolderNotify(unittest.TestCase):
         """删原名、(1) 改名回原名:win 旧 (1) 路径没了 → Deleted;lose 路径被占用 → Modified。"""
         win = "某剧(2026)[tmdbid-9](1)"
         lose = "某剧(2026)[tmdbid-9]"
-        r, updates, fol = _run_replace(win, lose)
+        r, updates, fol, _ = _run_replace(win, lose)
         self.assertTrue(r.get("ok"))
         self.assertEqual(r.get("kept_as"), lose)  # win 改名回 lose 名
         self.assertEqual(_find(updates, "/%s/%s" % (fol, win)), "Deleted",
@@ -71,12 +81,20 @@ class TestReplaceFolderNotify(unittest.TestCase):
         """任何方向都不该对一个已不存在的路径发 Modified(那正是原 bug)。"""
         for win, lose in [("某剧[tmdbid-9]", "某剧[tmdbid-9](1)"),
                           ("某剧[tmdbid-9](1)", "某剧[tmdbid-9]")]:
-            r, updates, fol = _run_replace(win, lose)
+            r, updates, fol, _ = _run_replace(win, lose)
             for u in updates:
                 if u.get("UpdateType") == "Modified":
                     # Modified 只允许打在改名后仍存在的路径上(kept_as 那个)
                     self.assertTrue(u.get("Path", "").endswith(r.get("kept_as")),
                                     "Modified 不能打在已删除的路径 %s" % u.get("Path"))
+
+    def test_renamed_strm_permissions_are_repaired(self):
+        win = "某剧[tmdbid-9](1)"
+        lose = "某剧[tmdbid-9]"
+        r, _updates, _fol, captured = _run_replace(win, lose, make_bad_perms=True)
+        self.assertTrue(r.get("ok"))
+        self.assertEqual(captured.get("kept_dir_mode"), 0o755)
+        self.assertEqual(captured.get("kept_file_mode"), 0o644)
 
 
 if __name__ == "__main__":

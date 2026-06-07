@@ -83,7 +83,7 @@ def scan_lib(name, keyword=None):
         lock.release()
 
 
-def _missing_strm_in_top(src_base, strm_base, tp):
+def _missing_strm_in_top(src_base, strm_base, tp, fixed_perms=None):
     """walk 单个 top 目录 tp,返回缺 strm 的 [(rel, filename)]。rel 相对 src_base。
     _scan_lib_locked(全库) 与 gen_strm_for_lib_path(增量) 共用,保证两条路径找缺的逻辑一致。"""
     missing = []
@@ -94,6 +94,8 @@ def _missing_strm_in_top(src_base, strm_base, tp):
                 sp = os.path.join(strm_base, rel, os.path.splitext(f)[0] + ".strm")
                 if not os.path.exists(sp):
                     missing.append((rel, f))
+                elif fixed_perms is not None and _ensure_strm_readable(strm_base, rel, sp):
+                    fixed_perms.append(sp)
     return missing
 
 
@@ -104,12 +106,82 @@ def _write_strm(strm_base, media, rel, filename):
     全库扫描与 webhook 增量都走这一个,保证产出的 strm content 字节一致。"""
     dd = os.path.join(strm_base, rel)
     os.makedirs(dd, exist_ok=True)
+    _chmod_public_tree(strm_base, rel)
     sp = os.path.join(dd, os.path.splitext(filename)[0] + ".strm")
     if os.path.exists(sp):
+        _chmod_public_file(sp)
         return None
     with open(sp, "w", encoding="utf-8") as w:
         w.write(media + "/" + os.path.join(rel, filename))
+    _chmod_public_file(sp)
     return sp
+
+
+def _chmod_public_tree(base, rel):
+    """Make newly-created STRM dirs readable by the Emby process despite restrictive umask."""
+    cur = base
+    changed = _chmod_public_dir(cur)
+    for part in rel.split(os.sep):
+        if not part or part == ".":
+            continue
+        cur = os.path.join(cur, part)
+        if _chmod_public_dir(cur):
+            changed = True
+    return changed
+
+
+def _chmod_public_dir(path):
+    try:
+        old = os.stat(path).st_mode & 0o777
+        if old != 0o755:
+            os.chmod(path, 0o755)
+            return True
+    except OSError:
+        logger.warning("设置 strm 目录权限失败: %s", path, exc_info=True)
+    return False
+
+
+def _chmod_public_file(path):
+    try:
+        old = os.stat(path).st_mode & 0o777
+        if old != 0o644:
+            os.chmod(path, 0o644)
+            return True
+    except OSError:
+        logger.warning("设置 strm 文件权限失败: %s", path, exc_info=True)
+    return False
+
+
+def _ensure_strm_readable(strm_base, rel, sp):
+    changed = _chmod_public_tree(strm_base, rel)
+    if _chmod_public_file(sp):
+        changed = True
+    return changed
+
+
+def _chmod_public_subtree(path):
+    """Repair an existing STRM subtree after rename/move so Emby can traverse it."""
+    changed = False
+    if not os.path.isdir(path):
+        return False
+    for root, _ds, fs in os.walk(path):
+        if _chmod_public_dir(root):
+            changed = True
+        for f in fs:
+            if _chmod_public_file(os.path.join(root, f)):
+                changed = True
+    return changed
+
+
+def _auto_initial_enabled():
+    return bool(CFG.get("auto_strm_fullauto"))
+
+
+def _should_generate_missing_top(top, strm_base):
+    """首次无 tmdbid 目录是否生成 STRM。全自动开启时,手动扫描也应与 webhook 一致。"""
+    has_tmdb = bool(re.search(r'tmdbid[-_]\d+', top, re.IGNORECASE))
+    known_folder = os.path.isdir(os.path.join(strm_base, top))
+    return has_tmdb or known_folder or _auto_initial_enabled()
 
 
 def _scan_lib_locked(name, meta, keyword):
@@ -118,7 +190,7 @@ def _scan_lib_locked(name, meta, keyword):
     if not os.path.isdir(src_base):
         return {"err": "115 文件夹不存在: " + src_base}
     kw = (keyword or "").strip()
-    new_files = []; new_folders = {}; attention = []; matched = 0
+    new_files = []; new_folders = {}; attention = []; matched = 0; fixed_perms = []
     for top in sorted(os.listdir(src_base)):
         if kw and kw not in top:          # 填了关键词就只扫匹配的文件夹(快)
             continue
@@ -126,11 +198,11 @@ def _scan_lib_locked(name, meta, keyword):
         if not os.path.isdir(tp):
             continue
         matched += 1
-        missing = _missing_strm_in_top(src_base, strm_base, tp)
+        missing = _missing_strm_in_top(src_base, strm_base, tp, fixed_perms)
         if not missing:
             continue
-        # 带 tmdbid 的新文件夹,或"已有 strm 的已知文件夹"(如海贼王老剧补新集)→ 照常生成
-        if re.search(r'tmdbid[-_]\d+', top, re.IGNORECASE) or os.path.isdir(os.path.join(strm_base, top)):
+        # 带 tmdbid、已有 strm 的已知文件夹,或全自动开启时的首次目录 → 照常生成
+        if _should_generate_missing_top(top, strm_base):
             for rel, f in missing:
                 if _write_strm(strm_base, media, rel, f):
                     new_files.append(f)
@@ -139,10 +211,10 @@ def _scan_lib_locked(name, meta, keyword):
             attention.append("%s (+%d个视频,无tmdbid且首次出现,需看一眼)" % (top, len(missing)))
     # 清孤儿 strm —— 走共享 helper(挂载保险丝在里面,两个扫描器统一)
     orphans = _cleanup_orphans(name, strm_base, kw)
-    if new_files or orphans:
+    if new_files or orphans or fixed_perms:
         epost("/Items/%s/Refresh" % meta["id"], {"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default"})
-        log("扫描[%s] 新增 strm %d,清孤儿 %d" % (name, len(new_files), orphans))
-    return {"lib": name, "keyword": kw, "matched": matched, "new_count": len(new_files), "new_folders": new_folders, "attention": attention, "orphans_cleaned": orphans, "refreshed": bool(new_files or orphans)}
+        log("扫描[%s] 新增 strm %d,清孤儿 %d,修权限 %d" % (name, len(new_files), orphans, len(fixed_perms)))
+    return {"lib": name, "keyword": kw, "matched": matched, "new_count": len(new_files), "new_folders": new_folders, "attention": attention, "orphans_cleaned": orphans, "permissions_fixed": len(fixed_perms), "refreshed": bool(new_files or orphans or fixed_perms)}
 
 
 # ===== 增量生成(webhook / 增量轮询共用)=====
@@ -175,11 +247,15 @@ def gen_strm_for_lib_path(name, top, fullauto=None, do_refresh=True):
             return {"lib": name, "top": top, "new_count": 0, "skipped": "mount_dead"}
         if not os.path.isdir(tp):
             return {"lib": name, "top": top, "new_count": 0, "skipped": "no_such_dir"}
-        missing = _missing_strm_in_top(src_base, strm_base, tp)
+        fixed_perms = []
+        missing = _missing_strm_in_top(src_base, strm_base, tp, fixed_perms)
         if not missing:
-            return {"lib": name, "top": top, "new_count": 0, "needs_match": False}
-        has_tmdb = bool(re.search(r'tmdbid[-_]\d+', top, re.IGNORECASE)) or os.path.isdir(os.path.join(strm_base, top))
-        if not has_tmdb and not fullauto:
+            if fixed_perms and do_refresh:
+                epost("/Items/%s/Refresh" % meta["id"],
+                      {"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default"})
+            return {"lib": name, "top": top, "new_count": 0, "permissions_fixed": len(fixed_perms), "needs_match": False}
+        has_identity = bool(re.search(r'tmdbid[-_]\d+', top, re.IGNORECASE)) or os.path.isdir(os.path.join(strm_base, top))
+        if not has_identity and not fullauto:
             # 非全自动 + 无 tmdbid 首现:沿用谨慎策略,不生成,只标记需关注
             return {"lib": name, "top": top, "new_count": 0, "needs_match": False,
                     "attention": "%s 无 tmdbid 首现,未自动生成(全自动关)" % top}
@@ -193,7 +269,8 @@ def gen_strm_for_lib_path(name, top, fullauto=None, do_refresh=True):
                       {"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default"})
             log("autostrm[%s] 新增 strm %d (%s)%s" % (name, len(new), top, "" if do_refresh else " [批量,稍后统一刷新]"))
         return {"lib": name, "top": top, "new_count": len(new),
-                "needs_match": bool(new) and not has_tmdb,
+                "permissions_fixed": len(fixed_perms),
+                "needs_match": bool(new) and not has_identity,
                 "lib_id": meta["id"], "folder": folder}
 
 
@@ -253,7 +330,8 @@ def analyze_dups():
                 for f in fs:
                     if f.endswith(".strm"):
                         try:
-                            c = open(os.path.join(root, f), encoding="utf-8").read().strip()
+                            with open(os.path.join(root, f), encoding="utf-8") as fh:
+                                c = fh.read().strip()
                         except Exception:
                             c = f
                         medias.append(c)
@@ -636,14 +714,13 @@ def _move_item_locked(from_lib, folder, to_lib, emby_id, L, on_conflict="error")
     if os.path.isdir(old_strm):
         shutil.rmtree(old_strm)
     media = "/media/" + tf; n = 0
+    dst_base = os.path.dirname(dst)
     for root, ds, fs in os.walk(dst):
-        rel = os.path.relpath(root, os.path.join(CD, tf))
+        rel = os.path.relpath(root, dst_base)
         for f in sorted(fs):
             if f.lower().endswith(VE):
-                dd = os.path.join(STRM, tf, rel); os.makedirs(dd, exist_ok=True)
-                with open(os.path.join(dd, os.path.splitext(f)[0] + ".strm"), "w", encoding="utf-8") as w:
-                    w.write(media + "/" + os.path.join(rel, f))
-                n += 1
+                if _write_strm(os.path.join(STRM, tf), media, rel, f):
+                    n += 1
     epost("/Library/Media/Updated", body={"Updates": [{"Path": "/strm/%s/%s" % (ff, folder), "UpdateType": "Deleted"}]})
     if emby_id:
         edelete("/Items/%s" % emby_id)
@@ -666,8 +743,15 @@ def create_library(name, ctype):
     # path traversal guard:库名作为文件夹名,不能含 ../或绝对路径
     # 让 ValueError 直接冒到 do_POST 的 except ValueError → 400
     _safe_under(STRM, folder); _safe_under(CD, folder)
-    os.makedirs(os.path.join(STRM, folder), exist_ok=True)
-    os.makedirs(os.path.join(CD, folder), exist_ok=True)
+    strm_dir = os.path.join(STRM, folder)
+    cd_dir = os.path.join(CD, folder)
+    os.makedirs(strm_dir, exist_ok=True)
+    os.makedirs(cd_dir, exist_ok=True)
+    _chmod_public_dir(strm_dir)
+    try:
+        os.chmod(cd_dir, 0o755)
+    except OSError:
+        logger.warning("设置 115 库目录权限失败: %s", cd_dir, exc_info=True)
     src_opts = {}
     try:
         for f in eget("/Library/VirtualFolders"):
@@ -1010,19 +1094,20 @@ def import_config(b):
 def scan_all_async(tid):
     libs = list(fetch_libs().keys())
     task_set(tid, total=len(libs))
-    out = []; tot_new = 0; tot_orph = 0; attn = []
+    out = []; tot_new = 0; tot_orph = 0; tot_perm = 0; attn = []
     for i, name in enumerate(libs):
         if task_is_cancelled(tid): break
         task_set(tid, status_text="扫 " + name)
         try:
             r = scan_lib(name)
             tot_new += r.get("new_count", 0); tot_orph += r.get("orphans_cleaned", 0)
+            tot_perm += r.get("permissions_fixed", 0)
             for a in (r.get("attention") or []): attn.append(name + ": " + a)
         except Exception as e:
             r = {"err": str(e)}
         out.append({"lib": name, "result": r})
         task_set(tid, progress=i + 1)
-    return {"libs_scanned": len(out), "new_count": tot_new, "orphans_cleaned": tot_orph, "attention": attn, "results": out}
+    return {"libs_scanned": len(out), "new_count": tot_new, "orphans_cleaned": tot_orph, "permissions_fixed": tot_perm, "attention": attn, "results": out}
 
 
 def zhuigeng_status_async(tid):
@@ -1075,7 +1160,8 @@ def list_strm(lib, folder):
                 continue
             p = os.path.join(root, f)
             try:
-                target = open(p, encoding="utf-8").read().strip()
+                with open(p, encoding="utf-8") as fh:
+                    target = fh.read().strip()
             except Exception:
                 target = "(读不到)"
             rel = os.path.relpath(p, base)
@@ -1219,6 +1305,7 @@ def replace_folder(lib, win_folder, lose_folder):
             if os.path.exists(target_strm):
                 shutil.rmtree(target_strm)
             os.rename(win_strm, target_strm)
+            _chmod_public_subtree(target_strm)
             # strm 内容里 /media/<lib>/<win_folder>/... → /media/<lib>/<lose_folder>/...
             for root, _ds, fs in os.walk(target_strm):
                 for f in fs:
@@ -1233,8 +1320,12 @@ def replace_folder(lib, win_folder, lose_folder):
                         if new_content != content:
                             with open(p, "w", encoding="utf-8") as w:
                                 w.write(new_content)
+                            _chmod_public_file(p)
                     except Exception:
                         logger.exception("改 strm content 失败 %s", p)
+    kept_strm = os.path.join(STRM, fol, renamed_to)
+    if os.path.isdir(kept_strm):
+        _chmod_public_subtree(kept_strm)
     # 3. 通知 emby —— 被删/消失的路径必须发 "Deleted"(发 "Modified" 清不掉已不存在路径的残留条目,
     #    会在 Emby 留下孤儿重复剧集);被新内容占用的路径发 "Modified"/"Created" 让它就地收录。
     #    两个改名方向都要覆盖,否则总有一条路径变成孤儿:
@@ -1920,6 +2011,8 @@ def add_new_pipeline_async(tid, items, default_lib, save_to_lib_fn):
     new_total = len(items) + len(libs_list) + 3  # +刮削等待+海报+重复
     task_set(tid, total=new_total)
     # Phase 2:扫各涉及 lib
+    ok_by_lib = {lib: any(s.get("ok") and s.get("lib") == lib for s in report["shares"]) for lib in libs_list}
+    retry_libs = []
     for j, lib in enumerate(libs_list):
         if task_is_cancelled(tid): break
         task_set(tid, progress=len(items) + j, status_text="扫库 " + lib)
@@ -1928,11 +2021,35 @@ def add_new_pipeline_async(tid, items, default_lib, save_to_lib_fn):
             report["libs_scanned"][lib] = {
                 "new_count": r.get("new_count", 0),
                 "orphans_cleaned": r.get("orphans_cleaned", 0),
+                "permissions_fixed": r.get("permissions_fixed", 0),
                 "matched": r.get("matched", 0),
                 "attention": r.get("attention") or [],
             }
+            if ok_by_lib.get(lib) and not r.get("new_count") and not r.get("attention"):
+                retry_libs.append(lib)
         except Exception as e:
             report["libs_scanned"][lib] = {"err": str(e)}
+    # CloudDrive/115 occasionally exposes the newly received folder a few seconds after receive returns.
+    # One short retry keeps "一条龙" from reporting success while no STRM was produced; webhook/monitor still remain the long-tail fallback.
+    if retry_libs and not task_is_cancelled(tid):
+        for _ in range(8):
+            if task_is_cancelled(tid): break
+            time.sleep(1)
+        for lib in retry_libs:
+            if task_is_cancelled(tid): break
+            task_set(tid, status_text="补扫库 " + lib)
+            try:
+                r = scan_lib(lib)
+                prev = report["libs_scanned"].get(lib) or {}
+                prev["new_count"] = prev.get("new_count", 0) + r.get("new_count", 0)
+                prev["orphans_cleaned"] = prev.get("orphans_cleaned", 0) + r.get("orphans_cleaned", 0)
+                prev["permissions_fixed"] = prev.get("permissions_fixed", 0) + r.get("permissions_fixed", 0)
+                prev["matched"] = max(prev.get("matched", 0), r.get("matched", 0))
+                prev["attention"] = (prev.get("attention") or []) + (r.get("attention") or [])
+                prev["retry"] = True
+                report["libs_scanned"][lib] = prev
+            except Exception as e:
+                report["libs_scanned"][lib] = {"err": str(e), "retry": True}
     # Phase 3+4:轮询等刮削 + 海报检查合一。
     # 旧实现固定 sleep 8s 远不够(strm 走代理刮削慢),导致没刮完的全被报"无海报"再诱导一键修(误导+加负载)。
     # 改成:每 6s 拉一次涉及库的无海报数,连续两轮不再下降(刮削稳定)或封顶 ~60s 才定稿。
@@ -2001,29 +2118,20 @@ def scan_lib_async(tid, name, keyword=None):
         # 第一趟:列所有 top folder(用于设置 total 让前端进度条有意义)
         tops = sorted(t for t in os.listdir(src_base) if os.path.isdir(os.path.join(src_base, t)) and (not kw or kw in t))
         task_set(tid, total=len(tops), status_text="扫 " + name)
-        new_files = []; new_folders = {}; attention = []; matched = 0
+        new_files = []; new_folders = {}; attention = []; matched = 0; fixed_perms = []
         for idx, top in enumerate(tops):
             if task_is_cancelled(tid):
                 task_set(tid, status_text="取消中…"); break
             task_set(tid, progress=idx, status_text="扫 %s · %s" % (name, top[:40]))
             tp = os.path.join(src_base, top)
             matched += 1
-            missing = []
-            for root, ds, fs in os.walk(tp):
-                rel = os.path.relpath(root, src_base)
-                for f in sorted(fs):
-                    if f.lower().endswith(VE):
-                        sp = os.path.join(strm_base, rel, os.path.splitext(f)[0] + ".strm")
-                        if not os.path.exists(sp):
-                            missing.append((rel, f))
+            missing = _missing_strm_in_top(src_base, strm_base, tp, fixed_perms)
             if not missing:
                 continue
-            if re.search(r'tmdbid[-_]\d+', top, re.IGNORECASE) or os.path.isdir(os.path.join(strm_base, top)):
+            if _should_generate_missing_top(top, strm_base):
                 for rel, f in missing:
-                    dd = os.path.join(strm_base, rel); os.makedirs(dd, exist_ok=True)
-                    with open(os.path.join(dd, os.path.splitext(f)[0] + ".strm"), "w", encoding="utf-8") as w:
-                        w.write(media + "/" + os.path.join(rel, f))
-                    new_files.append(f)
+                    if _write_strm(strm_base, media, rel, f):
+                        new_files.append(f)
                 new_folders[top] = len(missing)
             else:
                 attention.append("%s (+%d个视频,无tmdbid且首次出现,需看一眼)" % (top, len(missing)))
@@ -2031,12 +2139,13 @@ def scan_lib_async(tid, name, keyword=None):
         task_set(tid, status_text="清孤儿 strm…")
         orphans = _cleanup_orphans(name, strm_base, kw, cancel_cb=lambda: task_is_cancelled(tid))
         task_set(tid, progress=len(tops))
-        if new_files or orphans:
+        if new_files or orphans or fixed_perms:
             epost("/Items/%s/Refresh" % meta["id"], {"Recursive": "true", "MetadataRefreshMode": "Default", "ImageRefreshMode": "Default"})
-            log("扫描[%s] async 新增 strm %d, 清孤儿 %d" % (name, len(new_files), orphans))
+            log("扫描[%s] async 新增 strm %d, 清孤儿 %d, 修权限 %d" % (name, len(new_files), orphans, len(fixed_perms)))
         return {"lib": name, "keyword": kw, "matched": matched, "new_count": len(new_files),
                 "new_folders": new_folders, "attention": attention, "orphans_cleaned": orphans,
-                "refreshed": bool(new_files or orphans)}
+                "permissions_fixed": len(fixed_perms),
+                "refreshed": bool(new_files or orphans or fixed_perms)}
     finally:
         lock.release()
 

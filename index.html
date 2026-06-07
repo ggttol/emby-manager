@@ -628,8 +628,11 @@ window.UI = (() => {
     });
     return el;
   }
+  function plain(s) {
+    return s == null ? '' : String(s);
+  }
   function esc(s) {
-    return (s == null ? '' : String(s)).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    return plain(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
   /* ============================================================
@@ -1412,11 +1415,11 @@ window.UI = (() => {
     }
     getValue() { return this.value; }
     _filter(q, showAll) {
-      q = (q || '').toLowerCase().trim();
+      q = plain(q).toLowerCase().trim();
       this._filtered = this.options.filter(o => {
         if (!q || showAll) return true;
-        return (o.label || '').toLowerCase().includes(q) ||
-               (o.sublabel || '').toLowerCase().includes(q) ||
+        return plain(o.label).toLowerCase().includes(q) ||
+               plain(o.sublabel).toLowerCase().includes(q) ||
                String(o.value || '').toLowerCase().includes(q);
       });
       this._focusIdx = this._filtered.length > 0 ? 0 : -1;
@@ -1485,6 +1488,7 @@ const TYPE_CONFIRM_AT = 3;
 // 一次性清掉老版 localStorage 残留(v1.x 把 token 放 localStorage,XSS 风险大)
 try{ localStorage.removeItem("emby_tok"); }catch(e){}
 const $ = s => document.querySelector(s);
+function plain(s){ return s == null ? "" : String(s); }
 // 旧 toast() 转发到 UI.toast(统一成一套堆叠+配色;消歧:出错/失败 自动红)。26 处旧调用不用改就变对。
 function toast(m,ms=2800){
   const s=String(m);
@@ -1920,7 +1924,7 @@ function renderPosterList(){
     <button class="btn" onclick="fixPoster(${idx})">重搜+修复</button></div><div id="cand${idx}" class="hide" style="margin:4px 0 14px 0"></div>`).join("");
 }
 async function fixPoster(idx){
-  const i=NOPOSTER[idx],box=$("#cand"+idx),name=i.folder.replace(/[\(（\[].*$/,'').trim()||i.name;
+  const i=NOPOSTER[idx],box=$("#cand"+idx),name=plain(i.folder).replace(/[\(（\[].*$/,'').trim()||plain(i.name);
   box.classList.remove("hide");box.innerHTML='<span class="spin"></span> 按「'+esc(name)+'」重搜 TMDb…';
   const d=await api(`/api/search?id=${i.id}&type=${i.type}&name=${encodeURIComponent(name)}`);
   let h='<div class="muted" style="margin-bottom:4px">选正确的一条(点一下=绑定+拉海报):</div>';
@@ -2031,18 +2035,38 @@ function mgFilterInput(){ clearTimeout(_mgFilterT); _mgFilterT = setTimeout(rend
 // 高级过滤:tmdb:123 / 年:2024 / 路径:S01,默认搜片名+文件夹。
 // ⚠️ renderItems 和 toggleAll 必须共用这一个,否则全选算出的集合与显示的不一致 → 高级过滤下全选+批量删=误删屏幕外的项
 function filterItems(kw){
-  kw = (kw||"").trim();
+  kw = plain(kw).trim();
   if (!kw) return ITEMS;
   let m;
   if ((m = kw.match(/^tmdb:(\S+)$/i))) return ITEMS.filter(i=>String(i.tmdb||'')===m[1]);
   if ((m = kw.match(/^(?:年|year):(\d{4})$/i))) return ITEMS.filter(i=>String(i.year||'')===m[1]);
-  if ((m = kw.match(/^(?:路径|path):(.+)$/i))){ const p=m[1].toLowerCase(); return ITEMS.filter(i=>(i.folder||'').toLowerCase().includes(p)); }
+  if ((m = kw.match(/^(?:路径|path):(.+)$/i))){ const p=m[1].toLowerCase(); return ITEMS.filter(i=>plain(i.folder).toLowerCase().includes(p)); }
   const q = kw.toLowerCase();
-  return ITEMS.filter(i=>(i.name||'').toLowerCase().includes(q) || (i.folder||'').toLowerCase().includes(q));
+  return ITEMS.filter(i=>plain(i.name).toLowerCase().includes(q) || plain(i.folder).toLowerCase().includes(q));
 }
 function renderItems(){
   // 先销毁上次的 VirtualList(防止 scroll listener 泄漏)
   const itemListEl = $("#itemList");
+  if (!itemListEl) return;
+  if (!itemListEl._mgActionsBound) {
+    itemListEl.addEventListener('click', async (ev) => {
+      const btn = ev.target.closest('button[data-mg-action]');
+      if (!btn || !itemListEl.contains(btn)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (btn.disabled) return;
+      const gi = Number(btn.dataset.gi);
+      try {
+        if (btn.dataset.mgAction === 'delete') await doDelete(gi, btn);
+        else if (btn.dataset.mgAction === 'move') await doMove(gi, btn);
+      } catch (e) {
+        console.error('manage action failed', e);
+        UI.toast('操作失败: ' + (e && e.message ? e.message : String(e)), {type:'error', ms:6000});
+      }
+    });
+    itemListEl._mgActionsBound = true;
+  }
+  if (!(window._mgSel instanceof Set)) window._mgSel = new Set();
   if (window._mgVList){
     try{ window._mgVList.destroy(); }catch(e){}
     window._mgVList = null;
@@ -2053,7 +2077,7 @@ function renderItems(){
     itemListEl.style.height = '';
     itemListEl.style.overflow = '';
   }
-  const kw=($("#mgFilter").value||"").trim();
+  const kw=plain($("#mgFilter").value).trim();
   const list = filterItems(kw);
   const meta = $("#itemListMeta");
   if (meta) meta.textContent = `过滤后 ${list.length} 项 / 总 ${ITEMS.length} 项${list.length>200?' · 虚拟滚动模式':''}`;
@@ -2063,25 +2087,32 @@ function renderItems(){
     <input type="checkbox" class="ck" data-gi="${gi}" ${window._mgSel.has(gi)?'checked':''} onchange="updateSel()" style="margin-right:8px;width:16px;height:16px;flex-shrink:0">
     <div class="main"><div class="nm">${esc(i.name)} <span class="muted">${esc(i.year||"")}</span></div><div class="meta">tmdb:${esc(i.tmdb||"无")} · 📁${esc(i.folder)}</div></div>
     <select id="mv${gi}"><option value="">移到…</option>${optsHtml}</select>
-    <button class="btn ghost" onclick="doMove(${gi})">移动</button><button class="btn danger" onclick="doDelete(${gi})">删除</button>
+    <button type="button" class="btn ghost" data-mg-action="move" data-gi="${gi}">移动</button><button type="button" class="btn danger" data-mg-action="delete" data-gi="${gi}">删除</button>
   </div>`;
-  if (list.length <= 200){
-    // 小列表直接渲染(无虚拟滚动,保留原行为)
-    itemListEl.innerHTML = list.map(i=>{ const gi=ITEMS.indexOf(i); return rowHTML(i, gi); }).join("");
-  } else {
-    // 大列表用 VirtualList(防 5000+ item 卡死 DOM)
-    itemListEl.style.height = '600px';
-    itemListEl.style.overflow = 'auto';
-    // VirtualList.render 返 HTML 字符串(类内部 cell=render(...) 再包一层 <div>);
-    // 我们的 rowHTML 已带外层 .item div,所以渲一个原子字符串即可
-    window._mgVList = new UI.VirtualList({
-      items: list,
-      rowHeight: 64,
-      render: (it, idx) => {
-        const gi = ITEMS.indexOf(it);
-        return rowHTML(it, gi);
-      }
-    }).mount(itemListEl);
+  try {
+    if (!list.length){
+      itemListEl.innerHTML = '<div class="ui-empty"><div class="title">没有匹配项</div><div class="hint">换个关键词或切换库</div></div>';
+    } else if (list.length <= 200){
+      // 小列表直接渲染(无虚拟滚动,保留原行为)
+      itemListEl.innerHTML = list.map(i=>{ const gi=ITEMS.indexOf(i); return rowHTML(i, gi); }).join("");
+    } else {
+      // 大列表用 VirtualList(防 5000+ item 卡死 DOM)
+      itemListEl.style.height = '600px';
+      itemListEl.style.overflow = 'auto';
+      // VirtualList.render 返 HTML 字符串(类内部 cell=render(...) 再包一层 <div>);
+      // 我们的 rowHTML 已带外层 .item div,所以渲一个原子字符串即可
+      window._mgVList = new UI.VirtualList({
+        items: list,
+        rowHeight: 64,
+        render: (it, idx) => {
+          const gi = ITEMS.indexOf(it);
+          return rowHTML(it, gi);
+        }
+      }).mount(itemListEl);
+    }
+  } catch (e) {
+    console.error('renderItems failed', e, {items: ITEMS, filtered: list});
+    itemListEl.innerHTML = `<div class="ui-banner danger">列表渲染失败: ${esc(e && e.message ? e.message : String(e))}</div>`;
   }
   if($("#ckAll"))$("#ckAll").checked=false;updateSel();
 }
@@ -2117,15 +2148,42 @@ function selectedGis(){
   const visible = new Set(filterItems($("#mgFilter").value).map(i=>ITEMS.indexOf(i)));
   return Array.from(window._mgSel).filter(gi=>visible.has(gi));
 }
-async function doDelete(gi){const i=ITEMS[gi];
-  const body = `<div>删除 <b>${UI.esc(i.name)}</b> ${i.year||''}</div><div class="muted" style="font-size:12px;margin-top:4px">tmdb:${i.tmdb||'无'} · 📁${UI.esc(i.folder)} · 库 ${UI.esc($("#mgLib").value)}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 → 回收站(可还原)+ strm + Emby 同步删</div>`;
-  if(!(await UI.modal.confirm({danger:true,title:'删除',body,okText:'删除'})))return;
-  const r=await api("/api/item",{method:"DELETE",body:JSON.stringify({lib:$("#mgLib").value,folder:i.folder,id:i.id})});
-  if(r.err)toast("出错: "+r.err);else{toast(`已删「${i.name}」`);loadItems();start();}}
-async function doMove(gi){const i=ITEMS[gi],to=$("#mv"+gi).value;if(!to){toast("先选目标库");return;}
-  if(!(await UI.modal.confirm({title:'跨库移动',body:`<div>把 <b>${UI.esc(i.name)}</b></div><div class="muted" style="font-size:12px;margin-top:4px">从 <b>${UI.esc($("#mgLib").value)}</b> → <b>${UI.esc(to)}</b></div>`,okText:'移动'})))return;
-  const r=await api("/api/move",{method:"POST",body:JSON.stringify({from:$("#mgLib").value,folder:i.folder,to,id:i.id})});
-  if(r.err)toast("出错: "+r.err);else{toast(`已移动「${i.name}」→ ${to}(${r.strm}集)`);loadItems();start();}}
+async function doDelete(gi, btn){
+  const i=ITEMS[gi];
+  if(!i){ UI.toast('条目不存在,请刷新列表', {type:'warn'}); return; }
+  const oldText = btn ? btn.textContent : '';
+  try{
+    const body = `<div>删除 <b>${UI.esc(i.name)}</b> ${UI.esc(i.year||'')}</div><div class="muted" style="font-size:12px;margin-top:4px">tmdb:${UI.esc(i.tmdb||'无')} · 📁${UI.esc(i.folder)} · 库 ${UI.esc($("#mgLib").value)}</div><div style="margin-top:10px;font-size:12px;color:var(--warn)">⚠️ 115 → 回收站(可还原)+ strm + Emby 同步删</div>`;
+    if(!(await UI.modal.confirm({danger:true,title:'删除',body,okText:'删除'})))return;
+    if(btn){ btn.disabled=true; btn.textContent='删除中…'; }
+    const r=await api("/api/item",{method:"DELETE",body:JSON.stringify({lib:$("#mgLib").value,folder:i.folder,id:i.id})});
+    if(r.err) UI.toast("出错: "+r.err, {type:'error', ms:6000});
+    else{ UI.toast(`已删「${UI.esc(i.name)}」`, {type:'ok'});loadItems();start();}
+  }catch(e){
+    console.error('doDelete failed', e);
+    UI.toast('删除失败: '+(e && e.message ? e.message : String(e)), {type:'error', ms:6000});
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent=oldText || '删除'; }
+  }
+}
+async function doMove(gi, btn){
+  const i=ITEMS[gi],to=$("#mv"+gi).value;
+  if(!i){ UI.toast('条目不存在,请刷新列表', {type:'warn'}); return; }
+  if(!to){toast("先选目标库");return;}
+  const oldText = btn ? btn.textContent : '';
+  try{
+    if(!(await UI.modal.confirm({title:'跨库移动',body:`<div>把 <b>${UI.esc(i.name)}</b></div><div class="muted" style="font-size:12px;margin-top:4px">从 <b>${UI.esc($("#mgLib").value)}</b> → <b>${UI.esc(to)}</b></div>`,okText:'移动'})))return;
+    if(btn){ btn.disabled=true; btn.textContent='移动中…'; }
+    const r=await api("/api/move",{method:"POST",body:JSON.stringify({from:$("#mgLib").value,folder:i.folder,to,id:i.id})});
+    if(r.err) UI.toast("出错: "+r.err, {type:'error', ms:6000});
+    else{ UI.toast(`已移动「${UI.esc(i.name)}」→ ${UI.esc(to)}(${r.strm}集)`, {type:'ok'});loadItems();start();}
+  }catch(e){
+    console.error('doMove failed', e);
+    UI.toast('移动失败: '+(e && e.message ? e.message : String(e)), {type:'error', ms:6000});
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent=oldText || '移动'; }
+  }
+}
 async function doDeleteBatch(){
   const gis=selectedGis();if(!gis.length){toast("先勾选要删的");return;}
   const lib=$("#mgLib").value;
@@ -2307,7 +2365,7 @@ async function loadSchedules(){
       <div class="row" style="margin-top:8px;gap:14px;font-size:12px;flex-wrap:wrap">
         ${nextRow}
         <span class="muted" style="margin-left:14px">最近:</span><span>${lastTxt}</span>
-        ${s.last_err ? `<span style="color:var(--red);font-size:11px;flex:1 0 100%;margin-top:4px">错误: ${esc(s.last_err.slice(0,200))}</span>` : ''}
+        ${s.last_err ? `<span style="color:var(--red);font-size:11px;flex:1 0 100%;margin-top:4px">错误: ${esc(plain(s.last_err).slice(0,200))}</span>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -2626,7 +2684,7 @@ async function loadUsers(){
   const o=$("#userList");o.innerHTML='<span class="spin"></span> 加载…';
   const d=await api("/api/users?withActivity=1");
   o.innerHTML=(d.users||[]).map(u=>{
-    const act = (u.last_activity||'').slice(0,10) || (u.last_login||'').slice(0,10) || '';
+    const act = plain(u.last_activity).slice(0,10) || plain(u.last_login).slice(0,10) || '';
     const sl = u.stream_limit!=null?u.stream_limit:u.maxsessions;
     const br = u.bitrate_mbps||0;
     return `<div class="item"><div class="main">
@@ -2979,7 +3037,7 @@ async function catalogSearch(){
       <input type="checkbox" class="ck-cat" data-idx="${i}" style="margin-right:8px;width:16px;height:16px;flex-shrink:0">
       <div class="main">
         <div class="nm">${esc(it.name)} ${_ltLabel(it.link_type)} ${it.is_pkg?'<span class="badge warn" title="整包合集">📦整包</span>':''}</div>
-        <div class="meta"><span class="badge">${esc(it.sheet)}</span> <span class="muted" style="font-size:11px;word-break:break-all">${esc((it.link||'').slice(0,46))}…</span></div>
+        <div class="meta"><span class="badge">${esc(it.sheet)}</span> <span class="muted" style="font-size:11px;word-break:break-all">${esc(plain(it.link).slice(0,46))}…</span></div>
       </div>
       ${btn}
     </div>`;}).join("");
@@ -3106,7 +3164,7 @@ async function parseShare(){
   $("#cShareList").innerHTML='<div style="margin-top:10px;padding:10px;background:#0f172a;border-radius:6px;max-height:320px;overflow:auto">'
     +r.items.map(x=>x.ok
       ? `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge g">✓</span> ${esc(x.title||x.share)} <span style="opacity:.6">· ${x.count} 项${x.size?' · '+humanSize(x.size):''}</span></div>`
-      : `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge warn">✗</span> <span style="font-family:monospace">${esc(x.url.slice(0,60))}</span> <span style="opacity:.6">— ${esc(x.err||'')}</span></div>`
+      : `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge warn">✗</span> <span style="font-family:monospace">${esc(plain(x.url).slice(0,60))}</span> <span style="opacity:.6">— ${esc(x.err||'')}</span></div>`
     ).join("")+'</div>';
 }
 function cShareToggleAll(mode){
@@ -3156,8 +3214,8 @@ async function saveShare(){
   $("#cShareOut").innerHTML=ok?`<span class="badge g">✓ 成功 ${ok}</span>${fail?` <span class="badge warn">✗ 失败 ${fail}</span>`:''}`:`<span class="badge warn">✗ 全部失败</span>`;
   $("#cShareList").innerHTML='<div style="margin-top:10px;padding:10px;background:#0f172a;border-radius:6px;max-height:320px;overflow:auto">'
     +(r.results||[]).map(x=>x.ok
-      ? `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge g">✓</span> ${esc(x.title||x.share||x.url.slice(0,40))} <span style="opacity:.6">· ${x.count} 项</span></div>`
-      : `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge warn">✗</span> <span style="font-family:monospace">${esc(x.url.slice(0,60))}</span> <span style="opacity:.6">— ${esc(x.msg||'')}</span></div>`
+      ? `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge g">✓</span> ${esc(x.title||x.share||plain(x.url).slice(0,40))} <span style="opacity:.6">· ${x.count} 项</span></div>`
+      : `<div class="muted" style="font-size:12px;margin:3px 0"><span class="badge warn">✗</span> <span style="font-family:monospace">${esc(plain(x.url).slice(0,60))}</span> <span style="opacity:.6">— ${esc(x.msg||'')}</span></div>`
     ).join("")+'</div>';
   if(doScan2&&ok){
     toast("转存完成,扫库中…");
@@ -3292,7 +3350,7 @@ function showWizardReport(rep){
       if (withParen && withoutParen && withParen.lib === withoutParen.lib){
         // 同库可替换
         html += `<div class="row" style="margin-top:8px;gap:6px">
-          <button class="btn danger" style="padding:5px 12px;font-size:12px" onclick='wzReplace(${gi}, ${JSON.stringify(withParen.lib)}, ${JSON.stringify(withParen.folder)}, ${JSON.stringify(withoutParen.folder)})'>♻️ 用新替旧(删「${UI.esc(withoutParen.folder.slice(0,28))}」+ 新改名去 (1))</button>
+          <button class="btn danger" style="padding:5px 12px;font-size:12px" onclick='wzReplace(${gi}, ${JSON.stringify(withParen.lib)}, ${JSON.stringify(withParen.folder)}, ${JSON.stringify(withoutParen.folder)})'>♻️ 用新替旧(删「${UI.esc(plain(withoutParen.folder).slice(0,28))}」+ 新改名去 (1))</button>
           <button class="btn ghost" style="padding:5px 12px;font-size:12px" onclick='wzSkipDup(${gi})'>保留两份</button>
         </div>`;
       } else {
@@ -3312,7 +3370,7 @@ async function wzReplaceAll(){
   const list = window._wzAutoCandidates || [];
   if (!list.length){ UI.toast('没有可智能替换的项', {type:'info'}); return; }
   const previewRows = list.slice(0, 20).map(c =>
-    `· tmdb ${UI.esc(c.tmdb)} · 删「${UI.esc(c.lose_folder.slice(0,40))}」(${c.lose_n}文件) → 留「${UI.esc(c.win_folder.slice(0,40))}」(${c.win_n}文件)`
+    `· tmdb ${UI.esc(c.tmdb)} · 删「${UI.esc(plain(c.lose_folder).slice(0,40))}」(${c.lose_n}文件) → 留「${UI.esc(plain(c.win_folder).slice(0,40))}」(${c.win_n}文件)`
   ).join('<br>');
   const extra = list.length > 20 ? `<br>… 另 ${list.length-20} 条` : '';
   const ok = await UI.modal.confirm({
@@ -4100,7 +4158,7 @@ async function fixMismatchPoster(id, search_name, typ){
       body += `<div onclick="event.target.closest('.ui-modal-mask').dispatchEvent(new CustomEvent('pickCand',{detail:${JSON.stringify(c.tmdb)}}))" style="display:flex;gap:10px;padding:8px;border:1px solid var(--line);border-radius:6px;margin-bottom:6px;cursor:pointer">
         ${c.img?`<img src="${c.img}" style="width:54px;height:80px;object-fit:cover;border-radius:4px">`:'<div style="width:54px;height:80px;background:#222;border-radius:4px"></div>'}
         <div><div><b>${UI.esc(c.name||'?')}</b> ${c.year||''}</div>
-        <div class="muted" style="font-size:11px">tmdb:${c.tmdb} · ${UI.esc((c.overview||'').slice(0,80))}…</div></div>
+        <div class="muted" style="font-size:11px">tmdb:${c.tmdb} · ${UI.esc(plain(c.overview).slice(0,80))}…</div></div>
       </div>`;
     });
     // 用 ad-hoc modal(自带 pick 监听)
@@ -4229,7 +4287,7 @@ async function refreshSeries(btn){
   finally{ if(btn){ btn.disabled=false; btn.textContent=btn._t||'刷新元数据'; } }
 }
 
-function esc(s){return(s||"").replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function esc(s){return plain(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 // 入口:cookie 是 HttpOnly JS 看不到,只能盲打 /api/me 试一下;200 = 已登录,401 = 显示登录页
 (async () => {
   try{

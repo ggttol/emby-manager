@@ -88,6 +88,87 @@ class TestAsyncScannerFuse(unittest.TestCase):
             self.assertEqual(r.get("orphans_cleaned", 0), 0)
 
 
+class TestStrmPermissions(unittest.TestCase):
+    """同类问题回归:STRM 存在但权限不可读时,扫描/移动必须修成 Emby 可读。"""
+    def test_scan_repairs_existing_unreadable_strm(self):
+        with tempfile.TemporaryDirectory() as strm, tempfile.TemporaryDirectory() as cd:
+            fol = "纪录片"
+            media_dir = os.path.join(cd, fol, "河西走廊 (2015)", "Season 1")
+            strm_dir = os.path.join(strm, fol, "河西走廊 (2015)", "Season 1")
+            os.makedirs(media_dir)
+            os.makedirs(strm_dir)
+            with open(os.path.join(media_dir, "E01.mp4"), "w") as f:
+                f.write("x")
+            sp = os.path.join(strm_dir, "E01.strm")
+            with open(sp, "w") as f:
+                f.write("/media/纪录片/河西走廊 (2015)/Season 1/E01.mp4")
+            os.chmod(os.path.join(strm, fol, "河西走廊 (2015)"), 0o700)
+            os.chmod(strm_dir, 0o700)
+            os.chmod(sp, 0o600)
+            fake_libs = {"纪录片": {"id": "1", "ctype": "tvshows", "folder": fol}}
+            calls = {"refresh": 0}
+            def fake_epost(*a, **k):
+                calls["refresh"] += 1
+                return 204
+            with patch.object(biz, "STRM", strm), patch.object(biz, "CD", cd), \
+                 patch.object(biz, "fetch_libs", return_value=fake_libs), \
+                 patch.object(biz, "_mount_alive", return_value=True), \
+                 patch.object(biz, "_lib_lock", lambda l: __import__("threading").Lock()), \
+                 patch.object(biz, "epost", fake_epost):
+                r = biz.scan_lib("纪录片")
+            self.assertEqual(r.get("permissions_fixed"), 1)
+            self.assertEqual(os.stat(os.path.join(strm, fol, "河西走廊 (2015)")).st_mode & 0o777, 0o755)
+            self.assertEqual(os.stat(strm_dir).st_mode & 0o777, 0o755)
+            self.assertEqual(os.stat(sp).st_mode & 0o777, 0o644)
+            self.assertEqual(calls["refresh"], 1)
+
+    def test_move_rebuilds_strm_with_readable_permissions_under_restrictive_umask(self):
+        with tempfile.TemporaryDirectory() as strm, tempfile.TemporaryDirectory() as cd:
+            ff, tf = "追更", "完结"
+            src = os.path.join(cd, ff, "某剧", "Season 1")
+            os.makedirs(src)
+            with open(os.path.join(src, "E01.mp4"), "w") as f:
+                f.write("x")
+            L = {"追更": {"id": "1", "ctype": "tvshows", "folder": ff},
+                 "完结": {"id": "2", "ctype": "tvshows", "folder": tf}}
+            os.makedirs(os.path.join(cd, tf))
+            old = os.umask(0o077)
+            try:
+                with patch.object(biz, "STRM", strm), patch.object(biz, "CD", cd), \
+                     patch.object(biz, "epost", lambda *a, **k: 204), \
+                     patch.object(biz, "edelete", lambda *a, **k: 204), \
+                     patch.object(biz, "_undo_record", lambda *a, **k: None):
+                    r = biz._move_item_locked("追更", "某剧", "完结", "eid", L)
+            finally:
+                os.umask(old)
+            self.assertTrue(r.get("ok"))
+            moved_dir = os.path.join(strm, tf, "某剧", "Season 1")
+            sp = os.path.join(moved_dir, "E01.strm")
+            self.assertEqual(os.stat(os.path.join(strm, tf, "某剧")).st_mode & 0o777, 0o755)
+            self.assertEqual(os.stat(moved_dir).st_mode & 0o777, 0o755)
+            self.assertEqual(os.stat(sp).st_mode & 0o777, 0o644)
+
+
+class TestAddNewPipelineRetry(unittest.TestCase):
+    """一条龙 receive 后 CloudDrive 延迟露出目录时,应短延迟补扫一次。"""
+    def test_retries_scan_when_successful_receive_produces_no_strm(self):
+        scans = [{"new_count": 0, "orphans_cleaned": 0, "matched": 1, "attention": []},
+                 {"new_count": 3, "orphans_cleaned": 0, "matched": 2, "attention": []}]
+        def fake_scan(_lib):
+            return scans.pop(0)
+        def fake_save(url, pwd, lib):
+            return {"ok": True, "title": "片", "count": 1}
+        with patch.object(biz, "scan_lib", fake_scan), \
+             patch.object(biz, "list_noposter", return_value=[]), \
+             patch.object(biz, "analyze_dups", return_value={"dups": [], "review": []}), \
+             patch.object(biz, "task_set", lambda *a, **k: None), \
+             patch.object(biz, "task_is_cancelled", lambda t: False), \
+             patch.object(biz.time, "sleep", lambda *_: None):
+            r = biz.add_new_pipeline_async("tid", [{"url": "u", "pwd": "", "lib": "电影"}], "", fake_save)
+        self.assertEqual(r["libs_scanned"]["电影"]["new_count"], 3)
+        self.assertTrue(r["libs_scanned"]["电影"]["retry"])
+
+
 class TestSmartGuardSymmetric(unittest.TestCase):
     """review HIGH:smart 归档 src_n=0 也要拦(否则删源真实 115 内容)。"""
     def test_smart_refuses_when_src_strm_missing(self):

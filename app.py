@@ -192,7 +192,8 @@ class H(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             try: html = open(os.path.join(HERE, "index.html"), encoding="utf-8").read()
             except Exception: html = "<h1>缺少 index.html</h1>"
-            return self._send(200, "text/html; charset=utf-8", html)
+            return self._send(200, "text/html; charset=utf-8", html,
+                              extra_headers=[("Cache-Control", "no-store")])
         # 公开静态资源:iOS 主屏图标 / favicon / PWA manifest。白名单路径(不开 /static/* 通配防遍历)
         STATIC_MAP = {
             "/apple-touch-icon.png":             ("static/apple-touch-icon.png", "image/png"),

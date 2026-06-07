@@ -167,6 +167,17 @@ class WriteStrmTests(unittest.TestCase):
         again = biz._write_strm(self.strm_base, "/media/电影", "片", "a.mkv")
         self.assertIsNone(again)   # 已存在 → None,不覆盖
 
+    def test_restrictive_umask_still_emby_readable(self):
+        old = os.umask(0o077)
+        try:
+            p = biz._write_strm(self.strm_base, "/media/电影", "片/Season 1", "a.mkv")
+        finally:
+            os.umask(old)
+        self.assertEqual(os.stat(self.strm_base).st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(os.path.join(self.strm_base, "片")).st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(os.path.dirname(p)).st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(p).st_mode & 0o777, 0o644)
+
 
 class GenStrmFullautoTests(unittest.TestCase):
     """gen_strm_for_lib_path:全自动 vs 谨慎,对无 tmdbid 文件夹的行为。"""
@@ -218,6 +229,43 @@ class GenStrmFullautoTests(unittest.TestCase):
             r = biz.gen_strm_for_lib_path("电影", "../../../etc", fullauto=True)
         self.assertIn("err", r)
         self.assertEqual(r["new_count"], 0)
+
+
+class ManualScanFullautoTests(unittest.TestCase):
+    """手动扫描/一条龙扫库也要遵守 auto_strm_fullauto。"""
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="scan_fullauto_test_")
+        self.cd = os.path.join(self.tmp, "cd"); self.strm = os.path.join(self.tmp, "strm")
+        os.makedirs(os.path.join(self.cd, "电影", "无番号片 (2024)"))
+        with open(os.path.join(self.cd, "电影", "无番号片 (2024)", "a.mkv"), "w") as f:
+            f.write("x")
+        self._oldCD, self._oldSTRM = biz.CD, biz.STRM
+        self._old_fullauto = CFG.get("auto_strm_fullauto")
+        biz.CD = self.cd; biz.STRM = self.strm
+
+    def tearDown(self):
+        biz.CD, biz.STRM = self._oldCD, self._oldSTRM
+        CFG["auto_strm_fullauto"] = self._old_fullauto
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_manual_scan_generates_no_tmdb_when_fullauto_enabled(self):
+        CFG["auto_strm_fullauto"] = True
+        with patch.object(biz, "fetch_libs", return_value=LIBS), \
+             patch.object(biz, "_mount_alive", return_value=True), \
+             patch.object(biz, "epost", return_value=204):
+            r = biz.scan_lib("电影")
+        self.assertEqual(r["new_count"], 1)
+        self.assertEqual(r["attention"], [])
+        self.assertTrue(os.path.exists(os.path.join(self.strm, "电影", "无番号片 (2024)", "a.strm")))
+
+    def test_manual_scan_still_flags_no_tmdb_when_fullauto_disabled(self):
+        CFG["auto_strm_fullauto"] = False
+        with patch.object(biz, "fetch_libs", return_value=LIBS), \
+             patch.object(biz, "_mount_alive", return_value=True), \
+             patch.object(biz, "epost", return_value=204):
+            r = biz.scan_lib("电影")
+        self.assertEqual(r["new_count"], 0)
+        self.assertIn("无tmdbid", r["attention"][0])
 
 
 # ============================================================
