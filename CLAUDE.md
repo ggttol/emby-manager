@@ -39,17 +39,18 @@ app.py (HTTP handler + main)
  ├─ lib/auth         PBKDF2 hash + token + CSRF + login rate-limit + XFF 信任
  ├─ lib/tasks        TASKS dict + run_async(kind, fn, *a)/task_set/cancel
  ├─ lib/emby         eget/epost/edelete + fetch_libs + list_users/_noposter + update_user(限速/限同时播放→用户 Policy)
- ├─ lib/c115         115 webapi:cookie 鉴权 + snap/receive/auto_cid
- ├─ lib/business     业务编排(扫描/去重/移动/清理/追更/...);**所有 *_async 都在这里**
- ├─ lib/scheduler    定时调度:30s 轮询 + 5min 窗口 + 同周期防重入 + 重叠保护
- ├─ lib/undo         删/移操作的 undo log(jsonl 持久化)
+ ├─ lib/c115         115 webapi:cookie 鉴权 + snap/receive(转存)/auto_cid + 离线下载(magnet/ed2k → offline_add)
+ ├─ lib/catalog      115 资源目录:catalog_115.db(~32万条转存链接,只读 sqlite,**.gitignore 不入库**)关键词搜 + 一键转存
+ ├─ lib/business     业务编排(扫描/去重/移动/清理/追更/字幕概览/...),**最大模块(~2000 行);所有 *_async 都在这里**
+ ├─ lib/scheduler    定时调度:30s 轮询 + 同周期防重入 + 重叠保护(看真实任务状态,见雷区 8)
+ ├─ lib/undo         删/移/替换 操作的 undo log(jsonl 持久化)
  └─ lib/__init__     占位
 
-index.html (~3500 行,单文件 SPA,内嵌 UI 组件库)
+index.html (~4000 行,单文件 SPA,内嵌 UI 组件库 window.UI.{modal/toast/tasks/drawer/Combobox/VirtualList/…})
  └─ static/         iOS apple-touch-icon / PWA manifest / favicon
 ```
 
-依赖**单向**:`app → business → {emby, tasks, c115}`、`business → undo`、`scheduler` 由 `app` 启动 + **lazy 调** `business.SCHEDULE_KINDS`(避免模块级循环)。**违反则启动报 ImportError**。
+依赖**单向**:`app → {business, catalog}`、`business → {emby, tasks, c115, undo}`、`scheduler` 由 `app` 启动 + **lazy 调** `business.SCHEDULE_KINDS`(避免模块级循环)。**违反则启动报 ImportError**。
 
 ## 不能踩的雷(从过往 bug 里提炼)
 
@@ -69,7 +70,7 @@ index.html (~3500 行,单文件 SPA,内嵌 UI 组件库)
 
 6. **DSM 自动封 IP**:同源 SSH 失败 ~10 次后 IP 进黑名单。**两次失败重试间隔 ≥10s**,被封了去「控制面板 → 安全性 → 自动封锁」解。
 
-7. **路径前缀**:Emby 返的 Path 用容器路径(`/strm/...`、`/media/...`),host 上是 `/volume1/strm/...` 和 `/volume1/docker/clouddrive2/CloudNAS/CloudDrive/...`(2026-05-26 后,旧 .spk 路径 `/volume1/CloudNAS/CloudDrive2/115open/emby` **已废**)。映射常量在 `lib/config.CD`/`STRM`。
+7. **路径前缀**:Emby 返的 Path 用容器路径(`/strm/...`、`/media/...`),host 上是 `/volume1/strm/...` 和 `/volume1/docker/clouddrive2/CloudNAS/CloudDrive/...`(2026-05-26 后,旧 .spk 路径 `/volume1/CloudNAS/CloudDrive2/115open/emby` **已废**)。映射常量在 `lib/config.CD`/`STRM`/`DOCKER` —— 2026-05-29 起这三个**可在 config.json 用 `cd`/`strm`/`docker` 键覆盖**(换机器/换主机不改代码,缺省回落群晖布局),改后需重启生效。
 
 8. **schedule 重叠保护看的是真实任务状态,不是字符串**:`scheduler._fire` 用 `task_get(last_tid).status == "running"` 判断,**不能**退回成只看持久化的 `last_status == "running"` —— 那样进程重启后 config 残留 `running` 会永久卡死该 schedule(连 run_now 都被挡)。`start()` 里有 `_reconcile_on_start()` 兜底重置残留。改 `_fire` 守卫务必保持"查 TASKS 真实状态 + 守卫与置位在同一 CFG_LOCK 临界区"。
 
@@ -78,6 +79,8 @@ index.html (~3500 行,单文件 SPA,内嵌 UI 组件库)
 10. **Emby 用户 Policy 字段名认准新版**:同时播放数是 `SimultaneousStreamLimit`(**不是** `MaxActiveSessions` —— 后者在本机 Emby 4.9.5 是死字段,写了静默失效);限速是 `RemoteClientBitrateLimit`(单位 **bps**,UI 用 Mbps 要 ×1e6)。两个都免费版可用,只有硬件转码要 Premiere。改 `update_user`/`list_users` 时别写回旧字段名。
 
 11. **限速靠软件转码生效,会吃 CPU**:`RemoteClientBitrateLimit` 在源码率超上限时触发实时转码;叠加 strm/115 拉流,设太低会频繁转码压垮 NAS。这是产品行为,不是 bug,文案/默认值上别诱导用户设极低值。
+
+12. **`/Library/Media/Updated` 通知:消失的路径发 `Deleted`,不是 `Modified`**。`Modified` 清不掉已不存在路径的 Emby 条目 → 留孤儿重复剧集。`replace_folder`(去重/替换)两个改名方向都要按「被删路径→`Deleted`、被新内容占用的路径→`Modified`/`Created`」发(2026-05-29 修;有 `tests/test_replace_folder.py` 守)。
 
 ## 常见任务怎么加
 
@@ -114,7 +117,7 @@ index.html (~3500 行,单文件 SPA,内嵌 UI 组件库)
 ## 提交 / 部署
 
 - **commit message**:`feat(...)` / `fix(...)` / `docs(...)`,中文 body,可以一个 commit 包多个相关 fix(见历史)
-- **commit 末尾加** `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`
+- **commit 末尾加** `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 - **不在 main 上开 branch**(项目历史就是 main 直推,本地 git + GitHub 私有 remote `ggttol/emby-manager`)
 - **commit 后 push**:用户明确 ask 时再 `git push`
 - **NAS 部署 ≠ git push**:tar over ssh 传到 `/volume1/docker/emby-manager/` 再 `manager.sh restart`

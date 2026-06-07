@@ -7,6 +7,7 @@ from lib.config import HERE
 from lib.logger import log
 
 CATALOG_DB = os.path.join(HERE, "catalog_115.db")
+_TYPE_COL_CACHE = {}
 
 
 def catalog_available():
@@ -34,6 +35,11 @@ def catalog_search(q, limit=80, link_type=None):
     """按名称 LIKE 多关键词(空格分隔,AND)搜,可选 link_type 过滤(share115/magnet/ed2k)。
     返 {items:[{name,sheet,link,is_pkg,link_type,transfer,share,rc}], total, truncated}。"""
     q = (q or "").strip()
+    try:
+        limit = int(limit)
+    except Exception:
+        limit = 80
+    limit = max(1, min(limit, 200))
     if not q:
         return {"items": [], "total": 0}
     if not catalog_available():
@@ -44,17 +50,30 @@ def catalog_search(q, limit=80, link_type=None):
         return {"items": [], "total": 0, "hint": "关键词太短,至少 2 个字符"}
     conds = ["name LIKE ? ESCAPE '\\'"] * len(terms)
     args = ["%" + _like_escape(t) + "%" for t in terms]
-    # 可选按类型过滤(share115 / magnet / ed2k)
+    has_type_col = None
+    # 可选按类型过滤(share115 / magnet / ed2k)。旧 catalog 库没有 link_type 列时,按 link 形态下推过滤;
+    # 不能先 LIMIT 再 Python 过滤,否则前 N 条类型不匹配会漏掉后面的真实命中。
     if link_type in ("share115", "magnet", "ed2k"):
+        has_type_col = _catalog_has_type_col()
+    if link_type in ("share115", "magnet", "ed2k") and has_type_col:
         conds.append("link_type = ?"); args.append(link_type)
+    elif link_type == "share115":
+        conds.append("(link LIKE ? AND (link LIKE ? OR link LIKE ? OR link LIKE ?))")
+        args.extend(["%/s/%", "%115cdn.com%", "%115.com%", "%anxia.com%"])
+    elif link_type == "magnet":
+        conds.append("link LIKE ?"); args.append("magnet:%")
+    elif link_type == "ed2k":
+        conds.append("link LIKE ?"); args.append("ed2k:%")
     where = " AND ".join(conds)
     try:
         with sqlite3.connect("file:%s?mode=ro" % CATALOG_DB, uri=True) as con:
             # link_type 列可能旧库没有 → 兼容查
-            cols = "name,sheet,link,is_pkg,link_type" if _has_type_col(con) else "name,sheet,link,is_pkg"
+            if has_type_col is None:
+                has_type_col = _has_type_col(con)
+            cols = "name,sheet,link,is_pkg,link_type" if has_type_col else "name,sheet,link,is_pkg"
             # 多取一条判断是否截断;115 分享链(秒传稳)优先、非整包优先、名字短靠前
             order = "is_pkg ASC, length(name) ASC"
-            if _has_type_col(con):
+            if has_type_col:
                 order = "(link_type='share115') DESC, is_pkg ASC, length(name) ASC"
             rows = con.execute("SELECT %s FROM catalog WHERE %s ORDER BY %s LIMIT %d"
                                % (cols, where, order, limit + 1), args).fetchall()
@@ -66,6 +85,8 @@ def catalog_search(q, limit=80, link_type=None):
     for r in rows:
         name, sheet, link, is_pkg = r[0], r[1], r[2], r[3]
         lt = r[4] if len(r) > 4 else _infer_type(link)
+        if link_type in ("share115", "magnet", "ed2k") and not has_type_col and lt != link_type:
+            continue
         share, rc = _parse(link)
         items.append({"name": name or "", "sheet": sheet or "", "link": link or "",
                       "is_pkg": int(is_pkg or 0), "link_type": lt,
@@ -73,6 +94,19 @@ def catalog_search(q, limit=80, link_type=None):
                       "share": share, "rc": rc})
     log("资源库搜索「%s」→ %d 条%s" % (q, len(items), "(已截断)" if truncated else ""))
     return {"items": items, "total": len(items), "truncated": truncated}
+
+
+def _catalog_has_type_col():
+    key = CATALOG_DB
+    if key in _TYPE_COL_CACHE:
+        return _TYPE_COL_CACHE[key]
+    try:
+        with sqlite3.connect("file:%s?mode=ro" % CATALOG_DB, uri=True) as con:
+            has_col = _has_type_col(con)
+    except Exception:
+        has_col = False
+    _TYPE_COL_CACHE[key] = has_col
+    return has_col
 
 
 def _has_type_col(con):

@@ -15,6 +15,7 @@
 """
 import os, sys, json, threading, time, unittest, tempfile, shutil
 from http.client import HTTPConnection
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -411,6 +412,58 @@ class Cd2WebhookTests(unittest.TestCase):
         s, h, b = req("POST", "/api/cd2/webhook?key=anything", self._payload())
         self.assertEqual(s, 403)
         self.assertNotEqual(b.get("err"), "未登录")
+
+
+# ============================================================
+# 13) /api/catalog/transfer:cid 校验 + 115/离线路由
+# ============================================================
+class CatalogTransferTests(unittest.TestCase):
+    def setUp(self):
+        self._saved_map = CFG.get("c115_cid_map")
+        CFG["c115_cid_map"] = {"电影": "12345", "坏库": "0"}
+        self.tok, self.csrf = login_get_token_csrf()
+
+    def tearDown(self):
+        if self._saved_map is None: CFG.pop("c115_cid_map", None)
+        else: CFG["c115_cid_map"] = self._saved_map
+
+    def _post(self, body):
+        return req("POST", "/api/catalog/transfer", body,
+                   cookie="emby_tok=" + self.tok, csrf=self.csrf)
+
+    def test_rejects_invalid_explicit_cid_before_115_call(self):
+        with patch.object(app, "c115_save_to_cid") as save, patch.object(app, "c115_offline_add") as off:
+            s, h, b = self._post({"cid": "0", "link": "https://115cdn.com/s/swabc"})
+        self.assertEqual(s, 400)
+        self.assertIn("目标 cid 非法", b.get("err", ""))
+        save.assert_not_called()
+        off.assert_not_called()
+
+    def test_rejects_invalid_mapped_cid_before_115_call(self):
+        with patch.object(app, "c115_save_to_cid") as save, patch.object(app, "c115_offline_add") as off:
+            s, h, b = self._post({"lib": "坏库", "link": "magnet:?xt=urn:btih:abc"})
+        self.assertEqual(s, 400)
+        self.assertIn("目标 cid 非法", b.get("err", ""))
+        save.assert_not_called()
+        off.assert_not_called()
+
+    def test_115_share_routes_to_save_to_cid(self):
+        with patch.object(app, "c115_save_to_cid", return_value={"ok": True, "count": 1}) as save, \
+             patch.object(app, "c115_offline_add") as off:
+            s, h, b = self._post({"lib": "电影", "link": "https://115cdn.com/s/swabc?password=1", "label": "片名"})
+        self.assertEqual(s, 200)
+        self.assertTrue(b.get("ok"))
+        save.assert_called_once_with("https://115cdn.com/s/swabc?password=1", "", "12345", label="片名")
+        off.assert_not_called()
+
+    def test_magnet_routes_to_offline_add(self):
+        with patch.object(app, "c115_save_to_cid") as save, \
+             patch.object(app, "c115_offline_add", return_value={"ok": True, "msg": "queued"}) as off:
+            s, h, b = self._post({"lib": "电影", "link": "magnet:?xt=urn:btih:abc", "label": "片名"})
+        self.assertEqual(s, 200)
+        self.assertTrue(b.get("ok"))
+        off.assert_called_once_with("magnet:?xt=urn:btih:abc", "12345", label="片名")
+        save.assert_not_called()
 
 
 if __name__ == "__main__":

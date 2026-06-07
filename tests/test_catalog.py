@@ -13,8 +13,16 @@ def _mkdb(path, rows):
     con.commit(); con.close()
 
 
+def _mkdb_with_type(path, rows):
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE catalog(name TEXT, sheet TEXT, link TEXT, is_pkg INT, link_type TEXT)")
+    con.executemany("INSERT INTO catalog VALUES(?,?,?,?,?)", rows)
+    con.commit(); con.close()
+
+
 class TestCatalog(unittest.TestCase):
     def setUp(self):
+        cat._TYPE_COL_CACHE.clear()
         self.tmp = tempfile.mkdtemp()
         self.db = os.path.join(self.tmp, "catalog_115.db")
         _mkdb(self.db, [
@@ -74,6 +82,43 @@ class TestCatalog(unittest.TestCase):
         with patch.object(cat, "CATALOG_DB", self.db):
             s = cat.catalog_stats()
         self.assertTrue(s["available"]); self.assertEqual(s["total"], 3); self.assertEqual(s["packages"], 1)
+
+    def test_type_filter_with_old_db_infers_link_type(self):
+        with patch.object(cat, "CATALOG_DB", self.db):
+            r = cat.catalog_search("沙丘", link_type="share115")
+        self.assertEqual(len(r["items"]), 2)
+        self.assertTrue(all(it["link_type"] == "share115" for it in r["items"]))
+
+    def test_type_filter_with_old_db_filters_before_limit(self):
+        db2 = os.path.join(self.tmp, "mixed_old.db")
+        rows = [
+            ("同名资源 %03d" % i, "电影", "magnet:?xt=urn:btih:%03d" % i, 0)
+            for i in range(90)
+        ]
+        rows.append(("同名资源 115", "电影", "https://115cdn.com/s/swtarget", 0))
+        _mkdb(db2, rows)
+        with patch.object(cat, "CATALOG_DB", db2):
+            r = cat.catalog_search("同名资源", limit=20, link_type="share115")
+        self.assertEqual(len(r["items"]), 1)
+        self.assertEqual(r["items"][0]["share"], "swtarget")
+
+    def test_type_filter_with_type_column(self):
+        db2 = os.path.join(self.tmp, "typed.db")
+        _mkdb_with_type(db2, [
+            ("同名资源", "电影", "https://115cdn.com/s/swabc", 0, "share115"),
+            ("同名资源", "电影", "magnet:?xt=urn:btih:abc", 0, "magnet"),
+        ])
+        with patch.object(cat, "CATALOG_DB", db2):
+            r = cat.catalog_search("同名资源", link_type="magnet")
+        self.assertEqual(len(r["items"]), 1)
+        self.assertEqual(r["items"][0]["link_type"], "magnet")
+
+    def test_limit_is_clamped_and_sanitized(self):
+        with patch.object(cat, "CATALOG_DB", self.db):
+            r = cat.catalog_search("沙丘", limit="bad")
+            r2 = cat.catalog_search("沙丘", limit=0)
+        self.assertEqual(len(r["items"]), 2)
+        self.assertEqual(len(r2["items"]), 1)
 
     def tearDown(self):
         import shutil; shutil.rmtree(self.tmp, ignore_errors=True)
