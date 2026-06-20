@@ -17,7 +17,7 @@ from http.cookies import SimpleCookie
 from lib.config import (CFG, CFG_LOCK, WEAK_PWS, HERE, CD, STRM, DOCKER, CONFIG_FILE,
                         VE, CURRENT_SCHEMA, MIGRATIONS, _DEFAULTS,
                         _mig_to_v2, load_cfg, save_cfg, migrate_cfg)
-from lib.logger import logger, log, LOGS, AppError, START_TIME
+from lib.logger import logger, log, list_recent_logs, AppError, START_TIME
 from lib.safe import _safe_under
 from lib.auth import (TOKENS, TOKENS_LOCK, TOKEN_TTL, LOGIN_FAIL, LOGIN_FAIL_LOCK,
                       LOGIN_WINDOW, LOGIN_MAX_FAIL, SAFE_METHODS,
@@ -187,9 +187,16 @@ class H(BaseHTTPRequestHandler):
         expected = _token_csrf(t)
         return bool(expected) and hmac.compare_digest(sent, expected)
     def _body(self):
-        ln = int(self.headers.get("Content-Length", 0) or 0)
+        raw_length = self.headers.get("Content-Length", "0") or "0"
+        try:
+            ln = int(raw_length)
+        except (TypeError, ValueError):
+            raise BodyError(400, "Content-Length 非法")
         # 1MB 上限:防超大/慢速 body 拖死 handler 线程(所有 POST 含 webhook;协议 HTTP/1.0 无 keep-alive,
         # 不读 body 直接回 → 连接关闭丢弃剩余字节,不会串包)
+        # 负数传给 rfile.read(-1) 会一直读到 EOF，攻击者可借此卡住一个 HTTP worker，必须先拒绝。
+        if ln < 0:
+            raise BodyError(400, "Content-Length 非法")
         if ln > 1048576:
             raise BodyError(413, "请求体过大")
         if not ln:
@@ -233,7 +240,9 @@ class H(BaseHTTPRequestHandler):
             return self._json({"status": "ok", "version": _version(), "uptime": int(time.time() - START_TIME),
                                "emby_online": emb.get("online", False),
                                "c115_cookie_set": bool(CFG.get("c115_cookie")),
-                               "cd_mounted": os.path.isdir(CD) and bool(os.listdir(CD) if os.path.isdir(CD) else [])})
+                               # 115 FUSE 半死时 listdir 会卡 D-state；健康检查必须快速失败而非把
+                               # 监控请求本身挂住。业务层探针还会避免重复创建卡死线程。
+                               "cd_mounted": _biz._mount_alive(timeout=1)})
         if path.startswith("/api/"):
             if not self._auth(): return self._json({"err": "未登录"}, 401)
             q = urllib.parse.parse_qs(u.query)
@@ -249,7 +258,7 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/zhuigeng": return self._json(zhuigeng_status())
             if path == "/api/gaps": return self._json(series_gaps(q.get("id", [""])[0]))
             if path == "/api/refreshseries": return self._json(refresh_series(q.get("id", [""])[0]))
-            if path == "/api/log": return self._json({"logs": list(LOGS)[:200]})
+            if path == "/api/log": return self._json({"logs": list_recent_logs(200)})
             if path == "/api/users":
                 with_act = q.get("withActivity", ["0"])[0] in ("1", "true", "True")
                 return self._json({"users": list_users(with_act)})
@@ -303,11 +312,11 @@ class H(BaseHTTPRequestHandler):
         return self._send(404, "text/plain", "404")
     def do_POST(self):
         path = urllib.parse.urlparse(self.path).path
-        try:
-            b = self._body()
-        except BodyError as e:
-            return self._json({"err": e.msg}, e.status)
         if path == "/api/login":
+            try:
+                b = self._body()
+            except BodyError as e:
+                return self._json({"err": e.msg}, e.status)
             # 反代场景:client_address[0] 是反代 IP,真客户端 IP 走 X-Forwarded-For 但只在 client_address 在 trusted_proxies 时才信
             from lib.auth import client_ip_for_login
             remote = self.client_address[0] if self.client_address else ""
@@ -323,17 +332,14 @@ class H(BaseHTTPRequestHandler):
                 # 纯 HTTP 直连(NAS 内网)不加,否则浏览器不回 cookie 直接登不上。
                 secure = "; Secure" if self.headers.get("X-Forwarded-Proto", "").lower() == "https" else ""
                 cookie = "emby_tok=%s; HttpOnly; SameSite=Strict; Path=/; Max-Age=%d%s" % (t, TOKEN_TTL, secure)
+                log("登录成功 from %s" % ip)
                 return self._json({"ok": True, "csrf": csrf}, extra_headers=[("Set-Cookie", cookie)])
             _login_record_fail(ip)
             log("登录失败 from %s" % ip)
             return self._json({"err": "密码错误"}, 403)
-        if path == "/api/logout":
-            t = self._cookie_token() or self.headers.get("X-Token")
-            if t: _token_drop(t)
-            return self._json({"ok": True}, extra_headers=[("Set-Cookie", "emby_tok=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")])
         if path == "/api/cd2/webhook":
             # CD2 不会带登录 cookie/CSRF → 用共享密钥鉴权(?key= 或 X-Webhook-Secret 头),放在 auth 之前。
-            # 立即返回(只反映射 + 入队),绝不内联生成 → 防 CD2 超时重试风暴。
+            # 先验共享密钥再读 body，避免未授权大包占用 HTTP worker；立即返回(只反映射 + 入队),绝不内联生成。
             secret = CFG.get("cd2_webhook_secret") or ""
             q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             sent = self.headers.get("X-Webhook-Secret", "") or (q.get("key", [""])[0])
@@ -343,6 +349,10 @@ class H(BaseHTTPRequestHandler):
             if not CFG.get("auto_strm_enabled"):
                 return self._json({"ok": True, "ignored": "disabled"})
             try:
+                b = self._body()
+            except BodyError as e:
+                return self._json({"err": e.msg}, e.status)
+            try:
                 accepted = _autostrm.handle_cd2_event(b)
             except Exception:
                 logger.exception("autostrm webhook 处理失败")
@@ -350,6 +360,16 @@ class H(BaseHTTPRequestHandler):
             return self._json({"ok": True, "queued": accepted})
         if not self._auth(): return self._json({"err": "未登录"}, 401)
         if not self._csrf_ok(): return self._json({"err": "CSRF 校验失败,刷新页面重试"}, 403)
+        if path == "/api/logout":
+            t = self._cookie_token() or self.headers.get("X-Token")
+            if t: _token_drop(t)
+            log("登出 from %s" % self._client_ip())
+            return self._json({"ok": True}, extra_headers=[("Set-Cookie", "emby_tok=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0")])
+        # 已通过鉴权与 CSRF 才读取 JSON：无认证请求不应能用超大 body / 慢 body 消耗 worker。
+        try:
+            b = self._body()
+        except BodyError as e:
+            return self._json({"err": e.msg}, e.status)
         try:
             if path == "/api/scan":
                 if b.get("async"):

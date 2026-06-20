@@ -186,6 +186,10 @@ class AuthGateTests(unittest.TestCase):
         s, h, b = req("POST", "/api/scan", {"lib": "x"})
         self.assertEqual(s, 401)
 
+    def test_logout_requires_auth(self):
+        s, h, b = req("POST", "/api/logout")
+        self.assertEqual(s, 401)
+
 
 # ============================================================
 # 2.5) JSON body 错误应明确返回 400/413,不能静默当 {}
@@ -207,6 +211,18 @@ class BodyParsingTests(unittest.TestCase):
         s, h, b = req_declared_length("POST", "/api/login", 1048576 + 1)
         self.assertEqual(s, 413)
         self.assertEqual(b.get("err"), "请求体过大")
+
+    def test_invalid_content_length_returns_400(self):
+        for value in ("not-a-number", -1):
+            s, h, b = req_declared_length("POST", "/api/login", value)
+            self.assertEqual(s, 400, value)
+            self.assertEqual(b.get("err"), "Content-Length 非法")
+
+    def test_unauthenticated_post_is_rejected_before_reading_body(self):
+        # 受保护接口不能让未登录客户端用超大 body 先占住 handler；login/webhook 例外各自受限。
+        s, h, b = req_declared_length("POST", "/api/scan", 1048576 + 1)
+        self.assertEqual(s, 401)
+        self.assertEqual(b.get("err"), "未登录")
 
     def test_malformed_json_delete_returns_400_after_auth(self):
         tok, csrf = login_get_token_csrf()
@@ -327,6 +343,11 @@ class CsrfTests(unittest.TestCase):
         # POST 不带 X-CSRF-Token
         s, h, b = req("POST", "/api/createlib", {"name": "x_csrf_test", "ctype": "movies"},
                       cookie="emby_tok=" + tok)
+        self.assertEqual(s, 403)
+
+    def test_logout_requires_csrf(self):
+        tok, _csrf = login_get_token_csrf()
+        s, h, b = req("POST", "/api/logout", cookie="emby_tok=" + tok)
         self.assertEqual(s, 403)
         self.assertIn("CSRF", b.get("err", ""))
 

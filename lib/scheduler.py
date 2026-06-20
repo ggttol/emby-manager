@@ -269,7 +269,7 @@ def _fire(sid):
         # watch_timeout 但任务实际仍在跑时,task_get 仍报 running → 正确拦截(M6)。
         if s.get("last_status") in ("running", "watch_timeout"):
             prev = task_get(s.get("last_tid")) if s.get("last_tid") else None
-            if prev and prev.get("status") == "running":
+            if prev and prev.get("status") in ("pending", "running"):
                 logger.warning("定时 %s [%s] 上次任务仍在跑,跳过本次触发", sid, s.get("kind"))
                 return None
             # 否则:残留状态(重启/任务已终/watch 超时但已结束)→ 继续,下面占位会覆盖
@@ -306,7 +306,7 @@ def _fire(sid):
             t = task_get(tid)
             if not t:
                 break
-            if t["status"] != "running":
+            if t["status"] not in ("pending", "running"):
                 with CFG_LOCK:
                     s2 = _find_by_id(sid)
                     if s2 and s2.get("last_tid") == tid:
@@ -359,7 +359,7 @@ def _reconcile_on_start():
         for s in CFG.get("schedules", []):
             if s.get("last_status") in ("running", "watch_timeout"):
                 prev = task_get(s.get("last_tid")) if s.get("last_tid") else None
-                if not (prev and prev.get("status") == "running"):
+                if not (prev and prev.get("status") in ("pending", "running")):
                     s["last_status"] = "interrupted"
                     s["last_err"] = "进程重启,上次运行结果未知"
                     s["last_ended_at"] = _isofmt(_now())

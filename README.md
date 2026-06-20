@@ -4,7 +4,7 @@
 
 为 strm 架构(strm 文件 + 115 网盘 CloudDrive2 挂载)而生,但纯 Emby 库也能用大部分功能。
 
-**v3.0** 升级了体验:全局 UI 组件库(Modal/Toast/TaskCenter/Drawer/VirtualList/Combobox),危险操作走 Modal + 打字防误删,长任务进 TaskCenter(顶部进度条 + 🔔 bell + 可取消、跨 tab 不丢、刷新自动恢复),键盘快捷键全覆盖,暗/亮三态主题,撤销系统接入 UI,配置导出/导入。后端能力 100% 暴露,11 lib 模块零循环依赖,166 单元测试。
+**v3.0** 升级了体验:全局 UI 组件库(Modal/Toast/TaskCenter/Drawer/VirtualList/Combobox),危险操作走 Modal + 打字防误删,长任务进 TaskCenter(顶部进度条 + 🔔 bell + 可取消、跨 tab 不丢、刷新自动恢复),键盘快捷键全覆盖,暗/亮三态主题,撤销系统接入 UI,配置导出/导入。后端能力 100% 暴露,11 lib 模块零循环依赖,287 单元测试。
 
 **v3.0.x** 增量:智能清理(多维度评分)/ 一条龙加新资源向导 / 追更扫描 + 缺集汇总 / 全库缺集扫描 / 海报错绑检测 / 仪表盘待办 / 空 folder 扫 / 一键自动去重 / ⏰ 定时任务(每日 / 每周 / 每月,4 种 kind)/ 手机加主屏 + PWA standalone(蓝紫「管」图标)。
 
@@ -177,9 +177,9 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 - **单用户:** 只一个登录密码,没多账号 / 角色 / 权限分层。亲戚用 Emby 自己账号,管理工具只你一人用。
 - **115 cookie 1-2 周过期:** 115 没刷新 token 机制,过期了「设置 → 115 Cookie」粘新的即可。每次过期工具会在 115 tab 标红。
 - **无 HTTPS:** HTTP 服务,加密交给反代(NAS 反代 / nginx / Caddy)。
-- **无审计日志持久化:** 日志只环形缓冲 200 条 + `lib/embymgr.log`,没接 ELK / Loki。
+- **日志保留有限:** 「日志」页会读取当前 `logs/app.log` 的最近 200 条，文件按 2MB × 5 份轮转；没有 ELK / Loki、跨设备集中审计或长期归档。
 - **undo log 局部:** 删除 / 移动有 undo log,但 115 转存 / 海报 Apply 没记录。
-- **测试覆盖:** 166 case 覆盖 path 安全 / cfg migrate / TMDb 解析 / c115 内部 / 密码 / HTTP handler / 配置导入导出 / strm 列表 / qscore / XFF / scheduler 触发判定。**Emby/115 实活 HTTP 端到端未覆盖**(需起 Emby mock,价值低)。
+- **测试覆盖:** 287 case 覆盖 path 安全 / cfg migrate / TMDb 解析 / c115 内部 / 密码 / HTTP handler / 配置导入导出 / strm 列表 / qscore / XFF / scheduler / 任务队列 / 挂载探针 / 持久化日志。**Emby/115 实活 HTTP 端到端未覆盖**(需起 Emby mock,价值低)。
 
 ---
 

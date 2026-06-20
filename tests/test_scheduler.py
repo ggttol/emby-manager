@@ -238,6 +238,15 @@ class TestOverlapGuard(_SchedulerTestBase):
             self._set_status(s["id"], "running", tid="fake_running_tid")
             self.assertIsNone(scheduler._fire(s["id"]))
 
+    def test_fire_skips_when_previous_task_is_queued(self):
+        """排队任务也尚未结束，不能因为它还没取得 worker 槽就重入。"""
+        from lib import scheduler
+        from lib import tasks
+        s = scheduler.add_schedule("queued", "scan_all", {"mode": "daily", "hour": 3, "minute": 0})
+        with patch.object(tasks, "task_get", return_value={"status": "pending"}):
+            self._set_status(s["id"], "running", tid="fake_pending_tid")
+            self.assertIsNone(scheduler._fire(s["id"]))
+
     def test_fire_proceeds_when_stale_running_after_restart(self):
         # H1:重启后 last_status 残留 running 但 task_get 返 None → 不应永久卡死,应能再次触发
         from lib import scheduler

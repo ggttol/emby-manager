@@ -1,7 +1,7 @@
 """ultracode 全面分析后修复的回归测试:挂载保险丝 / smart dst_n=0 护栏 /
 qscore 剔样片 / save_cfg .bak 兜底 / update_user 回读 / undo undone 标记 / c115 snap 分页。
 纯逻辑 + mock,不触网。"""
-import os, sys, json, tempfile, unittest
+import os, sys, json, tempfile, threading, time, unittest
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,6 +24,32 @@ class TestMountFuse(unittest.TestCase):
     def test_mount_alive_false_when_missing(self):
         with patch.object(biz, "CD", "/nonexistent_mount_xyz"):
             self.assertFalse(biz._mount_alive(timeout=2))
+
+    def test_stuck_probe_does_not_spawn_more_probe_threads(self):
+        """FUSE 卡住期间，后续探活直接失败，不能每次健康检查都堆一条 D-state 线程。"""
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def blocked_listdir(_path):
+            calls.append(1)
+            started.set()
+            release.wait(1)
+            return ["电影"]
+
+        with tempfile.TemporaryDirectory() as cd, patch.object(biz, "CD", cd), \
+             patch.object(biz.os, "listdir", side_effect=blocked_listdir):
+            self.assertFalse(biz._mount_alive(timeout=0.02))
+            self.assertTrue(started.is_set())
+            self.assertFalse(biz._mount_alive(timeout=0.02))
+            self.assertEqual(len(calls), 1)
+            release.set()
+            deadline = time.time() + 1
+            while biz._MOUNT_PROBE_INFLIGHT and time.time() < deadline:
+                time.sleep(0.01)
+            self.assertFalse(biz._MOUNT_PROBE_INFLIGHT)
+            self.assertTrue(biz._mount_alive(timeout=0.2))
+            self.assertEqual(len(calls), 2)
 
     def test_orphan_cleanup_skipped_when_mount_dead(self):
         # 关键防灾:挂载探活失败时,即便 strm 的 target 看似不存在,也绝不删 strm

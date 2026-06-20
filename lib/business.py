@@ -19,6 +19,11 @@ from lib.undo import _undo_record
 LIB_LOCKS = collections.defaultdict(threading.Lock)
 LIB_LOCKS_GUARD = threading.Lock()
 
+# FUSE 在风控/断连时可能让一次 stat/listdir 永远卡在 D-state。探针本身必须放
+# daemon thread 才不会拖死业务线程，但也绝不能每次调用都再造一条卡死线程。
+_MOUNT_PROBE_GUARD = threading.Lock()
+_MOUNT_PROBE_INFLIGHT = False
+
 
 def _lib_lock(name):
     """获取某 lib 的 Lock(惰性创建,LIB_LOCKS_GUARD 守 dict 写)"""
@@ -542,14 +547,31 @@ def _mount_alive(timeout=5):
     """115 CloudDrive2 挂载是否真活着:带超时确认 CD 根可列且非空。
     挂载半死(FUSE stat 卡 D-state)时 os.listdir 会 hang,故用子线程 + join 超时——超时即判死。
     用途:任何会因『文件看似不存在』而触发删除/误判的操作,动手前先探活(防风控挂载死时误删整库)。"""
+    global _MOUNT_PROBE_INFLIGHT
+    with _MOUNT_PROBE_GUARD:
+        # 上一次探针尚卡在 FUSE 内时，直接判不可用。否则健康检查/多个任务轮询会
+        # 不断制造无法回收的 daemon threads，最终把 NAS 自己拖慢。
+        if _MOUNT_PROBE_INFLIGHT:
+            return False
+        _MOUNT_PROBE_INFLIGHT = True
     result = {"ok": False}
     def probe():
+        global _MOUNT_PROBE_INFLIGHT
         try:
             result["ok"] = os.path.isdir(CD) and len(os.listdir(CD)) > 0
         except Exception:
             result["ok"] = False
+        finally:
+            with _MOUNT_PROBE_GUARD:
+                _MOUNT_PROBE_INFLIGHT = False
     t = threading.Thread(target=probe, daemon=True)
-    t.start(); t.join(timeout)
+    try:
+        t.start()
+    except Exception:
+        with _MOUNT_PROBE_GUARD:
+            _MOUNT_PROBE_INFLIGHT = False
+        return False
+    t.join(timeout)
     if t.is_alive():
         return False  # 超时 = 挂载卡死
     return result["ok"]
