@@ -1078,6 +1078,72 @@ IMPORTABLE_CONFIG_KEYS = frozenset((
 ))
 
 
+def _normalize_import_value(key, value):
+    """校验并规范化备份导入的值。
+
+    import_config 不能绕过设置页已有的路径/类型约束；否则一份坏备份会在重启后
+    把监听端口变成字符串、让 CD/STRM 指向相对路径，故障只会延迟到最难排查的启动时出现。
+    """
+    if key == "port":
+        if isinstance(value, bool):
+            raise AppError("port 必须是 1-65535 的整数", status=400)
+        try:
+            port = int(value)
+        except (TypeError, ValueError):
+            raise AppError("port 必须是 1-65535 的整数", status=400)
+        if not 1 <= port <= 65535:
+            raise AppError("port 必须是 1-65535 的整数", status=400)
+        return port
+    if key in ("cd", "strm", "docker"):
+        if not isinstance(value, str) or not value.startswith("/"):
+            raise AppError("%s 必须是绝对路径" % key, status=400)
+        return value.strip()
+    if key == "emby_url":
+        if not isinstance(value, str) or not value.strip().startswith(("http://", "https://")):
+            raise AppError("emby_url 必须以 http:// 或 https:// 开头", status=400)
+        return value.strip().rstrip("/")
+    if key == "api_key":
+        if not isinstance(value, str):
+            raise AppError("api_key 必须是字符串", status=400)
+        return value.strip()
+    if key == "c115_cid_map":
+        if not isinstance(value, dict):
+            raise AppError("c115_cid_map 必须是对象", status=400)
+        return {str(k): str(v).strip() for k, v in value.items() if str(v).strip()}
+    if key == "schedules":
+        if not isinstance(value, list):
+            raise AppError("schedules 必须是数组", status=400)
+        from lib.scheduler import _validate_schedule
+        for row in value:
+            if not isinstance(row, dict):
+                raise AppError("schedules 每项必须是对象", status=400)
+            try:
+                _validate_schedule(row.get("schedule") or {})
+            except ValueError as e:
+                raise AppError("定时任务配置非法: " + str(e), status=400)
+        return value
+    if key in ("auto_strm_enabled", "auto_strm_fullauto", "bind_token_ip"):
+        if not isinstance(value, bool):
+            raise AppError("%s 必须是 true/false" % key, status=400)
+        return value
+    if key == "auto_strm_debounce_sec":
+        if isinstance(value, bool):
+            raise AppError("auto_strm_debounce_sec 必须是 1-120 的整数", status=400)
+        try:
+            sec = int(value)
+        except (TypeError, ValueError):
+            raise AppError("auto_strm_debounce_sec 必须是 1-120 的整数", status=400)
+        if not 1 <= sec <= 120:
+            raise AppError("auto_strm_debounce_sec 必须是 1-120 的整数", status=400)
+        return sec
+    if key == "cd2_mount_prefix":
+        if not isinstance(value, str) or not value.startswith("/"):
+            raise AppError("cd2_mount_prefix 必须是绝对路径", status=400)
+        return value.rstrip("/") or "/"
+    # IMPORTABLE_CONFIG_KEYS 是唯一调用方；保留防御式兜底，后续扩项不能悄悄跳过校验。
+    raise AppError("不支持导入配置字段: " + str(key), status=400)
+
+
 def export_config():
     """返 redacted CFG —— 密码 hash 和 cookie raw 替换为 '<redacted>'(供用户下载备份)。"""
     from lib.config import CFG as _CFG, CFG_LOCK
@@ -1124,7 +1190,7 @@ def import_config(b):
             if k not in IMPORTABLE_CONFIG_KEYS:
                 skipped_unknown.append(k)
                 continue
-            candidate[k] = v
+            candidate[k] = _normalize_import_value(k, v)
             applied.append(k)
         _CFG.clear(); _CFG.update(candidate)
         if not save_cfg():

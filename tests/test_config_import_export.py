@@ -17,7 +17,7 @@ lib.config.CONFIG_FILE = os.path.join(TMPDIR, "config.json")
 
 from lib.config import CFG, CURRENT_SCHEMA
 from lib.business import (export_config, import_config, SENSITIVE_KEYS, PROTECTED_IMPORT_KEYS,
-                          IMPORTABLE_CONFIG_KEYS)
+                          IMPORTABLE_CONFIG_KEYS, _normalize_import_value)
 from lib.logger import AppError
 
 
@@ -180,6 +180,31 @@ class ImportTests(unittest.TestCase):
         import_config({"cfg": {"bind_token_ip": True}, "confirm": True})
         self.assertTrue(CFG["bind_token_ip"])
         self.assertIn("bind_token_ip", IMPORTABLE_CONFIG_KEYS)
+
+    def test_invalid_import_value_rejected_without_partial_apply(self):
+        """导入后面的非法路径不能让前面候选字段半应用到共享 CFG。"""
+        reset_cfg()
+        with self.assertRaises(AppError) as cm:
+            import_config({"cfg": {"emby_url": "http://new", "strm": "relative/path"}, "confirm": True})
+        self.assertEqual(cm.exception.status, 400)
+        self.assertEqual(CFG["emby_url"], "http://127.0.0.1:8096/emby")
+        self.assertNotEqual(CFG.get("strm"), "relative/path")
+
+    def test_port_and_debounce_are_normalized_or_rejected(self):
+        reset_cfg()
+        import_config({"cfg": {"port": "18097", "auto_strm_debounce_sec": "12"}, "confirm": True})
+        self.assertEqual(CFG["port"], 18097)
+        self.assertEqual(CFG["auto_strm_debounce_sec"], 12)
+        for key, value in (("port", 0), ("port", True), ("auto_strm_debounce_sec", 121)):
+            with self.assertRaises(AppError):
+                _normalize_import_value(key, value)
+
+    def test_invalid_schedule_is_rejected(self):
+        reset_cfg()
+        with self.assertRaises(AppError) as cm:
+            import_config({"cfg": {"schedules": [{"schedule": {"mode": "daily", "hour": 25, "minute": 0}}]},
+                           "confirm": True})
+        self.assertEqual(cm.exception.status, 400)
 
 
 if __name__ == "__main__":
