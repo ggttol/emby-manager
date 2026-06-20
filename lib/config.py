@@ -2,7 +2,7 @@
 CFG 是跨模块共享的 mutable dict —— 任何模块都 `from lib.config import CFG` 后直接改 key,
 **绝不 rebind**(load_cfg 用 clear()+update() 保证)。
 """
-import json, os, threading, time
+import json, logging, os, threading, time
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 项目根 = lib/ 上一层
 # 路径默认值(群晖 + strm + CloudDrive2 标准布局)。换机器只需在 config.json 填 cd/strm/docker 覆盖,不用改代码。
@@ -70,11 +70,18 @@ def load_cfg():
         CONFIG_EXISTED = False
 
 def save_cfg():
+    """原子写配置并返回是否持久化成功。
+
+    不能静默吞掉 ENOSPC/权限错误：调用方据此向用户报错并回滚内存状态，
+    否则页面显示“已保存”而重启后配置又回去，会直接影响密码、cookie、路径和定时任务。
+    """
+    tmp = CONFIG_FILE + ".tmp"
     try:
         # 原子写新 config.json(内容来自内存 CFG,一定是好的):先 tmp 再 rename,chmod 0600
-        tmp = CONFIG_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(CFG, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
         os.replace(tmp, CONFIG_FILE)
         # 写成功后,把这份【刚写好的、保证合法】的 config.json 同步成 .bak。
@@ -84,9 +91,23 @@ def save_cfg():
             shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".bak")
             os.chmod(CONFIG_FILE + ".bak", 0o600)
         except Exception:
-            pass
+            logging.getLogger("embymgr").warning("config.json 已保存,但 .bak 同步失败", exc_info=True)
+        # rename 已保证原子性；目录 fsync 是额外的断电耐受，部分 NAS/文件系统不支持时不影响已成功保存。
+        try:
+            fd = os.open(os.path.dirname(CONFIG_FILE) or ".", os.O_RDONLY)
+            try: os.fsync(fd)
+            finally: os.close(fd)
+        except Exception:
+            logging.getLogger("embymgr").warning("config 目录 fsync 不可用", exc_info=True)
+        return True
     except Exception:
-        pass
+        logging.getLogger("embymgr").exception("保存 config.json 失败")
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
+        return False
 
 def _apply_paths():
     """按 CFG 重设模块级 CD/STRM/DOCKER。load_cfg 后调用;set_config 改路径后也调(让 config.CD 同步,

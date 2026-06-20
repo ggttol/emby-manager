@@ -3,7 +3,7 @@
 
 scan_lib / move_item / exec_dedup 走 _lib_lock(name) 串行化,避免并发扫同一库踩对方 strm。
 """
-import collections, os, re, shutil, subprocess, threading, time
+import collections, copy, os, re, shutil, subprocess, threading, time
 
 from lib.config import CFG, CD, STRM, DOCKER, VE
 from lib.logger import logger, log, AppError
@@ -970,11 +970,16 @@ def set_config(b):
     from lib.config import CFG_LOCK, WEAK_PWS, save_cfg
     from lib.auth import _hash_password, _verify_password
     changed = []
+    password_changed = False
     with CFG_LOCK:
+        # 先在候选副本上校验和修改，只有落盘成功才切换共享 CFG；避免后面的一个字段非法
+        # 却把前面已改的 Emby 地址/cookie 留在内存里这种“半保存”状态。
+        before = copy.deepcopy(CFG)
+        candidate = copy.deepcopy(CFG)
         if b.get("password"):
             pw = b["password"]
             old = b.get("old_password", "")
-            cur_hash = CFG.get("password_hash", "")
+            cur_hash = candidate.get("password_hash", "")
             # grace:首次升级(无 last_password_change_at 字段)允许一次无 old_password 改密;
             # 之后必须输旧密码且匹配 hash
             if CFG.get("last_password_change_at") and not _verify_password(old, cur_hash):
@@ -983,46 +988,39 @@ def set_config(b):
                 return {"err": "密码至少 6 位"}
             if pw in WEAK_PWS:
                 return {"err": "密码在弱密码列表,换一个"}
-            CFG["password_hash"] = _hash_password(pw); CFG.pop("password", None)
-            CFG["last_password_change_at"] = int(time.time())
+            candidate["password_hash"] = _hash_password(pw); candidate.pop("password", None)
+            candidate["last_password_change_at"] = int(time.time())
             changed.append("登录密码")
-            # 改密即吊销所有现有会话 token(防"怀疑泄露改了密但旧 cookie 还能用满 7 天")。
-            # 当前会话也会失效 → 前端下次请求 401 → 自动跳登录,用新密码重登。
-            try:
-                from lib.auth import TOKENS, TOKENS_LOCK
-                with TOKENS_LOCK:
-                    TOKENS.clear()
-            except Exception:
-                pass
+            password_changed = True
         if b.get("emby_url"):
-            CFG["emby_url"] = b["emby_url"].strip(); changed.append("Emby地址")
+            candidate["emby_url"] = b["emby_url"].strip(); changed.append("Emby地址")
         if b.get("api_key"):
-            CFG["api_key"] = b["api_key"].strip(); changed.append("API Key")
+            candidate["api_key"] = b["api_key"].strip(); changed.append("API Key")
         if b.get("c115_cookie") is not None:
-            CFG["c115_cookie"] = b["c115_cookie"].strip(); changed.append("115 Cookie")
+            candidate["c115_cookie"] = b["c115_cookie"].strip(); changed.append("115 Cookie")
         if isinstance(b.get("c115_cid_map"), dict):
-            CFG["c115_cid_map"] = {k: str(v).strip() for k, v in b["c115_cid_map"].items() if str(v).strip()}
+            candidate["c115_cid_map"] = {k: str(v).strip() for k, v in b["c115_cid_map"].items() if str(v).strip()}
             changed.append("115 库 cid 映射")
         if isinstance(b.get("trusted_proxies"), list):
             # 受信反代 IP 列表(影响登录限流的 XFF 信任)。只收字符串项,去空白。
-            CFG["trusted_proxies"] = [str(x).strip() for x in b["trusted_proxies"] if str(x).strip()]
+            candidate["trusted_proxies"] = [str(x).strip() for x in b["trusted_proxies"] if str(x).strip()]
             changed.append("受信反代 IP")
         # autostrm(CD2 webhook 自动生成 strm)开关组
         if b.get("cd2_webhook_secret") is not None:
             # 只写不回显(同 cookie)。空串 = 关闭功能(webhook 一律 403)
-            CFG["cd2_webhook_secret"] = str(b["cd2_webhook_secret"]).strip(); changed.append("CD2 webhook 密钥")
+            candidate["cd2_webhook_secret"] = str(b["cd2_webhook_secret"]).strip(); changed.append("CD2 webhook 密钥")
         if b.get("cd2_mount_prefix") is not None and str(b["cd2_mount_prefix"]).strip():
             v = str(b["cd2_mount_prefix"]).strip()
             if not v.startswith("/"):
                 return {"err": "CD2 挂载前缀必须以 / 开头: %r" % v}
-            CFG["cd2_mount_prefix"] = v.rstrip("/") or "/"; changed.append("CD2 挂载前缀")
+            candidate["cd2_mount_prefix"] = v.rstrip("/") or "/"; changed.append("CD2 挂载前缀")
         if b.get("auto_strm_enabled") is not None:
-            CFG["auto_strm_enabled"] = bool(b["auto_strm_enabled"]); changed.append("自动 strm 开关")
+            candidate["auto_strm_enabled"] = bool(b["auto_strm_enabled"]); changed.append("自动 strm 开关")
         if b.get("auto_strm_fullauto") is not None:
-            CFG["auto_strm_fullauto"] = bool(b["auto_strm_fullauto"]); changed.append("自动 strm 全自动")
+            candidate["auto_strm_fullauto"] = bool(b["auto_strm_fullauto"]); changed.append("自动 strm 全自动")
         if b.get("auto_strm_debounce_sec") is not None:
             try:
-                CFG["auto_strm_debounce_sec"] = max(1, min(120, int(b["auto_strm_debounce_sec"])))
+                candidate["auto_strm_debounce_sec"] = max(1, min(120, int(b["auto_strm_debounce_sec"])))
                 changed.append("防抖窗口")
             except Exception:
                 pass
@@ -1034,8 +1032,19 @@ def set_config(b):
                 v = str(v).strip()
                 if not v.startswith("/"):
                     return {"err": "%s 必须是绝对路径(以 / 开头): %r" % (name, v)}
-                CFG[k] = v; changed.append(name); path_changed = True
-        save_cfg()
+                candidate[k] = v; changed.append(name); path_changed = True
+        CFG.clear(); CFG.update(candidate)
+        if not save_cfg():
+            CFG.clear(); CFG.update(before)
+            raise AppError("配置保存失败(磁盘空间或权限异常),未应用本次修改", status=500)
+    if password_changed:
+        # 只有新 hash 已落盘才吊销会话；保存失败时保留原会话，避免用户被无端踢下线。
+        try:
+            from lib.auth import TOKENS, TOKENS_LOCK
+            with TOKENS_LOCK:
+                TOKENS.clear()
+        except Exception:
+            pass
     if path_changed:
         try:
             from lib.config import _apply_paths
@@ -1099,13 +1108,18 @@ def import_config(b):
         raise AppError("schema 不匹配:导入 %s vs 当前 %s" % (sv, CURRENT_SCHEMA), status=400)
     applied = []; skipped_protected = []
     with CFG_LOCK:
+        before = copy.deepcopy(_CFG)
+        candidate = copy.deepcopy(_CFG)
         for k, v in cfg.items():
             if k in PROTECTED_IMPORT_KEYS:
                 skipped_protected.append(k)
                 continue
-            _CFG[k] = v
+            candidate[k] = v
             applied.append(k)
-        save_cfg()
+        _CFG.clear(); _CFG.update(candidate)
+        if not save_cfg():
+            _CFG.clear(); _CFG.update(before)
+            raise AppError("配置保存失败(磁盘空间或权限异常),未应用导入", status=500)
     log("config 导入: 改 %d 字段 [%s]%s" % (
         len(applied), ", ".join(applied),
         " · 拒受保护字段 " + ",".join(skipped_protected) if skipped_protected else ""))

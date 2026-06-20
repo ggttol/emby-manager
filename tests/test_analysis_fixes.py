@@ -257,6 +257,38 @@ class TestConfigBak(unittest.TestCase):
         finally:
             config.CFG.clear(); config.CFG.update(snap)
 
+    def test_save_cfg_failure_returns_false_and_keeps_previous_file(self):
+        """磁盘/权限异常不能静默成功，更不能破坏已有的 config.json。"""
+        from lib import config
+        snap = dict(config.CFG)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                cfgf = os.path.join(tmp, "config.json")
+                with open(cfgf, "w") as f: json.dump({"v": "old"}, f)
+                with patch.object(config, "CONFIG_FILE", cfgf), \
+                     patch.object(config.os, "replace", side_effect=OSError("disk full")):
+                    config.CFG.clear(); config.CFG.update({"v": "new"})
+                    self.assertFalse(config.save_cfg())
+                with open(cfgf) as f:
+                    self.assertEqual(json.load(f), {"v": "old"})
+                self.assertFalse(os.path.exists(cfgf + ".tmp"))
+        finally:
+            config.CFG.clear(); config.CFG.update(snap)
+
+    def test_set_config_rolls_back_when_save_fails(self):
+        """设置页落盘失败时，运行中 CFG 也必须回到旧值，不能半保存。"""
+        from lib import config
+        from lib import business
+        old_url = config.CFG.get("emby_url")
+        try:
+            with patch.object(config, "save_cfg", return_value=False):
+                with self.assertRaises(business.AppError) as cm:
+                    business.set_config({"emby_url": "http://should-not-stick"})
+            self.assertEqual(cm.exception.status, 500)
+            self.assertEqual(config.CFG.get("emby_url"), old_url)
+        finally:
+            config.CFG["emby_url"] = old_url
+
 
 class TestConfigurablePaths(unittest.TestCase):
     """CD/STRM/DOCKER 从 config.json 取(换机器不用改代码);缺 key 时回落默认。"""
