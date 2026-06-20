@@ -1069,6 +1069,13 @@ SENSITIVE_KEYS = ("password_hash", "c115_cookie", "cd2_webhook_secret")
 PROTECTED_IMPORT_KEYS = ("schema_version", "password_hash", "c115_cookie",
                          "last_password_change_at", "username",
                          "host", "trusted_proxies", "cd2_webhook_secret")
+# 导入不是任意 CFG 注入接口：只接受文档化、可由设置页/调度页管理的字段。
+# bind_token_ip 虽暂未放 UI，仍保留给已有手工配置的兼容路径。
+IMPORTABLE_CONFIG_KEYS = frozenset((
+    "emby_url", "api_key", "port", "cd", "strm", "docker", "c115_cid_map", "schedules",
+    "auto_strm_enabled", "auto_strm_fullauto", "auto_strm_debounce_sec", "cd2_mount_prefix",
+    "bind_token_ip",
+))
 
 
 def export_config():
@@ -1106,13 +1113,16 @@ def import_config(b):
     sv = cfg.get("schema_version")
     if sv is not None and sv != CURRENT_SCHEMA:
         raise AppError("schema 不匹配:导入 %s vs 当前 %s" % (sv, CURRENT_SCHEMA), status=400)
-    applied = []; skipped_protected = []
+    applied = []; skipped_protected = []; skipped_unknown = []
     with CFG_LOCK:
         before = copy.deepcopy(_CFG)
         candidate = copy.deepcopy(_CFG)
         for k, v in cfg.items():
             if k in PROTECTED_IMPORT_KEYS:
                 skipped_protected.append(k)
+                continue
+            if k not in IMPORTABLE_CONFIG_KEYS:
+                skipped_unknown.append(k)
                 continue
             candidate[k] = v
             applied.append(k)
@@ -1122,8 +1132,10 @@ def import_config(b):
             raise AppError("配置保存失败(磁盘空间或权限异常),未应用导入", status=500)
     log("config 导入: 改 %d 字段 [%s]%s" % (
         len(applied), ", ".join(applied),
-        " · 拒受保护字段 " + ",".join(skipped_protected) if skipped_protected else ""))
-    return {"ok": True, "applied": applied, "skipped_protected": skipped_protected}
+        (" · 拒受保护字段 " + ",".join(skipped_protected) if skipped_protected else "") +
+        (" · 跳未知字段 " + ",".join(skipped_unknown) if skipped_unknown else "")))
+    return {"ok": True, "applied": applied, "skipped_protected": skipped_protected,
+            "skipped_unknown": skipped_unknown}
 
 
 # ===== 异步任务:全库扫描 + c115 批处理 =====

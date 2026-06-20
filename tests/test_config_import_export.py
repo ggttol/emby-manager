@@ -16,7 +16,8 @@ lib.config.HERE = TMPDIR
 lib.config.CONFIG_FILE = os.path.join(TMPDIR, "config.json")
 
 from lib.config import CFG, CURRENT_SCHEMA
-from lib.business import export_config, import_config, SENSITIVE_KEYS, PROTECTED_IMPORT_KEYS
+from lib.business import (export_config, import_config, SENSITIVE_KEYS, PROTECTED_IMPORT_KEYS,
+                          IMPORTABLE_CONFIG_KEYS)
 from lib.logger import AppError
 
 
@@ -166,11 +167,19 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(CFG["username"], "admin")
 
     def test_unknown_keys_handling(self):
-        """未知字段是否接受 — 当前实现接受(白名单可后续加强),测当前行为"""
+        """未知字段不能作为备份导入的隐式运行时开关。"""
         reset_cfg()
-        import_config({"cfg": {"random_new_field": 42, "emby_url": "http://new"}, "confirm": True})
+        r = import_config({"cfg": {"random_new_field": 42, "emby_url": "http://new"}, "confirm": True})
         self.assertEqual(CFG["emby_url"], "http://new")
-        # 未知字段当前会写入,这条 case 记录现状
+        self.assertNotIn("random_new_field", CFG)
+        self.assertEqual(r["skipped_unknown"], ["random_new_field"])
+
+    def test_supported_hidden_security_option_can_still_import(self):
+        """已存在的手工 bind_token_ip 配置是显式白名单的一部分。"""
+        reset_cfg()
+        import_config({"cfg": {"bind_token_ip": True}, "confirm": True})
+        self.assertTrue(CFG["bind_token_ip"])
+        self.assertIn("bind_token_ip", IMPORTABLE_CONFIG_KEYS)
 
 
 if __name__ == "__main__":
