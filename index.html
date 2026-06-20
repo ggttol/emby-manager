@@ -4293,7 +4293,7 @@ async function refreshSeries(btn){
   if(btn){ btn.disabled=true; btn._t=btn.textContent; btn.textContent='刷新中…'; }  // 防连点
   UI.toast("从 TMDb 刷新元数据中(约十几秒,完了自动重查缺集)…",{type:'info',ms:4000});
   try{
-    const r=await api("/api/refreshseries?id="+encodeURIComponent(id));
+    const r=await api("/api/refreshseries",{method:"POST",body:JSON.stringify({id})});
     if(r&&r.err){ UI.toast("刷新失败: "+r.err,{type:'error',ms:6000}); return; }
     // Emby 后台拉 TMDb 要点时间,等一下再自动重查(省去用户掐表手点)
     UI.toast("已触发刷新,稍候自动重查缺集",{type:'ok',ms:2500});

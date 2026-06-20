@@ -257,7 +257,6 @@ class H(BaseHTTPRequestHandler):
             if path == "/api/items": return self._json(list_items(q.get("lib", [""])[0]))
             if path == "/api/zhuigeng": return self._json(zhuigeng_status())
             if path == "/api/gaps": return self._json(series_gaps(q.get("id", [""])[0]))
-            if path == "/api/refreshseries": return self._json(refresh_series(q.get("id", [""])[0]))
             if path == "/api/log": return self._json({"logs": list_recent_logs(200)})
             if path == "/api/users":
                 with_act = q.get("withActivity", ["0"])[0] in ("1", "true", "True")
@@ -376,6 +375,10 @@ class H(BaseHTTPRequestHandler):
                     from lib.business import scan_lib_async
                     return self._json({"tid": run_async("scan_lib", scan_lib_async, b.get("lib"), b.get("keyword"))})
                 return self._json(scan_lib(b.get("lib"), b.get("keyword")))
+            if path == "/api/refreshseries":
+                # 刷新会改 Emby 元数据，必须和其他写操作一样走 POST + CSRF；不能用 GET
+                # 否则浏览器预取、爬虫或跨站链接都可能意外触发一次刷新。
+                return self._json(refresh_series(b.get("id", "")))
             if path == "/api/fixposter": return self._json(apply_match(b.get("id"), b.get("tmdb"), b.get("type", "Series"), b.get("name", "")))
             if path == "/api/dedup": return self._json(exec_dedup(b.get("tmdb"), b.get("remove", [])))
             if path == "/api/move": return self._json(move_item(b.get("from"), b.get("folder"), b.get("to"), b.get("id"), on_conflict=b.get("on_conflict", "error")))

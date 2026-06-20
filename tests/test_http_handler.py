@@ -351,6 +351,12 @@ class CsrfTests(unittest.TestCase):
         self.assertEqual(s, 403)
         self.assertIn("CSRF", b.get("err", ""))
 
+    def test_refreshseries_requires_csrf(self):
+        tok, _csrf = login_get_token_csrf()
+        s, h, b = req("POST", "/api/refreshseries", {"id": "series-1"}, cookie="emby_tok=" + tok)
+        self.assertEqual(s, 403)
+        self.assertIn("CSRF", b.get("err", ""))
+
     def test_post_wrong_csrf_403(self):
         tok, _ = login_get_token_csrf()
         s, h, b = req("POST", "/api/createlib", {"name": "x_csrf_test", "ctype": "movies"},
@@ -446,6 +452,24 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(s, 200)
         self.assertEqual(b, {"tid": "zg_async_tid"})
         self.assertEqual(run.call_args.args[0], "zhuigeng_status")
+
+
+class MutatingRouteTests(unittest.TestCase):
+    def test_refreshseries_post_calls_business_function(self):
+        tok, csrf = login_get_token_csrf()
+        with patch.object(app, "refresh_series", return_value={"ok": True, "code": 204}) as refresh:
+            s, h, b = req("POST", "/api/refreshseries", {"id": "series-1"},
+                          cookie="emby_tok=" + tok, csrf=csrf)
+        self.assertEqual(s, 200)
+        self.assertTrue(b.get("ok"))
+        refresh.assert_called_once_with("series-1")
+
+    def test_legacy_refreshseries_get_does_not_mutate(self):
+        tok, _csrf = login_get_token_csrf()
+        with patch.object(app, "refresh_series") as refresh:
+            s, h, b = req("GET", "/api/refreshseries?id=series-1", cookie="emby_tok=" + tok)
+        self.assertEqual(s, 404)
+        refresh.assert_not_called()
 
 
 # ============================================================
