@@ -1147,20 +1147,24 @@ def scan_all_async(tid):
 
 
 def zhuigeng_status_async(tid):
-    """zhuigeng_status 异步版:按库切分进度。逻辑内联(不调 zhuigeng_status)以便细粒度上报。"""
-    libs = [n for n, m in fetch_libs().items() if "追更" in n and m["ctype"] == "tvshows"]
-    task_set(tid, total=len(libs))
+    """追更检查异步版:按库切分进度，结果与同步 zhuigeng_status 保持同形。
+
+    前端既要显示状态，也要用 id/folder 对完结剧执行归档；异步结果少了这两个字段会
+    让任务完成后“归档”按钮全部失效，因此这里刻意与同步版一项不差地返回。
+    """
+    lib_map = fetch_libs()
+    libs = [(n, m) for n, m in lib_map.items() if "追更" in n and m["ctype"] == "tvshows"]
+    task_set(tid, total=len(libs) or 1, status_text="查追更库…")
     out_items = []
-    for i, name in enumerate(libs):
+    for i, (name, m) in enumerate(libs):
         if task_is_cancelled(tid): break
         task_set(tid, progress=i, status_text="查 " + name)
-        m = fetch_libs().get(name)
-        if not m: continue
         try:
             series = eget("/Items", {"ParentId": m["id"], "Recursive": "true", "IncludeItemTypes": "Series",
-                                     "Fields": "Status", "SortBy": "SortName"}).get("Items", [])
+                                     "Fields": "Status,Path,ProviderIds", "SortBy": "SortName"}).get("Items", [])
         except Exception:
             series = []
+        sep = "/" + m["folder"] + "/"
         for s in series:
             if task_is_cancelled(tid): break
             try:
@@ -1170,12 +1174,16 @@ def zhuigeng_status_async(tid):
             have = [e for e in eps if e.get("LocationType") != "Virtual"]
             dates = sorted([(e.get("PremiereDate") or "")[:10] for e in have if e.get("PremiereDate")])
             st = s.get("Status") or "?"
-            out_items.append({"lib": name, "name": s["Name"], "status": st,
+            path = s.get("Path") or ""
+            folder = path.split(sep, 1)[1].split("/", 1)[0] if sep in path else ""
+            out_items.append({"lib": name, "name": s.get("Name") or "(无名)", "id": s.get("Id"),
+                              "folder": folder, "status": st,
                               "airing": st in ("Continuing", "Returning Series"),
                               "count": len(have), "latest": dates[-1] if dates else "",
                               "tmdb": (s.get("ProviderIds") or {}).get("Tmdb", "")})
         task_set(tid, progress=i + 1)
     out_items.sort(key=lambda x: (not x["airing"], x["count"]))
+    task_set(tid, progress=len(libs), status_text="完成")
     return {"items": out_items}
 
 

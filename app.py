@@ -395,8 +395,9 @@ class H(BaseHTTPRequestHandler):
                 return self._json(c115_save_batch(items, b.get("lib", ""), b.get("pwd", "")) if items else c115_save_to_lib(b.get("url", ""), b.get("pwd", ""), b.get("lib", ""), b.get("file_ids")))
             if path == "/api/scan_all":
                 return self._json({"tid": run_async("scan_all", scan_all_async)})
-            # /api/zhuigeng POST async 路由暂时去除(前端未接,v3.0.x follow-up 时同步接上;
-            # 同步 GET 版仍在,zhuigeng_status_async 业务函数保留供 follow-up 直接接路由)
+            if path == "/api/zhuigeng":
+                # 大追更库需逐剧查 Episodes；走任务中心避免 HTTP 长连接卡住页面。
+                return self._json({"tid": run_async("zhuigeng_status", zhuigeng_status_async)})
             if path == "/api/fixposter_batch":
                 return self._json({"tid": run_async("fixposter_batch", fix_poster_batch_async,
                                                    b.get("ids") or [], b.get("type", "Series"))})

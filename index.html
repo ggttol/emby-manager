@@ -3479,8 +3479,18 @@ async function posterFromWizard(items){
 // 追更检查
 async function loadZhuigeng(){
   const o=$("#zgOut");o.innerHTML='<span class="spin"></span> 查各追更剧状态(几十秒)…';
-  let d;try{d=await api("/api/zhuigeng");}catch(e){o.textContent="出错: "+e;return;}
-  const airing=d.items.filter(i=>i.airing),ended=d.items.filter(i=>!i.airing);
+  let r;try{r=await api("/api/zhuigeng",{method:"POST",body:JSON.stringify({async:true})});}catch(e){o.textContent="出错: "+e;return;}
+  if(r.err){o.textContent="出错: "+r.err;return;}
+  // 后端 v3.0.x 以前同步返回；保留兼容，升级后正常走 TaskCenter 可取消/跨 tab 恢复。
+  if(!r.tid){ return renderZhuigeng(r, o); }
+  UI.tasks.start(r.tid, {
+    label:'🔄 检查追更状态',
+    onDone:(t)=>renderZhuigeng(t.result || {items:[]}, o)
+  });
+}
+function renderZhuigeng(d, o){
+  const items = Array.isArray(d.items) ? d.items : [];
+  const airing=items.filter(i=>i.airing),ended=items.filter(i=>!i.airing);
   // 缓存供归档调用
   window._zgEnded = ended;
   // 自动猜归档目标库:LIBS 里名字含「完结」的剧集库

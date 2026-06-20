@@ -439,6 +439,14 @@ class TaskTests(unittest.TestCase):
         self.assertEqual(s, 404)
         self.assertIn("err", b)
 
+    def test_zhuigeng_post_starts_async_task(self):
+        tok, csrf = login_get_token_csrf()
+        with patch.object(app, "run_async", return_value="zg_async_tid") as run:
+            s, h, b = req("POST", "/api/zhuigeng", {}, cookie="emby_tok=" + tok, csrf=csrf)
+        self.assertEqual(s, 200)
+        self.assertEqual(b, {"tid": "zg_async_tid"})
+        self.assertEqual(run.call_args.args[0], "zhuigeng_status")
+
 
 # ============================================================
 # 12) CD2 webhook:免登录但密钥保护,绝不走 _auth/_csrf
