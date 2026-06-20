@@ -15,7 +15,7 @@
 """
 import os, sys, json, threading, time, unittest, tempfile, shutil
 from http.client import HTTPConnection
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -166,6 +166,21 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(b["status"], "ok")
         self.assertIsInstance(b["uptime"], int)
         self.assertIsInstance(b["emby_online"], bool)
+
+
+class ServerHardeningTests(unittest.TestCase):
+    def test_app_server_uses_daemon_workers_and_bounded_backlog(self):
+        self.assertTrue(app.AppHTTPServer.daemon_threads)
+        self.assertEqual(app.AppHTTPServer.request_queue_size, 64)
+
+    def test_accepted_socket_receives_timeout(self):
+        fake_sock = Mock()
+        server = object.__new__(app.AppHTTPServer)
+        with patch("app.ThreadingHTTPServer.get_request", return_value=(fake_sock, ("127.0.0.1", 12345))):
+            got_sock, got_addr = server.get_request()
+        self.assertIs(got_sock, fake_sock)
+        self.assertEqual(got_addr, ("127.0.0.1", 12345))
+        fake_sock.settimeout.assert_called_once_with(30)
 
 
 # ============================================================

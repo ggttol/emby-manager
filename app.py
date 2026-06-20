@@ -80,6 +80,22 @@ class BodyError(Exception):
         self.msg = msg
 
 
+class AppHTTPServer(ThreadingHTTPServer):
+    """NAS 单进程 HTTP server 的连接护栏。
+
+    Base ThreadingHTTPServer 默认不给 accepted socket 设置超时；半截请求/慢速 body 会长期占
+    一个线程。管理面不需要慢上传，30 秒足够正常请求，超时后交给 BaseHTTPRequestHandler 断开。
+    """
+    daemon_threads = True
+    request_queue_size = 64
+    client_timeout = 30
+
+    def get_request(self):
+        sock, addr = super().get_request()
+        sock.settimeout(self.client_timeout)
+        return sock, addr
+
+
 def c115_test(cookie_override=None):
     return _c115.c115_test(_c115_req, cookie_override)
 
@@ -157,7 +173,11 @@ class H(BaseHTTPRequestHandler):
         # HEAD 请求:头照发(含 Content-Length),body 不写(do_HEAD 设 _suppress_body)
         if getattr(self, "_suppress_body", False):
             return
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            # 客户端超时/切 tab 后已主动断开，不能让这类正常网络事件刷 traceback。
+            return
     def _json(self, obj, code=200, extra_headers=None):
         self._send(code, "application/json; charset=utf-8", json.dumps(obj, ensure_ascii=False), extra_headers)
     def _cookie_token(self):
@@ -575,4 +595,4 @@ if __name__ == "__main__":
     host = CFG.get("host", "127.0.0.1"); port = CFG["port"]
     log("服务启动 @ %s:%d" % (host, port))
     print("Emby 管理工具: http://%s:%d  (schema v%d)" % (host, port, CFG.get("schema_version", 1)), file=sys.stderr)
-    ThreadingHTTPServer((host, port), H).serve_forever()
+    AppHTTPServer((host, port), H).serve_forever()
