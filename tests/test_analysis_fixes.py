@@ -238,6 +238,9 @@ class TestConfigBak(unittest.TestCase):
                     config.load_cfg()
                     self.assertEqual(config.CFG.get("c115_cookie"), "REAL_COOKIE", "应从 .bak 恢复")
                     self.assertTrue(config.CONFIG_EXISTED)
+                with open(cfgf) as f:
+                    self.assertEqual(json.load(f), good, "成功回退后应原子修复主 config.json")
+                self.assertTrue(os.path.exists(cfgf + ".corrupt"), "原损坏配置应留副本供排查")
         finally:
             config.CFG.clear(); config.CFG.update(snap)
 

@@ -37,11 +37,13 @@ def _try_load(path):
 
 def load_cfg():
     """清掉旧内容、读 config.json 合并 defaults。**不 rebind CFG**(跨模块共享)。
-    config.json 损坏(半写/断电/手改漏逗号)时回退到 .bak,避免静默丢光 cookie/密码/schedules。"""
+    config.json 损坏(半写/断电/手改漏逗号)时回退到 .bak,并原子修复主文件，
+    避免每次重启都再次进入恢复分支。"""
     global CONFIG_EXISTED
     CFG.clear()
     CFG.update(_DEFAULTS)
     loaded = None
+    recovered_from_bak = False
     if os.path.exists(CONFIG_FILE):
         try:
             loaded = _try_load(CONFIG_FILE)
@@ -51,6 +53,7 @@ def load_cfg():
             logger.error("config.json 解析失败,尝试回退 .bak")
             try:
                 loaded = _try_load(CONFIG_FILE + ".bak")
+                recovered_from_bak = True
                 logger.warning("已从 config.json.bak 恢复配置")
             except Exception:
                 logger.error("config.json.bak 也不可用,退回安全默认(127.0.0.1)。保留损坏文件到 .corrupt 供手工修复")
@@ -63,6 +66,30 @@ def load_cfg():
     if loaded is not None:
         CFG.update(loaded)
         CONFIG_EXISTED = True
+        if recovered_from_bak:
+            # .bak 已成功 JSON 解析，才拿它修主文件。先保留坏文件供排查，再 copy→fsync→replace，
+            # 不能直接 copy2 覆盖 config.json，否则恢复过程中断电会把主/备份一起置于不确定状态。
+            tmp = CONFIG_FILE + ".recover.tmp"
+            try:
+                import shutil
+                try:
+                    shutil.copy2(CONFIG_FILE, CONFIG_FILE + ".corrupt")
+                except Exception:
+                    logger.warning("保存损坏 config.json 副本失败(仍继续从 .bak 修复)", exc_info=True)
+                with open(CONFIG_FILE + ".bak", "rb") as src, open(tmp, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                    dst.flush()
+                    os.fsync(dst.fileno())
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, CONFIG_FILE)
+                logger.warning("已用 config.json.bak 原子修复主配置文件")
+            except Exception:
+                logger.exception("已从 .bak 载入配置,但修复主 config.json 失败;本次运行仍使用备份内容")
+                try:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+                except Exception:
+                    pass
     else:
         # 文件不存在 OR 损坏且 .bak 也救不回 → CONFIG_EXISTED=False。
         # 关键安全点:损坏且无 bak 时**不能**当"旧装"走(否则 migrate 会设 host=0.0.0.0 + 无密码裸奔);

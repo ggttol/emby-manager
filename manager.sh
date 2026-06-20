@@ -5,7 +5,21 @@ PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
 APP=/volume1/docker/emby-manager/app.py
 PY=/usr/bin/python3
 [ -x "$PY" ] || PY="$(command -v python3)"
-kill_all(){ for p in $(ps aux | grep '[e]mby-manager/app.py' | awk '{print $2}'); do kill -9 "$p" 2>/dev/null; done; }
+kill_all(){
+  pids="$(ps aux | grep '[e]mby-manager/app.py' | awk '{print $2}')"
+  [ -z "$pids" ] && return 0
+  # 先 TERM，让 Python 结束当前磁盘写入；直接 kill -9 可能在 config.json/log rotate 中间截断文件。
+  for p in $pids; do kill "$p" 2>/dev/null || true; done
+  n=0
+  while [ "$n" -lt 8 ]; do
+    alive=""
+    for p in $pids; do kill -0 "$p" 2>/dev/null && alive="$alive $p"; done
+    [ -z "$alive" ] && return 0
+    sleep 1; n=$((n + 1))
+  done
+  # 卡在不可中断的 FUSE/网络 IO 时才兜底强杀，保证 restart 不会永久卡住。
+  for p in $pids; do kill -9 "$p" 2>/dev/null || true; done
+}
 case "$1" in
   stop)
     kill_all; echo "emby-manager stopped";;
