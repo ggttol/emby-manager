@@ -1408,15 +1408,14 @@ def gaps_scan_lib_async(tid, lib):
 
 
 def detect_mismatched_posters_async(tid):
-    """全库扫描"emby 元数据 vs folder 名"差异大的项 — 通常是绑错 tmdbid 的剧。
-    启发式:folder 含中文字符,但 emby name 完全没中文(或重合 < 30%)→ 可疑。"""
+    """全库扫描确定绑错 tmdbid 的项。
+    唯一确定性信号:folder 名里声明了 [tmdbid-N],但 Emby 实际绑的是另一个 N。
+    不依赖中文重合度等启发式——那些误报率太高。"""
     libs = fetch_libs()
     task_set(tid, total=len(libs) or 1, status_text="扫各库")
     out = []
-    cn_re = re.compile(r'[一-鿿]')
     tmdbid_re = re.compile(r'\s*\[tmdbid[-_]\d+\]\s*$', re.IGNORECASE)
     tmdbid_cap = re.compile(r'tmdbid[-_](\d+)', re.IGNORECASE)
-    year_re = re.compile(r'\s*\(\d{4}\)\s*$')
     for i, (lib, m) in enumerate(libs.items()):
         if task_is_cancelled(tid): break
         task_set(tid, progress=i, status_text="扫 " + lib)
@@ -1435,46 +1434,16 @@ def detect_mismatched_posters_async(tid):
             folder = path.split(sep, 1)[1].split("/", 1)[0]
             name = it.get("Name") or ""
             actual_tmdb = (it.get("ProviderIds") or {}).get("Tmdb", "") or ""
-            # 确定性零误报信号:folder 名里声明了 [tmdbid-N],但 Emby 实际绑的是另一个 N → 100% 是绑错
+            # 确定性零误报信号:folder 名里声明了 [tmdbid-N],但 Emby 实际绑的是另一个 N
             declared = tmdbid_cap.search(folder)
             if declared and actual_tmdb and declared.group(1) != str(actual_tmdb):
-                out.append({"id": it.get("Id"), "emby_name": name, "folder_clean": tmdbid_re.sub("", folder).strip(),
+                out.append({"id": it.get("Id"), "emby_name": name,
+                            "folder_clean": tmdbid_re.sub("", folder).strip(),
                             "folder": folder, "lib": lib, "type": typ,
                             "tmdb": actual_tmdb, "declared_tmdb": declared.group(1),
                             "has_poster": bool((it.get("ImageTags") or {}).get("Primary")),
-                            "score": 100, "reasons": ["folder 声明 tmdbid-%s 但 Emby 绑了 %s(确定绑错)" % (declared.group(1), actual_tmdb)]})
-                continue
-            # 去掉 [tmdbid-X] 后缀 + (YYYY) 年份
-            fc = tmdbid_re.sub("", folder)
-            fc = year_re.sub("", fc).strip()
-            if not fc: continue
-            folder_cn = set(cn_re.findall(fc))
-            name_cn = set(cn_re.findall(name))
-            if not folder_cn:
-                continue  # folder 没中文不评判(国外剧)
-            score = 0
-            reasons = []
-            if not name_cn:
-                score = 100
-                reasons.append("folder 含中文但 emby 名全英文")
-            else:
-                overlap = len(folder_cn & name_cn) / max(len(folder_cn), 1)
-                if overlap < 0.3:
-                    score = int(80 * (1 - overlap))
-                    reasons.append("folder 中文字符在 emby 名中 < 30%%(重合 %d%%)" % int(overlap * 100))
-                elif overlap < 0.5:
-                    score = int(60 * (1 - overlap))
-                    reasons.append("folder/emby 名中文重合 %d%%(可疑)" % int(overlap * 100))
-            if score >= 30:
-                out.append({"id": it.get("Id"),
-                            "emby_name": name,
-                            "folder_clean": fc,
-                            "folder": folder,
-                            "lib": lib, "type": typ,
-                            "tmdb": (it.get("ProviderIds") or {}).get("Tmdb", ""),
-                            "has_poster": bool((it.get("ImageTags") or {}).get("Primary")),
-                            "score": score,
-                            "reasons": reasons})
+                            "score": 100,
+                            "reasons": ["folder 声明 tmdbid-%s 但 Emby 绑了 %s(确定绑错)" % (declared.group(1), actual_tmdb)]})
     out.sort(key=lambda x: -x["score"])
     log("错绑海报检测: 全库扫描 → 疑似 %d 项" % len(out))
     return {"items": out, "total": len(out)}

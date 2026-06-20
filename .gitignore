@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .DS_Store
 scripts/alert.conf
+catalog_115.db.bak-*
+catalog_115.db.tmp-*
