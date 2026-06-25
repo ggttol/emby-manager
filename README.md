@@ -29,6 +29,48 @@
 | 用户 | Emby 用户增删改、禁用、活跃度;**单用户限速**(远程串流码率上限 Mbps)+ **限同时播放数**(并发流) |
 | 设置 | 改 Emby 地址 / API Key / 登录密码 / 115 cookie / 115 cid 映射 / 反代信任 IP / 配置导出导入 |
 
+## 推荐 NAS 架构
+
+这套工具按「家用 NAS 上自管 Emby + 115 网盘资源」设计，公开仓库不绑定任何私有域名、账号或路径，但推荐拓扑如下：
+
+```text
+浏览器 / 手机 PWA
+        │ HTTPS
+        ▼
+NAS 反向代理 / 内网访问入口
+        │ http://127.0.0.1:8097
+        ▼
+emby-manager  单进程 Python HTTP 服务
+        │
+        ├─ Emby Server API  http://127.0.0.1:8096/emby
+        │    ├─ 刷新媒体库 / 删除 Item / RemoteSearch / 用户策略
+        │    └─ 媒体库指向 /strm 或 /media 里的实际条目
+        │
+        ├─ NAS 本地文件系统
+        │    ├─ STRM 根目录：默认 /volume1/strm
+        │    ├─ CloudDrive2/115 挂载根：默认 /volume1/docker/clouddrive2/CloudNAS/CloudDrive
+        │    └─ Docker CLI：默认 /var/packages/ContainerManager/target/usr/bin/docker
+        │
+        ├─ 115 Web API
+        │    ├─ c115_cookie：用于分享链接 snap / receive / 离线下载
+        │    └─ c115_cid_map：Emby 库名 → 115 目标文件夹 cid
+        │
+        └─ 本地运行数据
+             ├─ config.json：Emby API Key、115 cookie、路径覆盖、定时任务等
+             ├─ undo_log.jsonl：可逆删除/移动记录
+             ├─ logs/：运行日志
+             └─ catalog_115.db：资源目录数据库，仓库只带空模板
+```
+
+几个约定：
+
+- **管理工具和 Emby 放在同一台 NAS 上**：管理工具默认只监听 `127.0.0.1:8097`，通过 NAS 反代或内网访问；Emby API 默认是 `http://127.0.0.1:8096/emby`。
+- **媒体路径分两层**：Emby 看到的是容器/服务内路径（例如 `/strm/...`、`/media/...`），NAS 主机上实际路径通常是 `/volume1/strm/...` 和 CloudDrive2 挂载目录。代码里的 `cd` / `strm` / `docker` 都能在 `config.json` 里覆盖，换 NAS 或换挂载点不用改代码，改完重启生效。
+- **115 cookie 只用于转存和离线下载**：工具不会内置任何账号；`115 转存` tab 通过用户自己填写的 cookie 调 115 Web API，把分享链接转存到 `c115_cid_map` 指定的目标 cid。
+- **资源目录数据库是本地数据**：`catalog_115.db` 用于关键词搜索/一键转存。公开仓库只保留空表结构，真实数据请在自己的 NAS 上导入，不要提交到公开仓库。
+- **长任务都在本进程后台线程里跑**：扫库、转存、去重、海报修复、定时任务都会进入任务中心；重启后不会恢复线程本身，但定时任务状态会在启动时做残留修正。
+- **HTTPS 交给反向代理**：应用本身是标准库 HTTP 服务，不直接做 TLS。外网访问建议用 NAS/nginx/Caddy 反代加 HTTPS，并配置 `trusted_proxies` 后再读取 `X-Forwarded-For`。
+
 ---
 
 ## ⌨️ 键盘快捷键
