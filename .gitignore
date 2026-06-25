@@ -8,7 +8,9 @@ scripts/alert.conf
 catalog_115.db.bak-*
 catalog_115.db.tmp-*
 
-# local catalog databases
-catalog_115*.db
+# local catalog database working files
+.db-backups/
 catalog_115*.db-shm
 catalog_115*.db-wal
+catalog_115_validation.db
+catalog_115_local_unvalidated.db

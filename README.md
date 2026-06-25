@@ -97,6 +97,19 @@ UI 僻瓜式下拉:每日 / 每周X / 每月N日 + HH:MM。改 / 启停 / 立即
 
 ## 部署
 
+### 资源目录数据库
+
+仓库内的 `catalog_115.db` 只是一个**空模板数据库**，只包含 `catalog` 表结构，不包含任何 115 分享链接或个人资源数据。`115 转存` tab 里的关键词搜索 / 一键转存需要你自己向这个数据库写入数据；不需要资源目录功能时可以保持为空，不影响其他功能。
+
+表结构如下：
+
+```sql
+CREATE TABLE catalog(name TEXT, sheet TEXT, link TEXT, is_pkg INT, link_type TEXT);
+CREATE INDEX idx_catalog_link_type on catalog(link_type);
+```
+
+部署到 NAS 后，如果你有自己的资源目录数据，请写入同目录下的 `catalog_115.db`。该数据库属于本地运行数据，不建议把真实数据提交到公开仓库。
+
 ### 最小步骤
 
 1. 把整个目录拷到 NAS,比如 `/volume1/docker/emby-manager/`。
