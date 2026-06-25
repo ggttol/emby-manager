@@ -7,3 +7,8 @@ __pycache__/
 scripts/alert.conf
 catalog_115.db.bak-*
 catalog_115.db.tmp-*
+
+# local catalog databases
+catalog_115*.db
+catalog_115*.db-shm
+catalog_115*.db-wal
