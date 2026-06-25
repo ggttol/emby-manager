@@ -71,6 +71,104 @@ emby-manager  单进程 Python HTTP 服务
 - **长任务都在本进程后台线程里跑**：扫库、转存、去重、海报修复、定时任务都会进入任务中心；重启后不会恢复线程本身，但定时任务状态会在启动时做残留修正。
 - **HTTPS 交给反向代理**：应用本身是标准库 HTTP 服务，不直接做 TLS。外网访问建议用 NAS/nginx/Caddy 反代加 HTTPS，并配置 `trusted_proxies` 后再读取 `X-Forwarded-For`。
 
+### Emby Server 部署方式
+
+推荐用 Synology Container Manager / Docker Compose 跑 Emby，媒体目录由 CloudDrive2 和本地 `strm` 目录 bind 进容器：
+
+```yaml
+services:
+  emby:
+    image: emby/embyserver:latest
+    container_name: emby
+    restart: unless-stopped
+    environment:
+      - UID=<NAS 用户 uid>
+      - GID=<NAS users 组 gid>
+      - TZ=Asia/Shanghai
+      # 可选：给 TMDb / TheTVDB 刮削走内网代理；不用代理可删掉
+      - HTTP_PROXY=socks5://<LAN_PROXY_IP>:<PORT>
+      - HTTPS_PROXY=socks5://<LAN_PROXY_IP>:<PORT>
+      - ALL_PROXY=socks5://<LAN_PROXY_IP>:<PORT>
+      - NO_PROXY=localhost,127.0.0.1,::1,192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+    volumes:
+      - /volume1/docker/emby/config:/config
+      - type: bind
+        source: /volume1/docker/clouddrive2/CloudNAS/CloudDrive
+        target: /media
+        read_only: true
+        bind:
+          propagation: rslave
+      - /volume1/strm:/strm
+    ports:
+      - "8096:8096"
+      - "8920:8920"
+```
+
+说明：
+
+- `/config` 放 Emby 数据库、metadata、封面缓存、用户、API key 等，必须是 NAS 本地可写目录。
+- CloudDrive2 挂载目录 bind 到容器内 `/media`，建议对 Emby **只读**，避免 Emby 或插件误改云盘文件。
+- `/volume1/strm` bind 到容器内 `/strm`，由本工具生成/移动/删除 `.strm`、`.nfo`、海报等轻量文件。
+- Emby 媒体库可以指向 `/strm/电影`、`/strm/电视剧`、`/strm/动漫` 等；如果你选择直扫 CloudDrive2，也可以指向 `/media/电影` 等，但云盘挂载上大量 ffprobe/实时监控更容易慢或触发风控。
+- 云盘媒体库建议关闭「保存图片到媒体文件夹」「NFO 写出」「实时监控」「视频预览缩略图」，让元数据留在 `/config`，减少对 CloudDrive2/115 的写入和扫描压力。
+- 如果配置刮削代理，`.NET`/Emby 环境变量用 `socks5://...`；不要写成 `socks5h://...`，部分运行时会忽略。
+
+### CloudDrive2 / 115 挂载架构
+
+CloudDrive2 负责登录 115 并把网盘挂成 NAS 本地 FUSE 目录，推荐路径：
+
+```text
+/volume1/docker/clouddrive2/
+├─ config/                         # CloudDrive2 配置、token、任务状态等，本地私有数据
+└─ CloudNAS/CloudDrive/             # FUSE 挂载点，供 NAS / Emby / 本工具读取
+   ├─ 电影/
+   ├─ 电视剧/
+   └─ 动漫/
+```
+
+挂载关系：
+
+```text
+115 网盘
+  │  CloudDrive2 登录和挂载
+  ▼
+NAS: /volume1/docker/clouddrive2/CloudNAS/CloudDrive
+  ├─ emby 容器内：/media  只读 bind
+  ├─ emby-manager：通过 config.json 的 cd 读取/映射
+  └─ 字幕/整理工具：可按需在 NAS 主机侧写入，但要控制并发
+```
+
+实践建议：
+
+- NAS 主机侧的 CloudDrive2 挂载可以是读写，方便字幕工具或整理脚本落字幕/改名；但 Emby 容器里仍建议 `read_only: true`。
+- 本工具默认 `cd=/volume1/docker/clouddrive2/CloudNAS/CloudDrive`，如果你的 CloudDrive2 挂载点不同，在 `config.json` 里改 `cd` 后重启。
+- `strm=/volume1/strm` 是本地轻量索引层；真实视频仍在 115/CloudDrive2。这样 Emby 扫描的是小文件，日常新增/删除/移动也更可控。
+- 115/CloudDrive2 对密集读取很敏感，批量生成 strm、复制 metadata、字幕扫描等任务尽量串行或限速，不要在挂载目录上并发跑大量 ffprobe/下载。
+- 如果另有字幕下载器（如 chinese-subfinder），让它把字幕写到 CloudDrive2 对应媒体目录旁边，Emby 扫库后即可识别；但仍建议限制扫描频率。
+
+### 推荐库结构
+
+一种简单结构如下：
+
+```text
+115 / CloudDrive2
+├─ 电影/
+├─ 电视剧/
+└─ 动漫/
+
+NAS 本地 strm
+├─ 电影/
+├─ 电视剧/
+└─ 动漫/
+
+Emby 媒体库
+├─ 电影   -> /strm/电影      ContentType=movies
+├─ 电视剧 -> /strm/电视剧    ContentType=tvshows
+└─ 动漫   -> /strm/动漫      ContentType=tvshows
+```
+
+`115 转存` tab 里的 `c115_cid_map` 建议也按库名映射到 115 里的目标目录 cid，例如「电影」→ 115 的电影目录、「电视剧」→ 电视剧目录。这样一条龙转存、扫库、海报修复、去重、追更扫描都能按库闭环运行。
+
 ---
 
 ## ⌨️ 键盘快捷键
