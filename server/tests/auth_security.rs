@@ -191,6 +191,162 @@ async fn login_rate_limits_repeated_password_failures() {
     assert_eq!(body["code"], "rate_limited");
 }
 
+#[tokio::test]
+async fn authenticated_user_can_change_password_and_expire_other_sessions() {
+    let Some(database_url) = auth_test_database_url() else {
+        eprintln!(
+            "skipping auth DB security test; set EMBY_MANAGER_AUTH_TEST_DATABASE_URL to enable it"
+        );
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .expect("connect auth security test database");
+    db::migrate(&pool)
+        .await
+        .expect("run auth security migrations");
+
+    let username = create_test_user(&pool).await;
+    let app = api::router(pool.clone(), test_settings());
+
+    let (status, headers, body) = send(
+        &app,
+        Method::POST,
+        "/api/v2/auth/login",
+        Some(json!({
+            "username": username,
+            "password": "secret"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let csrf = body["csrf"].as_str().unwrap().to_string();
+    let cookie = request_cookie(&headers);
+
+    let (status, second_headers, body) = send(
+        &app,
+        Method::POST,
+        "/api/v2/auth/login",
+        Some(json!({
+            "username": username,
+            "password": "secret"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let second_cookie = request_cookie(&second_headers);
+
+    let (status, _, body) = send(
+        &app,
+        Method::POST,
+        "/api/v2/auth/password",
+        Some(json!({
+            "current_password": "secret",
+            "new_password": "newSecret123!"
+        })),
+        &[(COOKIE.as_str(), cookie.clone())],
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "csrf_required");
+
+    let (status, _, body) = send(
+        &app,
+        Method::POST,
+        "/api/v2/auth/password",
+        Some(json!({
+            "current_password": "wrong",
+            "new_password": "newSecret123!"
+        })),
+        &[
+            (COOKIE.as_str(), cookie.clone()),
+            ("x-csrf-token", csrf.clone()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    let (status, _, body) = send(
+        &app,
+        Method::POST,
+        "/api/v2/auth/password",
+        Some(json!({
+            "current_password": "secret",
+            "new_password": "short"
+        })),
+        &[
+            (COOKIE.as_str(), cookie.clone()),
+            ("x-csrf-token", csrf.clone()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, _, body) = send(
+        &app,
+        Method::POST,
+        "/api/v2/auth/password",
+        Some(json!({
+            "current_password": "secret",
+            "new_password": "newSecret123!"
+        })),
+        &[(COOKIE.as_str(), cookie.clone()), ("x-csrf-token", csrf)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["invalidated_sessions"], 1);
+
+    let (status, _, body) = send(
+        &app,
+        Method::GET,
+        "/api/v2/tasks",
+        None,
+        &[(COOKIE.as_str(), second_cookie)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    let (status, _, body) = send(
+        &app,
+        Method::POST,
+        "/api/v2/auth/login",
+        Some(json!({
+            "username": username,
+            "password": "secret"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    let (status, _, body) = send(
+        &app,
+        Method::POST,
+        "/api/v2/auth/login",
+        Some(json!({
+            "username": username,
+            "password": "newSecret123!"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let stored: (String, bool) =
+        sqlx::query_as("SELECT password_hash, legacy_hash FROM auth_users WHERE username = $1")
+            .bind(&username)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch updated auth user");
+    assert!(auth::verify_password("newSecret123!", &stored.0));
+    assert!(!stored.1);
+}
+
 async fn create_test_user(pool: &PgPool) -> String {
     let username = format!("security_{}", Uuid::new_v4().simple());
     let hash = auth::hash_argon2("secret").unwrap();

@@ -10,7 +10,7 @@ use argon2::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{Extension, State},
     http::{HeaderMap, Method, Request, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -67,6 +67,18 @@ pub struct MeResponse {
     pub csrf: Option<String>,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ChangePasswordResponse {
+    pub ok: bool,
+    pub invalidated_sessions: u64,
+}
+
 pub fn router() -> Router<AppState> {
     public_router().merge(protected_router())
 }
@@ -78,7 +90,9 @@ pub fn public_router() -> Router<AppState> {
 }
 
 pub fn protected_router() -> Router<AppState> {
-    Router::new().route("/api/v2/auth/logout", post(logout))
+    Router::new()
+        .route("/api/v2/auth/logout", post(logout))
+        .route("/api/v2/auth/password", post(change_password))
 }
 
 pub async fn ensure_default_admin(pool: &PgPool, settings: &Settings) -> anyhow::Result<()> {
@@ -257,6 +271,68 @@ pub async fn logout(
         )],
         Json(serde_json::json!({"ok": true})),
     ))
+}
+
+#[utoipa::path(post, path = "/api/v2/auth/password", tag = "auth", request_body = ChangePasswordRequest, responses((status = 200, body = ChangePasswordResponse)))]
+pub async fn change_password(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthSession>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> AppResult<Json<ChangePasswordResponse>> {
+    let new_password = req.new_password.as_str();
+    validate_new_password(new_password)?;
+
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT password_hash FROM auth_users WHERE id = $1")
+            .bind(session.user_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    let Some((stored,)) = row else {
+        return Err(AppError::Unauthorized("未登录或会话已过期".to_string()));
+    };
+    if !verify_password(&req.current_password, &stored) {
+        return Err(AppError::Unauthorized("当前密码错误".to_string()));
+    }
+    if req.current_password == new_password {
+        return Err(AppError::BadRequest("新密码不能和当前密码相同".to_string()));
+    }
+
+    let next_hash = hash_argon2(new_password)?;
+    let mut tx = state.pool.begin().await?;
+    sqlx::query(
+        "UPDATE auth_users
+         SET password_hash = $1, legacy_hash = FALSE, updated_at = now()
+         WHERE id = $2",
+    )
+    .bind(next_hash)
+    .bind(session.user_id)
+    .execute(&mut *tx)
+    .await?;
+    let deleted = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND token <> $2")
+        .bind(session.user_id)
+        .bind(&session.token)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+
+    Ok(Json(ChangePasswordResponse {
+        ok: true,
+        invalidated_sessions: deleted,
+    }))
+}
+
+fn validate_new_password(password: &str) -> AppResult<()> {
+    if password.chars().count() < 8 {
+        return Err(AppError::BadRequest("新密码至少需要 8 个字符".to_string()));
+    }
+    if password.chars().count() > 256 {
+        return Err(AppError::BadRequest("新密码过长".to_string()));
+    }
+    if password.chars().any(char::is_whitespace) {
+        return Err(AppError::BadRequest("新密码不能包含空白字符".to_string()));
+    }
+    Ok(())
 }
 
 #[utoipa::path(get, path = "/api/v2/auth/me", tag = "auth", responses((status = 200, body = MeResponse)))]

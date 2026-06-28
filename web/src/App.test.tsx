@@ -692,8 +692,10 @@ describe('App shell', () => {
 
     fireEvent.change(screen.getByLabelText('扫描目录关键词'), { target: { value: 'Movie' } });
     fireEvent.click(screen.getByLabelText('首次无 tmdbid 也生成'));
-    fireEvent.click(screen.getByLabelText('清理孤儿 STRM'));
+    fireEvent.click(screen.getByLabelText('清理孤儿 STRM（危险）'));
     fireEvent.click(screen.getByRole('button', { name: '生成缺失 STRM' }));
+    expect(await screen.findByText('确认清理孤儿 STRM')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认生成并清理' }));
     await waitFor(() => expect(scanPayloads[1]).toEqual({
       lib: '电影',
       recursive: true,
@@ -703,6 +705,70 @@ describe('App shell', () => {
       fullauto: true,
       cleanup_orphans: true
     }));
+    expect(screen.queryByText(/迁移中/)).not.toBeInTheDocument();
+
+    const previousScanTask = {
+      id: 'scan-done',
+      kind: 'scan_library',
+      label: '扫描库: 电影',
+      status: 'running',
+      progress: 1,
+      total: 2,
+      status_text: '扫描中',
+      cancel_requested: false,
+      queued_at: '2026-06-28T00:00:00Z',
+      started_at: '2026-06-28T00:00:01Z',
+      ended_at: null,
+      updated_at: '2026-06-28T00:00:02Z',
+      params: {},
+      result: null,
+      source: 'api'
+    };
+    const completedScanTask = {
+      ...previousScanTask,
+      status: 'done',
+      progress: 2,
+      ended_at: '2026-06-28T00:00:03Z',
+      updated_at: '2026-06-28T00:00:03Z',
+      status_text: '完成',
+      result: {
+        ok: true,
+        mode: 'library',
+        requested: '电影',
+        global_refresh: false,
+        triggered: 7,
+        items: [
+          { code: 204, id: 'item-a', name: 'Movie A' },
+          { code: 204, id: 'item-b', name: 'Movie B' }
+        ],
+        strm: {
+          lib: '电影',
+          keyword: 'Movie',
+          matched: 5,
+          new_count: 3,
+          new_folders: { Movie: 3 },
+          orphan_cleanup_skipped: false,
+          orphans_cleaned: 2,
+          permissions_fixed: 1,
+          refreshed: true,
+          refresh_code: 204,
+          attention: ['需要人工确认']
+        }
+      },
+      source: 'api'
+    };
+    window.dispatchEvent(new CustomEvent('emby-manager:task-completed', {
+      detail: {
+        task: completedScanTask,
+        previousTask: previousScanTask,
+        previousStatus: 'running'
+      }
+    }));
+    expect(await screen.findByText('最近扫描结果')).toBeInTheDocument();
+    expect(screen.getByText('新增 STRM')).toBeInTheDocument();
+    expect(screen.getByText('清孤儿 / 权限')).toBeInTheDocument();
+    expect(screen.getByText('2 / 1')).toBeInTheDocument();
+    expect(screen.getByText('需要人工确认')).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('Emby ItemId'), { target: { value: 'item-1' } });
     fireEvent.click(screen.getByRole('button', { name: '刷新 ItemId' }));
@@ -1233,6 +1299,23 @@ describe('App shell', () => {
           ]
         });
       }
+      if (url.pathname === '/api/v2/libraries/items') {
+        const lib = url.searchParams.get('lib') || '电影';
+        return jsonResponse({
+          lib,
+          item_types: 'Movie',
+          total_record_count: 1,
+          truncated: false,
+          items: [{
+            id: 'item-browser',
+            name: '浏览电影',
+            folder: '浏览电影 [tmdbid-777]',
+            tmdb: '777',
+            year: 2026,
+            path: '/strm/电影/浏览电影 [tmdbid-777]'
+          }]
+        });
+      }
       if (url.pathname === '/api/v2/manage/undo') {
         undoCalls += 1;
         return jsonResponse({
@@ -1405,6 +1488,16 @@ describe('App shell', () => {
     fireEvent.click(await screen.findByRole('button', { name: '删除·移动' }));
     expect(await screen.findByText(/先 Emby DELETE，再动磁盘/)).toBeInTheDocument();
     expect(screen.getByText('legacy-1')).toBeInTheDocument();
+    expect(await screen.findByText(/浏览电影/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('项目关键词'), { target: { value: '777' } });
+    fireEvent.change(screen.getByLabelText('库项目列表'), { target: { value: '0' } });
+    const browserLibValue = (screen.getByLabelText('浏览库名') as HTMLSelectElement).value;
+    expect(screen.getByLabelText('删除库名')).toHaveValue(browserLibValue);
+    expect(screen.getByLabelText('删除 folder')).toHaveValue('浏览电影 [tmdbid-777]');
+    expect(screen.getByLabelText('删除 ItemId')).toHaveValue('item-browser');
+    fireEvent.click(screen.getByRole('button', { name: '加入批量删除文本' }));
+    expect(screen.getByLabelText('批量删除内容')).toHaveValue(`${browserLibValue}/浏览电影 [tmdbid-777]/item-browser`);
 
     fireEvent.change(screen.getByLabelText('删除库名'), { target: { value: '电影' } });
     fireEvent.change(screen.getByLabelText('删除 folder'), { target: { value: '旧电影' } });
@@ -1547,10 +1640,8 @@ describe('App shell', () => {
     expect(await screen.findByText('已保存 Alice 的用户策略')).toBeInTheDocument();
   });
 
-  it('searches catalog and creates 115 save/offline tasks with csrf', async () => {
-    const planPayloads: unknown[] = [];
-    let savePayload: unknown = null;
-    let offlinePayload: unknown = null;
+  it('searches catalog and creates catalog transfer execute tasks with csrf', async () => {
+    const executePayloads: unknown[] = [];
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/catalog/stats') {
         return jsonResponse({ available: true, total: 260000, packages: 1200 });
@@ -1588,107 +1679,34 @@ describe('App shell', () => {
           ]
         });
       }
-      if (url.pathname === '/api/v2/catalog/transfer-plan') {
+      if (url.pathname === '/api/v2/catalog/transfer/execute') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
         const payload = JSON.parse(String(init?.body));
-        planPayloads.push(payload);
-        expect(payload.lib).toBe('电影');
-        if (payload.item.name === 'The Movie') {
-          return jsonResponse({
-            ok: true,
-            action: 'save_share',
-            link_type: 'share115',
-            transfer: true,
-            is_pkg: false,
-            label: 'The Movie',
-            target: { lib: '电影', cid: null },
-            save: {
-              endpoint: '/api/v2/c115/save',
-              method: 'POST',
-              share: 'abc',
-              receive_code: 'xy12',
-              payload: {
-                url: 'https://115.com/s/abc?password=xy12',
-                pwd: 'xy12',
-                lib: '电影',
-                cid: null,
-                label: 'The Movie'
-              }
-            },
-            offline: null,
-            unsupported: null
-          });
-        }
+        executePayloads.push(payload);
         return jsonResponse({
-          ok: true,
-          action: 'offline_download',
-          link_type: 'magnet',
-          transfer: false,
-          is_pkg: false,
-          label: 'The Magnet',
-          target: { lib: '电影', cid: null },
-          save: null,
-          offline: {
-            endpoint: '/api/v2/c115/offline',
-            method: 'POST',
-            protocol: 'magnet',
-            payload: {
-              url: 'magnet:?xt=urn:btih:123',
-              lib: '电影',
-              cid: null,
-              label: 'The Magnet'
-            }
-          },
-          unsupported: null
-        });
-      }
-      if (url.pathname === '/api/v2/c115/save') {
-        const headers = init?.headers as Headers;
-        expect(init?.method).toBe('POST');
-        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
-        savePayload = JSON.parse(String(init?.body));
-        return jsonResponse({
-          id: '44444444-4444-4444-8444-444444444444',
-          kind: 'c115_save',
-          label: 'The Movie',
+          id: executePayloads.length === 1
+            ? '44444444-4444-4444-8444-444444444444'
+            : '55555555-5555-4555-8555-555555555555',
+          kind: 'catalog_transfer_execute',
+          label: executePayloads.length === 1 ? '目录转存: The Movie -> cid=12345' : '目录转存: 2 项 -> cid=12345',
           status: 'pending',
           progress: 0,
-          total: 1,
+          total: payload.items.length,
           status_text: '排队中',
           cancel_requested: false,
           queued_at: '2026-06-28T00:00:00Z',
           started_at: null,
           ended_at: null,
           updated_at: '2026-06-28T00:00:00Z',
-          params: {},
+          params: payload,
           result: null,
           source: 'api'
         });
       }
-      if (url.pathname === '/api/v2/c115/offline') {
-        const headers = init?.headers as Headers;
-        expect(init?.method).toBe('POST');
-        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
-        offlinePayload = JSON.parse(String(init?.body));
-        return jsonResponse({
-          id: '55555555-5555-4555-8555-555555555555',
-          kind: 'c115_offline',
-          label: 'The Magnet',
-          status: 'pending',
-          progress: 0,
-          total: 1,
-          status_text: '排队中',
-          cancel_requested: false,
-          queued_at: '2026-06-28T00:00:01Z',
-          started_at: null,
-          ended_at: null,
-          updated_at: '2026-06-28T00:00:01Z',
-          params: {},
-          result: null,
-          source: 'api'
-        });
+      if (['/api/v2/catalog/transfer-plan', '/api/v2/c115/save', '/api/v2/c115/offline'].includes(url.pathname)) {
+        throw new Error(`legacy catalog transfer endpoint called: ${url.pathname}`);
       }
       return undefined;
     });
@@ -1707,29 +1725,50 @@ describe('App shell', () => {
     fireEvent.click(screen.getByRole('button', { name: '转存' }));
     fireEvent.click(screen.getAllByRole('button', { name: '转存' }).at(-1)!);
 
-    await waitFor(() => expect(savePayload).toEqual({
-      url: 'https://115.com/s/abc?password=xy12',
-      pwd: 'xy12',
-      lib: '电影',
-      cid: null,
-      label: 'The Movie'
-    }));
-    expect(await screen.findByText('任务已创建：The Movie')).toBeInTheDocument();
+    await waitFor(() => expect(executePayloads).toHaveLength(1));
+    expect(executePayloads[0]).toEqual({
+      items: [{
+        name: 'The Movie',
+        sheet: '电影',
+        link: 'https://115.com/s/abc?password=xy12',
+        link_type: 'share115',
+        is_pkg: false,
+        share: 'abc',
+        rc: 'xy12'
+      }],
+      target: { lib: '电影' }
+    });
+    expect(await screen.findByText('任务已交给任务中心，可在任务中心取消：目录转存: The Movie -> cid=12345')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '离线' }));
-    fireEvent.click(screen.getAllByRole('button', { name: '离线' }).at(-1)!);
+    fireEvent.click(screen.getByRole('button', { name: '全选' }));
+    fireEvent.click(screen.getByRole('button', { name: '转存选中' }));
+    fireEvent.click(screen.getByRole('button', { name: '开始提交' }));
 
-    await waitFor(() => expect(offlinePayload).toEqual({
-      url: 'magnet:?xt=urn:btih:123',
-      lib: '电影',
-      cid: null,
-      label: 'The Magnet'
-    }));
-    expect(planPayloads).toHaveLength(2);
-    expect(planPayloads).toEqual([
-      expect.objectContaining({ label: 'The Movie', lib: '电影' }),
-      expect.objectContaining({ label: 'The Magnet', lib: '电影' })
-    ]);
+    await waitFor(() => expect(executePayloads).toHaveLength(2));
+    expect(executePayloads[1]).toEqual({
+      items: [
+        {
+          name: 'The Movie',
+          sheet: '电影',
+          link: 'https://115.com/s/abc?password=xy12',
+          link_type: 'share115',
+          is_pkg: false,
+          share: 'abc',
+          rc: 'xy12'
+        },
+        {
+          name: 'The Magnet',
+          sheet: '电影',
+          link: 'magnet:?xt=urn:btih:123',
+          link_type: 'magnet',
+          is_pkg: false,
+          share: null,
+          rc: null
+        }
+      ],
+      target: { lib: '电影' }
+    });
+    expect(await screen.findByText('批量任务已交给任务中心，可在任务中心取消：目录转存: 2 项 -> cid=12345')).toBeInTheDocument();
   });
 
   it('previews 115 share files and creates save/offline/scan tasks with csrf', async () => {
@@ -1872,6 +1911,8 @@ describe('App shell', () => {
 
   it('loads settings, fills cid matches, and saves config with csrf', async () => {
     let savedPayload: unknown = null;
+    const importPayloads: unknown[] = [];
+    let passwordPayload: unknown = null;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/config' && (!init?.method || init.method === 'GET')) {
         return jsonResponse({
@@ -1910,6 +1951,36 @@ describe('App shell', () => {
             电视剧: [{ cid: '67890', path: '/电视剧' }]
           }
         });
+      }
+      if (url.pathname === '/api/v2/config/export') {
+        return jsonResponse({
+          settings: {
+            emby_url: 'http://emby.exported:8096/emby',
+            api_key: '***',
+            c115_cid_map: { 电影: '12345', 电视剧: '67890' }
+          }
+        });
+      }
+      if (url.pathname === '/api/v2/config/import') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        const payload = JSON.parse(String(init?.body));
+        importPayloads.push(payload);
+        return jsonResponse({
+          accepted: ['emby_url', 'c115_cid_map'],
+          rejected: [],
+          warnings: [],
+          applied: payload.apply ? ['emby_url', 'c115_cid_map'] : [],
+          dry_run: !payload.apply
+        });
+      }
+      if (url.pathname === '/api/v2/auth/password') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        passwordPayload = JSON.parse(String(init?.body));
+        return jsonResponse({ ok: true, invalidated_sessions: 2 });
       }
       if (url.pathname === '/api/v2/config' && init?.method === 'PUT') {
         const headers = init.headers as Headers;
@@ -1965,6 +2036,49 @@ describe('App shell', () => {
       }
     }));
     expect(await screen.findByText('配置已保存')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '导出' }));
+    expect(await screen.findByDisplayValue(/emby\.exported/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'dry-run 预检' }));
+    await waitFor(() => expect(importPayloads[0]).toEqual({
+      settings: {
+        emby_url: 'http://emby.exported:8096/emby',
+        api_key: '***',
+        c115_cid_map: { 电影: '12345', 电视剧: '67890' }
+      },
+      mode: 'dry_run',
+      dry_run: true,
+      apply: false,
+      confirm: false
+    }));
+    expect(await screen.findByText('dry-run 预检结果')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '确认导入' }));
+    const importModal = (await screen.findByText(/将只应用 dry-run accepted/)).closest('section');
+    expect(importModal).not.toBeNull();
+    fireEvent.click(within(importModal as HTMLElement).getByRole('button', { name: '确认导入' }));
+    await waitFor(() => expect(importPayloads[1]).toEqual({
+      settings: {
+        emby_url: 'http://emby.exported:8096/emby',
+        api_key: '***',
+        c115_cid_map: { 电影: '12345', 电视剧: '67890' }
+      },
+      mode: 'apply',
+      dry_run: false,
+      apply: true,
+      confirm: true
+    }));
+
+    fireEvent.change(screen.getByLabelText('当前密码'), { target: { value: 'old-secret' } });
+    fireEvent.change(screen.getByLabelText('新密码'), { target: { value: 'new-secret-123' } });
+    fireEvent.change(screen.getByLabelText('确认新密码'), { target: { value: 'new-secret-123' } });
+    fireEvent.click(screen.getByRole('button', { name: '更新密码' }));
+    await waitFor(() => expect(passwordPayload).toEqual({
+      current_password: 'old-secret',
+      new_password: 'new-secret-123'
+    }));
+    expect(await screen.findByText('密码已更新，已退出其他 2 个会话')).toBeInTheDocument();
   });
 
   it('manages schedules through the v2 scheduler api', async () => {

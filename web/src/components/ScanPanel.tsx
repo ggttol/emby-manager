@@ -2,11 +2,15 @@ import { Database, FileSearch, FolderSync, RefreshCw, ScanLine } from 'lucide-re
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { ConfirmDanger } from './Modal';
+import { TASK_COMPLETED_EVENT, type TaskCompleteDetail } from './TaskCenter';
 import { useToast } from './Toast';
 
 type EmbyLibrary = components['schemas']['EmbyLibrary'];
 type LibrariesResponse = components['schemas']['LibrariesResponse'];
 type ScanLibraryRequest = components['schemas']['ScanLibraryRequest'];
+type ScanLibraryResult = components['schemas']['ScanLibraryResult'];
+type StrmGenerateResult = components['schemas']['StrmGenerateResult'];
 type StrmListResponse = components['schemas']['StrmListResponse'];
 type StrmOverview = components['schemas']['StrmOverview'];
 type TaskRun = components['schemas']['TaskRun'];
@@ -44,6 +48,41 @@ function overviewTone(overview: StrmOverview | null) {
   return 'warn';
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isStrmGenerateResult(value: unknown): value is StrmGenerateResult {
+  return isRecord(value)
+    && typeof value.new_count === 'number'
+    && typeof value.orphans_cleaned === 'number'
+    && typeof value.permissions_fixed === 'number'
+    && Array.isArray(value.attention);
+}
+
+function isScanLibraryResult(value: unknown): value is ScanLibraryResult {
+  return isRecord(value)
+    && typeof value.triggered === 'number'
+    && Array.isArray(value.items);
+}
+
+function scanResultFromTask(task: TaskRun): ScanLibraryResult | null {
+  if (task.kind !== 'scan_library' || task.status !== 'done') return null;
+  if (isScanLibraryResult(task.result)) return task.result;
+  if (isStrmGenerateResult(task.result)) {
+    return {
+      ok: true,
+      mode: 'strm',
+      requested: task.label,
+      global_refresh: false,
+      triggered: 0,
+      items: [],
+      strm: task.result
+    };
+  }
+  return null;
+}
+
 export function ScanPanel() {
   const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
   const [selectedLib, setSelectedLib] = useState('');
@@ -57,6 +96,8 @@ export function ScanPanel() {
   const [loading, setLoading] = useState(true);
   const [overviewLoading, setOverviewLoading] = useState(false);
   const [starting, setStarting] = useState<'lib' | 'all' | 'item' | 'strm' | null>(null);
+  const [confirmCleanupScan, setConfirmCleanupScan] = useState(false);
+  const [latestScan, setLatestScan] = useState<{ task: TaskRun; result: ScanLibraryResult } | null>(null);
   const [error, setError] = useState('');
   const toast = useToast();
 
@@ -119,12 +160,52 @@ export function ScanPanel() {
     loadLibraries();
   }, []);
 
+  useEffect(() => {
+    const refreshStrmAfterTask = async (lib: string) => {
+      const trimmed = lib.trim();
+      if (!trimmed) return;
+      setOverviewLoading(true);
+      setError('');
+      try {
+        const params = new URLSearchParams({
+          lib: trimmed,
+          overview: 'true',
+          overview_depth: '8',
+          sample_limit: '30',
+          limit: '80'
+        });
+        const data = await api<StrmListResponse>(`/api/v2/libraries/strm?${params.toString()}`);
+        setStrm(data);
+      } catch (e) {
+        const message = errorMessage(e);
+        setError(message);
+        toast.push(`strm 概览加载失败：${message}`, 'error');
+      } finally {
+        setOverviewLoading(false);
+      }
+    };
+
+    const onTaskCompleted = (event: Event) => {
+      const detail = (event as CustomEvent<TaskCompleteDetail>).detail;
+      if (!detail?.task) return;
+      const result = scanResultFromTask(detail.task);
+      if (!result) return;
+      setLatestScan({ task: detail.task, result });
+      if (result.strm?.lib) {
+        void refreshStrmAfterTask(result.strm.lib);
+      }
+    };
+
+    window.addEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
+    return () => window.removeEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
+  }, [toast]);
+
   const submitOverview = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     loadStrm(selectedLib);
   };
 
-  const startScan = async (mode: 'lib' | 'all' | 'item' | 'strm') => {
+  const createScanTask = async (mode: 'lib' | 'all' | 'item' | 'strm') => {
     setStarting(mode);
     setError('');
     try {
@@ -173,12 +254,45 @@ export function ScanPanel() {
     }
   };
 
+  const startScan = (mode: 'lib' | 'all' | 'item' | 'strm') => {
+    if (mode === 'strm' && cleanupOrphans) {
+      if (!selectedLib) {
+        toast.push('先选择一个库', 'warn');
+        return;
+      }
+      setConfirmCleanupScan(true);
+      return;
+    }
+    void createScanTask(mode);
+  };
+
+  const latestStrm = latestScan?.result.strm || null;
+  const latestAttention = latestStrm?.attention || [];
+  const latestItems = latestScan?.result.items || [];
+
   return (
     <section className="scanPanel">
+      {confirmCleanupScan && (
+        <ConfirmDanger
+          title="确认清理孤儿 STRM"
+          confirmText="确认生成并清理"
+          onCancel={() => setConfirmCleanupScan(false)}
+          onConfirm={() => {
+            setConfirmCleanupScan(false);
+            void createScanTask('strm');
+          }}
+          body={(
+            <div className="dangerCopy">
+              <p>将生成缺失 STRM，并真实删除当前扫描范围内识别为孤儿的 STRM 文件；请先核对目标库、关键词和 STRM 根目录。</p>
+              <code>{selectedLib || '未选择库'}{keyword.trim() ? ` · ${keyword.trim()}` : ''}</code>
+            </div>
+          )}
+        />
+      )}
       <div className="scanToolbar">
         <div>
           <strong>扫描工作台</strong>
-          <span>可触发 Emby Refresh，也可生成缺失 strm；清孤儿仍在迁移中。</span>
+          <span>可触发 Emby Refresh，也可生成缺失 strm；清孤儿会真实删除 STRM 文件，执行前需确认。</span>
         </div>
         <button className="btn ghost" onClick={loadLibraries} disabled={loading}>
           <RefreshCw size={16} />
@@ -187,7 +301,7 @@ export function ScanPanel() {
       </div>
 
       <div className="notice warn scanNotice">
-        生成缺失 STRM 只会新增 .strm，不覆盖已有文件、不删除孤儿；无 tmdbid 的首次目录默认只提示。
+        默认生成缺失 STRM 只新增 .strm、不覆盖已有文件；勾选清理孤儿后会真实删除已判定为孤儿的 STRM，提交前会再次确认。
       </div>
 
       <form className="scanGrid" onSubmit={submitOverview}>
@@ -243,7 +357,7 @@ export function ScanPanel() {
         </label>
         <label className="switchRow scanSwitch">
           <input type="checkbox" checked={cleanupOrphans} onChange={(event) => setCleanupOrphans(event.target.checked)} />
-          <span>清理孤儿 STRM</span>
+          <span>清理孤儿 STRM（危险）</span>
         </label>
         <button className="btn ghost" disabled={overviewLoading}>
           <FileSearch size={16} />
@@ -279,6 +393,73 @@ export function ScanPanel() {
         </div>
         <code>{pathText(selectedLibrary)}</code>
       </section>
+
+      {latestScan && (
+        <>
+          <section className="scanLibraryCard">
+            <div>
+              <strong>最近扫描结果</strong>
+              <span>{latestScan.task.label || latestScan.task.kind} · {latestScan.result.mode}</span>
+            </div>
+            <code>{latestScan.result.requested || latestStrm?.lib || 'scan_library'}</code>
+          </section>
+          <div className="statGrid">
+            <article className={`statCard ${latestScan.result.triggered ? 'ok' : 'neutral'}`}>
+              <div><RefreshCw /></div>
+              <span>Emby Refresh</span>
+              <strong>{count(latestScan.result.triggered)}</strong>
+              <small>{latestScan.result.global_refresh ? '全局刷新' : '按项刷新'}</small>
+            </article>
+            <article className={`statCard ${latestItems.length ? 'ok' : 'neutral'}`}>
+              <div><Database /></div>
+              <span>Items</span>
+              <strong>{count(latestItems.length)}</strong>
+              <small>返回条目</small>
+            </article>
+            <article className={`statCard ${latestStrm?.new_count ? 'ok' : 'neutral'}`}>
+              <div><FolderSync /></div>
+              <span>新增 STRM</span>
+              <strong>{count(latestStrm?.new_count)}</strong>
+              <small>{latestStrm ? `匹配 ${count(latestStrm.matched)}` : '未生成'}</small>
+            </article>
+            <article className={`statCard ${(latestStrm?.orphans_cleaned || latestStrm?.permissions_fixed) ? 'warn' : 'ok'}`}>
+              <div><FileSearch /></div>
+              <span>清孤儿 / 权限</span>
+              <strong>{count(latestStrm?.orphans_cleaned)} / {count(latestStrm?.permissions_fixed)}</strong>
+              <small>{latestStrm?.orphan_cleanup_skipped ? '清孤儿跳过' : '已执行结果'}</small>
+            </article>
+          </div>
+          <div className="scanSplit">
+            <section className="readonlyBlock">
+              <h2>Items</h2>
+              <div className="scanList">
+                {latestItems.slice(0, 30).map((item) => (
+                  <article key={`${item.id || item.name}-${item.code}`}>
+                    <span className={`badge ${item.code >= 400 ? 'error' : 'done'}`}>{item.code}</span>
+                    <strong>{item.name || item.id || '未命名条目'}</strong>
+                    <small>{item.id || '无 ItemId'}</small>
+                  </article>
+                ))}
+                {latestItems.length > 30 && <div className="empty inlineEmpty">仅显示前 30 条，共 {count(latestItems.length)} 条</div>}
+                {latestItems.length === 0 && <div className="empty inlineEmpty">这次扫描没有返回 Item 条目</div>}
+              </div>
+            </section>
+            <section className="readonlyBlock">
+              <h2>Attention</h2>
+              <div className="scanList">
+                {latestAttention.map((message) => (
+                  <article key={message}>
+                    <span className="badge warn">注意</span>
+                    <strong>{message}</strong>
+                    <small>{latestStrm?.lib || selectedLib || 'scan_library'}</small>
+                  </article>
+                ))}
+                {latestAttention.length === 0 && <div className="empty inlineEmpty">没有注意项</div>}
+              </div>
+            </section>
+          </div>
+        </>
+      )}
 
       <div className="statGrid">
         <article className={`statCard ${overviewTone(overview)}`}>

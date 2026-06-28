@@ -1,10 +1,15 @@
-import { RefreshCw, Save, SearchCheck, ShieldCheck } from 'lucide-react';
+import { ClipboardCheck, Copy, Download, KeyRound, RefreshCw, Save, SearchCheck, ShieldCheck } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { ConfirmDanger } from './Modal';
 import { useToast } from './Toast';
 
 type C115AutoCidResponse = components['schemas']['C115AutoCidResponse'];
+type ChangePasswordRequest = components['schemas']['ChangePasswordRequest'];
+type ChangePasswordResponse = components['schemas']['ChangePasswordResponse'];
+type ConfigImportReport = components['schemas']['ConfigImportReport'];
+type ConfigImportRequest = components['schemas']['ConfigImportRequest'];
 type ConfigResponse = components['schemas']['ConfigResponse'];
 type ConfigUpdateRequest = components['schemas']['ConfigUpdateRequest'];
 type EmbyLibrary = components['schemas']['EmbyLibrary'];
@@ -111,11 +116,49 @@ function safeExtraJson(value: string) {
   return parsed as Record<string, unknown>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseImportPayload(value: string): Pick<ConfigImportRequest, 'settings' | 'cfg'> {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error('请先粘贴或导出配置 JSON');
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!isRecord(parsed)) throw new Error('配置 JSON 必须是对象');
+  if ('settings' in parsed || 'cfg' in parsed) {
+    if (isRecord(parsed.settings)) return { settings: parsed.settings };
+    if (isRecord(parsed.cfg)) return { cfg: parsed.cfg };
+    throw new Error('settings 或 cfg 必须是对象');
+  }
+  return { settings: parsed };
+}
+
 function extraSettings(config: ConfigResponse) {
   const extra = Object.fromEntries(
     Object.entries(config.settings).filter(([key]) => !knownKeys.has(key))
   );
   return JSON.stringify(extra, null, 2);
+}
+
+function formatList(items: string[], empty: string) {
+  return items.length ? items.join('、') : empty;
+}
+
+function ImportReport({ report }: { report: ConfigImportReport }) {
+  const hasWarnings = report.warnings.length > 0 || report.rejected.length > 0;
+  return (
+    <div className={`notice ${hasWarnings ? 'warn' : ''} whitespaceNotice`}>
+      <strong>{report.dry_run ? 'dry-run 预检结果' : '导入结果'}</strong>
+      <div>accepted: {formatList(report.accepted, '无')}</div>
+      {!report.dry_run && <div>applied: {formatList(report.applied, '无')}</div>}
+      {report.rejected.length > 0 && (
+        <div>
+          rejected: {report.rejected.map((item) => `${item.key}(${item.reason})`).join('、')}
+        </div>
+      )}
+      {report.warnings.length > 0 && <div>warnings: {report.warnings.join('、')}</div>}
+    </div>
+  );
 }
 
 export function SettingsPanel() {
@@ -138,10 +181,27 @@ export function SettingsPanel() {
   const [saving, setSaving] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [detectResult, setDetectResult] = useState<C115AutoCidResponse | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importJson, setImportJson] = useState('');
+  const [importReport, setImportReport] = useState<ConfigImportReport | null>(null);
+  const [dryRunSignature, setDryRunSignature] = useState('');
+  const [confirmImport, setConfirmImport] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [changingPassword, setChangingPassword] = useState(false);
   const toast = useToast();
 
   const maskedApiKey = config.settings.api_key === '***';
   const sortedRows = useMemo(() => cidRows, [cidRows]);
+  const importSignature = importJson.trim();
+  const canApplyImport = Boolean(
+    importReport?.dry_run &&
+    importReport.accepted.length > 0 &&
+    dryRunSignature === importSignature &&
+    importSignature
+  );
 
   const hydrate = (nextConfig: ConfigResponse, nextLibraries: EmbyLibrary[]) => {
     setConfig(nextConfig);
@@ -271,8 +331,180 @@ export function SettingsPanel() {
     }
   };
 
+  const setImportText = (value: string) => {
+    setImportJson(value);
+    setImportReport(null);
+    setDryRunSignature('');
+  };
+
+  const buildImportPayload = (apply: boolean): ConfigImportRequest => ({
+    ...parseImportPayload(importJson),
+    mode: apply ? 'apply' : 'dry_run',
+    dry_run: !apply,
+    apply,
+    confirm: apply
+  });
+
+  const exportConfig = async () => {
+    setExporting(true);
+    setError('');
+    try {
+      const data = await api<ConfigResponse>('/api/v2/config/export');
+      const text = JSON.stringify(data, null, 2);
+      setImportText(text);
+      let copied = false;
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text);
+          copied = true;
+        }
+      } catch {
+        copied = false;
+      }
+      toast.push(copied ? '配置已导出到文本框并复制' : '配置已导出到文本框', 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`导出配置失败：${message}`, 'error');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const copyImportJson = async () => {
+    if (!importJson.trim()) {
+      toast.push('没有可复制的配置 JSON', 'warn');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(importJson);
+      toast.push('配置 JSON 已复制', 'ok');
+    } catch (e) {
+      toast.push(`复制失败：${errorMessage(e)}`, 'error');
+    }
+  };
+
+  const dryRunImport = async () => {
+    let payload: ConfigImportRequest;
+    try {
+      payload = buildImportPayload(false);
+    } catch (e) {
+      toast.push(errorMessage(e), 'warn');
+      return;
+    }
+    setImporting(true);
+    setError('');
+    try {
+      const report = await api<ConfigImportReport>('/api/v2/config/import', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      setImportReport(report);
+      setDryRunSignature(importSignature);
+      const tone = report.rejected.length || report.warnings.length ? 'warn' : 'ok';
+      toast.push(`预检完成：接受 ${report.accepted.length}，拒绝 ${report.rejected.length}`, tone);
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`导入预检失败：${message}`, 'error');
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const requestApplyImport = () => {
+    if (!canApplyImport) {
+      toast.push('请先 dry-run 预检当前 JSON，确认 accepted 后再导入', 'warn');
+      return;
+    }
+    setConfirmImport(true);
+  };
+
+  const applyImport = async () => {
+    let payload: ConfigImportRequest;
+    try {
+      payload = buildImportPayload(true);
+    } catch (e) {
+      setConfirmImport(false);
+      toast.push(errorMessage(e), 'warn');
+      return;
+    }
+    setConfirmImport(false);
+    setImporting(true);
+    setError('');
+    try {
+      const report = await api<ConfigImportReport>('/api/v2/config/import', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      setImportReport(report);
+      setDryRunSignature(importSignature);
+      toast.push(`已导入 ${report.applied.length} 个字段`, report.rejected.length ? 'warn' : 'ok');
+      await load();
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`导入配置失败：${message}`, 'error');
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const changePassword = async () => {
+    const current = currentPassword;
+    const next = newPassword;
+    if (!current) {
+      toast.push('先输入当前密码', 'warn');
+      return;
+    }
+    if (next.length < 8) {
+      toast.push('新密码至少需要 8 个字符', 'warn');
+      return;
+    }
+    if (next !== confirmPassword) {
+      toast.push('两次输入的新密码不一致', 'warn');
+      return;
+    }
+    const payload: ChangePasswordRequest = {
+      current_password: current,
+      new_password: next
+    };
+    setChangingPassword(true);
+    setError('');
+    try {
+      const result = await api<ChangePasswordResponse>('/api/v2/auth/password', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      toast.push(`密码已更新，已退出其他 ${result.invalidated_sessions} 个会话`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`修改密码失败：${message}`, 'error');
+    } finally {
+      setChangingPassword(false);
+    }
+  };
+
   return (
     <section className="settingsPanel">
+      {confirmImport && importReport && (
+        <ConfirmDanger
+          title="确认导入配置"
+          confirmText="确认导入"
+          onCancel={() => setConfirmImport(false)}
+          onConfirm={applyImport}
+          body={(
+            <div className="dangerCopy">
+              <p>将只应用 dry-run accepted 的配置字段；rejected 会由后端跳过。</p>
+              <code>accepted {importReport.accepted.length} · rejected {importReport.rejected.length}</code>
+            </div>
+          )}
+        />
+      )}
       <div className="settingsToolbar">
         <button className="btn ghost" onClick={load} disabled={loading}>
           <RefreshCw size={16} />
@@ -401,6 +633,53 @@ export function SettingsPanel() {
           <div className="notice settingsInlineNotice">
             Docker 版路径由 `.env` 控制，例如 `EMBY_MANAGER_STRM_ROOT` 和 `EMBY_MANAGER_MEDIA_ROOT`。这些运行时路径改完需要重建容器。
           </div>
+          <div className="settingsDivider" />
+          <div className="settingsBlockHead">
+            <h2>修改登录密码</h2>
+            <KeyRound size={16} />
+          </div>
+          <label>
+            <span>当前密码</span>
+            <input
+              className="input"
+              type="password"
+              aria-label="当前密码"
+              autoComplete="current-password"
+              value={currentPassword}
+              onChange={(event) => setCurrentPassword(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>新密码</span>
+            <input
+              className="input"
+              type="password"
+              aria-label="新密码"
+              autoComplete="new-password"
+              value={newPassword}
+              onChange={(event) => setNewPassword(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>确认新密码</span>
+            <input
+              className="input"
+              type="password"
+              aria-label="确认新密码"
+              autoComplete="new-password"
+              value={confirmPassword}
+              onChange={(event) => setConfirmPassword(event.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn ghost compact"
+            onClick={changePassword}
+            disabled={changingPassword || !currentPassword || !newPassword || !confirmPassword}
+          >
+            <KeyRound size={14} />
+            {changingPassword ? '修改中' : '更新密码'}
+          </button>
         </section>
       </div>
 
@@ -412,6 +691,44 @@ export function SettingsPanel() {
           value={extraJson}
           onChange={(event) => setExtraJson(event.target.value)}
         />
+      </section>
+
+      <section className="settingsBlock">
+        <div className="settingsBlockHead">
+          <h2>配置导出 / 导入</h2>
+          <div>
+            <button className="btn ghost compact" onClick={exportConfig} disabled={exporting}>
+              <Download size={14} />
+              {exporting ? '导出中' : '导出'}
+            </button>
+            <button className="btn ghost compact" onClick={copyImportJson} disabled={!importJson.trim()}>
+              <Copy size={14} />
+              复制
+            </button>
+          </div>
+        </div>
+        <textarea
+          className="input settingsJson"
+          aria-label="导入配置 JSON"
+          value={importJson}
+          onChange={(event) => setImportText(event.target.value)}
+          placeholder='粘贴 {"settings": {...}}，或点击导出把当前配置放到这里'
+        />
+        <div className="settingsBlockHead">
+          <div className="settingsHint">
+            <ClipboardCheck size={16} />
+            dry-run 只预检，不会写入；确认导入会再次显式确认。
+          </div>
+          <div>
+            <button className="btn ghost compact" onClick={dryRunImport} disabled={importing || !importJson.trim()}>
+              {importing ? '处理中' : 'dry-run 预检'}
+            </button>
+            <button className="btn danger compact" onClick={requestApplyImport} disabled={importing || !canApplyImport}>
+              确认导入
+            </button>
+          </div>
+        </div>
+        {importReport && <ImportReport report={importReport} />}
       </section>
     </section>
   );

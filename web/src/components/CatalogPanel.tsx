@@ -17,8 +17,7 @@ type CatalogItem = components['schemas']['CatalogItem'];
 type CatalogSearchResponse = components['schemas']['CatalogSearchResponse'];
 type CatalogStatsResponse = components['schemas']['CatalogStatsResponse'];
 type CatalogTransferPlanItem = components['schemas']['CatalogTransferPlanItem'];
-type CatalogTransferPlanRequest = components['schemas']['CatalogTransferPlanRequest'];
-type CatalogTransferPlanResponse = components['schemas']['CatalogTransferPlanResponse'];
+type CatalogTransferTarget = components['schemas']['CatalogTransferTarget'];
 type ConfigResponse = components['schemas']['ConfigResponse'];
 type TaskRun = components['schemas']['TaskRun'];
 
@@ -34,6 +33,11 @@ type PendingTransfer = {
   items: CatalogItem[];
   mode: 'single' | 'batch';
   target: TransferTarget;
+};
+
+type CatalogTransferExecuteRequest = {
+  items: CatalogTransferPlanItem[];
+  target: CatalogTransferTarget;
 };
 
 const linkTypeOptions: Array<{ value: LinkFilter; label: string }> = [
@@ -77,10 +81,6 @@ function itemToPlanItem(item: CatalogItem): CatalogTransferPlanItem {
   };
 }
 
-function delay(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 function linkTypeLabel(type: string) {
   if (type === 'share115') return '115 秒传';
   if (type === 'magnet') return '磁力';
@@ -98,6 +98,10 @@ function statText(stats: CatalogStatsResponse | null) {
   if (!stats) return '正在读取 catalog 状态';
   if (!stats.available) return '资源库未导入';
   return `库内 ${stats.total.toLocaleString('zh-CN')} 条 · 整包 ${stats.packages.toLocaleString('zh-CN')}`;
+}
+
+function taskSummary(task: TaskRun) {
+  return task.label || task.kind || task.id;
 }
 
 export function CatalogPanel() {
@@ -202,57 +206,31 @@ export function CatalogPanel() {
     setPending({ items: transferItems, mode, target });
   };
 
-  const createTransferTask = async (item: CatalogItem, target: TransferTarget): Promise<TaskRun> => {
-    const request: CatalogTransferPlanRequest = {
-      item: itemToPlanItem(item),
-      label: item.name,
-      ...(target.cid ? { cid: target.cid } : { lib: target.lib })
+  const createTransferBatchTask = async (transferItems: CatalogItem[], target: TransferTarget): Promise<TaskRun> => {
+    const request: CatalogTransferExecuteRequest = {
+      items: transferItems.map(itemToPlanItem),
+      target: target.cid ? { cid: target.cid } : { lib: target.lib }
     };
-    const plan = await api<CatalogTransferPlanResponse>('/api/v2/catalog/transfer-plan', {
+    return api<TaskRun>('/api/v2/catalog/transfer/execute', {
       method: 'POST',
       body: JSON.stringify(request)
     });
-    if (plan.action === 'save_share' && plan.save) {
-      return api<TaskRun>(plan.save.endpoint, {
-        method: plan.save.method || 'POST',
-        body: JSON.stringify(plan.save.payload)
-      });
-    }
-    if (plan.action === 'offline_download' && plan.offline) {
-      return api<TaskRun>(plan.offline.endpoint, {
-        method: plan.offline.method || 'POST',
-        body: JSON.stringify(plan.offline.payload)
-      });
-    }
-    throw new Error(plan.unsupported?.reason || '该链接暂不支持转存或离线下载');
   };
 
   const runTransfer = async (transfer: PendingTransfer) => {
     setPending(null);
     setTransferring(true);
-    setProgressText('');
-    const failures: string[] = [];
-    let okCount = 0;
+    setProgressText('正在创建目录转存任务...');
     try {
-      for (const [index, item] of transfer.items.entries()) {
-        setProgressText(`${index + 1}/${transfer.items.length} · ${item.name}`);
-        try {
-          const task = await createTransferTask(item, transfer.target);
-          okCount += 1;
-          toast.push(`任务已创建：${task.label}`, 'ok');
-        } catch (e) {
-          failures.push(`${item.name}: ${errorMessage(e)}`);
-        }
-        if (index < transfer.items.length - 1) await delay(400);
-      }
+      const task = await createTransferBatchTask(transfer.items, transfer.target);
       if (transfer.mode === 'batch') setSelected(new Set());
-      if (failures.length) {
-        toast.push(`完成 ${okCount}/${transfer.items.length}，失败 ${failures.length} 条`, 'warn');
-        setError(failures.join('\n'));
-      } else {
-        toast.push(`已提交 ${okCount} 个任务，任务中心会继续跟踪`, 'ok');
-        setError('');
-      }
+      const prefix = transfer.mode === 'batch' ? '批量任务已交给任务中心，可在任务中心取消' : '任务已交给任务中心，可在任务中心取消';
+      toast.push(`${prefix}：${taskSummary(task)}`, 'ok');
+      setError('');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`目录转存任务创建失败：${message}`, 'error');
     } finally {
       setTransferring(false);
       setProgressText('');
@@ -430,7 +408,7 @@ export function CatalogPanel() {
         <Modal title={pending.mode === 'batch' ? '批量转存确认' : `${actionLabel(pending.items[0])}确认`} onClose={() => setPending(null)}>
           <div className="modalBody catalogConfirm">
             <p>
-              将提交 <strong>{pending.items.length}</strong> 条到 <strong>{pending.target.label}</strong>
+              确认后会创建一个可取消任务，交给任务中心处理 <strong>{pending.items.length}</strong> 条到 <strong>{pending.target.label}</strong>
             </p>
             <dl>
               <div><dt>115 秒传</dt><dd>{shareCount}</dd></div>

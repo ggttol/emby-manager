@@ -1242,6 +1242,12 @@ main {
   font-size: 13px;
 }
 
+.settingsDivider {
+  height: 1px;
+  margin: 2px 0;
+  background: var(--line);
+}
+
 .settingsJson {
   min-height: 160px;
   resize: vertical;

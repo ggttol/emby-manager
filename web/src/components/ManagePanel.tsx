@@ -1,4 +1,4 @@
-import { ArrowRight, CheckCircle2, FileWarning, FolderInput, ListChecks, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
+import { ArrowRight, CheckCircle2, FileWarning, FolderInput, ListChecks, Plus, RefreshCw, RotateCcw, Search, Trash2 } from 'lucide-react';
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
@@ -7,6 +7,8 @@ import { TASK_COMPLETED_EVENT, type TaskCompleteDetail } from './TaskCenter';
 import { useToast } from './Toast';
 
 type EmbyLibrary = components['schemas']['EmbyLibrary'];
+type LibraryItemEntry = components['schemas']['LibraryItemEntry'];
+type LibraryItemsResponse = components['schemas']['LibraryItemsResponse'];
 type LibrariesResponse = components['schemas']['LibrariesResponse'];
 type ManageDeleteBatchRequest = components['schemas']['ManageDeleteBatchRequest'];
 type ManageDeleteRequest = components['schemas']['ManageDeleteRequest'];
@@ -138,10 +140,61 @@ function parseBatchDeleteInput(text: string, reason: string): ManageDeleteBatchR
   };
 }
 
+function itemBrowserLabel(item: LibraryItemEntry) {
+  const year = item.year ? ` (${item.year})` : '';
+  const tmdb = item.tmdb ? ` · tmdb ${item.tmdb}` : '';
+  return `${item.name}${year} · ${item.folder}${tmdb}`;
+}
+
+function itemBrowserHaystack(item: LibraryItemEntry) {
+  return [
+    item.name,
+    item.folder,
+    item.id,
+    item.tmdb,
+    item.year,
+    item.path
+  ].filter((value) => value != null).join('\n').toLocaleLowerCase('zh-CN');
+}
+
+function batchDeleteItemFromBrowser(lib: string, item: LibraryItemEntry): ManageDeleteRequest {
+  return {
+    lib,
+    folder: item.folder,
+    item_id: item.id || null,
+    reason: null
+  };
+}
+
+function appendBatchDeleteItem(text: string, item: ManageDeleteRequest) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (Array.isArray(parsed)) {
+        return JSON.stringify([...parsed, item], null, 2);
+      }
+      if (isRecord(parsed) && Array.isArray(parsed.items)) {
+        return JSON.stringify({ ...parsed, items: [...parsed.items, item] }, null, 2);
+      }
+    } catch {
+      // Fall through to line append when the textarea is not valid JSON yet.
+    }
+  }
+  const line = [item.lib, item.folder, item.item_id].filter(Boolean).join('/');
+  return text.trimEnd() ? `${text.trimEnd()}\n${line}` : line;
+}
+
 export function ManagePanel() {
   const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
   const [undoItems, setUndoItems] = useState<UndoEntry[]>([]);
   const [undoTotal, setUndoTotal] = useState(0);
+  const [browserLib, setBrowserLib] = useState('');
+  const [browserItems, setBrowserItems] = useState<LibraryItemEntry[]>([]);
+  const [browserFilter, setBrowserFilter] = useState('');
+  const [browserSelectedIndex, setBrowserSelectedIndex] = useState<number | null>(null);
+  const [browserLoading, setBrowserLoading] = useState(false);
+  const [browserError, setBrowserError] = useState('');
   const [deleteLib, setDeleteLib] = useState('');
   const [deleteFolder, setDeleteFolder] = useState('');
   const [deleteItemId, setDeleteItemId] = useState('');
@@ -168,6 +221,7 @@ export function ManagePanel() {
 
   const applyDefaultLibs = useCallback((next: EmbyLibrary[]) => {
     const first = libraryOptions(next)[0]?.name || '';
+    setBrowserLib((value) => value || first);
     setDeleteLib((value) => value || first);
     setFromLib((value) => value || first);
     setToLib((value) => value || first);
@@ -197,6 +251,42 @@ export function ManagePanel() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const lib = browserLib.trim();
+    setBrowserSelectedIndex(null);
+    if (!lib) {
+      setBrowserItems([]);
+      setBrowserError('');
+      setBrowserLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setBrowserItems([]);
+    setBrowserLoading(true);
+    setBrowserError('');
+    const params = new URLSearchParams({ lib, limit: '500' });
+    api<LibraryItemsResponse>(`/api/v2/libraries/items?${params.toString()}`)
+      .then((data) => {
+        if (cancelled) return;
+        setBrowserItems(Array.isArray(data.items) ? data.items : []);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        const message = errorMessage(e);
+        setBrowserItems([]);
+        setBrowserError(message);
+        toast.push(`库项目加载失败：${message}`, 'error');
+      })
+      .finally(() => {
+        if (!cancelled) setBrowserLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [browserLib, toast]);
 
   useEffect(() => {
     const onTaskCompleted = (event: Event) => {
@@ -306,6 +396,42 @@ export function ManagePanel() {
     } finally {
       setSubmitting(null);
     }
+  };
+
+  const browserRows = useMemo(() => {
+    const tokens = browserFilter.trim().toLocaleLowerCase('zh-CN').split(/\s+/).filter(Boolean);
+    return browserItems
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => {
+        if (tokens.length === 0) return true;
+        const haystack = itemBrowserHaystack(item);
+        return tokens.every((token) => haystack.includes(token));
+      })
+      .slice(0, 80);
+  }, [browserFilter, browserItems]);
+
+  const browserSelectedVisible = browserSelectedIndex != null && browserRows.some(({ index }) => index === browserSelectedIndex);
+  const browserSelectedItem = browserSelectedVisible && browserSelectedIndex != null ? browserItems[browserSelectedIndex] || null : null;
+
+  const selectBrowserItem = (index: number) => {
+    const item = browserItems[index];
+    if (!item) return;
+    const lib = browserLib.trim();
+    setBrowserSelectedIndex(index);
+    setDeleteLib(lib);
+    setDeleteFolder(item.folder);
+    setDeleteItemId(item.id || '');
+    toast.push(`已填入删除项：${item.name}`, 'ok');
+  };
+
+  const addBrowserItemToBatch = () => {
+    if (!browserSelectedItem || !browserLib.trim()) {
+      toast.push('先选择一个库项目', 'warn');
+      return;
+    }
+    const item = batchDeleteItemFromBrowser(browserLib.trim(), browserSelectedItem);
+    setBatchDeleteText((value) => appendBatchDeleteItem(value, item));
+    toast.push(`已加入批量删除：${browserSelectedItem.name}`, 'ok');
   };
 
   const submitMove = async (event: FormEvent<HTMLFormElement>) => {
@@ -524,6 +650,54 @@ export function ManagePanel() {
             </button>
           </div>
         </form>
+
+        <div className="manageForm">
+          <div className="manageFormHead">
+            <Search size={18} />
+            <strong>库项目选择器</strong>
+          </div>
+          {renderLibSelect('浏览库名', browserLib, setBrowserLib)}
+          <label>
+            <span>关键词</span>
+            <input className="input" aria-label="项目关键词" value={browserFilter} onChange={(event) => setBrowserFilter(event.target.value)} placeholder="名称 / folder / tmdb / 年份" />
+          </label>
+          <label>
+            <span>项目</span>
+            <select
+              className="input"
+              aria-label="库项目列表"
+              size={8}
+              value={browserSelectedIndex == null ? '' : String(browserSelectedIndex)}
+              onChange={(event) => selectBrowserItem(Number(event.target.value))}
+              disabled={browserLoading || browserRows.length === 0}
+            >
+              {browserRows.map(({ item, index }) => (
+                <option key={`${item.id || item.folder}-${index}`} value={index}>
+                  {itemBrowserLabel(item)}
+                </option>
+              ))}
+            </select>
+          </label>
+          {browserError && <div className="notice warn whitespaceNotice">{browserError}</div>}
+          {!browserError && (
+            <small className="mutedParagraph">
+              {browserLoading ? '加载项目中' : `显示 ${count(browserRows.length)} / ${count(browserItems.length)} 项`}
+            </small>
+          )}
+          {browserSelectedItem && (
+            <div className="taskMeta manageTaskMeta">
+              <div><dt>folder</dt><dd>{browserSelectedItem.folder}</dd></div>
+              <div><dt>ItemId</dt><dd>{browserSelectedItem.id || '无'}</dd></div>
+              <div><dt>路径</dt><dd>{browserSelectedItem.path || '无'}</dd></div>
+            </div>
+          )}
+          <div className="inlineActions">
+            <button type="button" className="btn ghost" onClick={addBrowserItemToBatch} disabled={!browserSelectedItem}>
+              <Plus size={16} />
+              加入批量删除文本
+            </button>
+          </div>
+        </div>
 
         <form className="manageForm" onSubmit={submitMove}>
           <div className="manageFormHead">

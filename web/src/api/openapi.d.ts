@@ -52,6 +52,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/auth/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["change_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/autostrm/status": {
         parameters: {
             query?: never;
@@ -270,6 +286,38 @@ export interface paths {
         get: operations["get_config"];
         put: operations["put_config"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/config/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["export_config"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/config/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["import_config"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1243,6 +1291,15 @@ export interface components {
             link: string;
             reason: string;
         };
+        ChangePasswordRequest: {
+            current_password: string;
+            new_password: string;
+        };
+        ChangePasswordResponse: {
+            /** Format: int64 */
+            invalidated_sessions: number;
+            ok: boolean;
+        };
         CleanupSummaryResponse: {
             autostrm: components["schemas"]["AutostrmSnapshot"];
             catalog: components["schemas"]["CatalogInsight"];
@@ -1255,6 +1312,29 @@ export interface components {
             task_history: components["schemas"]["TaskHistorySummary"];
             todos: components["schemas"]["InsightTodo"][];
             warnings: string[];
+        };
+        ConfigImportRejected: {
+            key: string;
+            reason: string;
+        };
+        ConfigImportReport: {
+            accepted: string[];
+            applied: string[];
+            dry_run: boolean;
+            rejected: components["schemas"]["ConfigImportRejected"][];
+            warnings: string[];
+        };
+        ConfigImportRequest: {
+            apply?: boolean | null;
+            cfg?: {
+                [key: string]: unknown;
+            } | null;
+            confirm?: boolean | null;
+            dry_run?: boolean | null;
+            mode?: string | null;
+            settings?: {
+                [key: string]: unknown;
+            } | null;
         };
         ConfigResponse: {
             settings: {
@@ -2196,6 +2276,29 @@ export interface operations {
             };
         };
     };
+    change_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChangePasswordRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChangePasswordResponse"];
+                };
+            };
+        };
+    };
     autostrm_status: {
         parameters: {
             query?: never;
@@ -2517,6 +2620,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConfigResponse"];
+                };
+            };
+        };
+    };
+    export_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigResponse"];
+                };
+            };
+        };
+    };
+    import_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConfigImportRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfigImportReport"];
                 };
             };
         };
