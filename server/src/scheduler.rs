@@ -1,5 +1,8 @@
 use crate::{
+    config_store,
+    emby::{EmbyClient, EmbyLibrary},
     error::{AppError, AppResult},
+    media_fs, posters,
     state::AppState,
     tasks,
 };
@@ -12,12 +15,20 @@ use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
-use std::time::Duration as StdDuration;
+use std::{
+    path::Path as FsPath,
+    time::{Duration as StdDuration, SystemTime, UNIX_EPOCH},
+};
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 const SCHEDULER_POLL_SECONDS: u64 = 30;
 const SCHEDULER_ADVISORY_LOCK_ID: i64 = 8097_8098_42;
+const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
+const DEFAULT_POSTER_FIX_LIMIT: usize = 200;
+const DEFAULT_SERIES_REFRESH_LIMIT: usize = 500;
+const DEFAULT_INCREMENTAL_LIMIT: usize = 200;
+const SCHEDULE_CANCELLED_SENTINEL: &str = "__schedule_cancelled__";
 
 #[derive(Debug, Serialize, FromRow, utoipa::ToSchema)]
 pub struct ScheduleJob {
@@ -154,7 +165,7 @@ pub async fn tick_due_schedules(state: &AppState, now: DateTime<Utc>) -> AppResu
 
     let mut started = 0usize;
     for schedule_id in due_ids {
-        match start_schedule_preview_task(state.clone(), schedule_id, "schedule").await {
+        match start_schedule_task(state.clone(), schedule_id, "schedule").await {
             Ok(_) => started += 1,
             Err(AppError::Conflict(err)) => {
                 tracing::info!(%schedule_id, error = %err, "due schedule skipped");
@@ -267,11 +278,11 @@ pub async fn run_schedule(
         return Err(AppError::Conflict("schedule 已禁用，不能运行".to_string()));
     }
     validate_kind(&job.kind)?;
-    let task = start_schedule_preview_task(state, id, "manual").await?;
+    let task = start_schedule_task(state, id, "manual").await?;
     Ok(Json(RunScheduleResponse { tid: task.id, task }))
 }
 
-pub async fn start_schedule_preview_task(
+pub async fn start_schedule_task(
     state: AppState,
     schedule_id: Uuid,
     source: &str,
@@ -310,7 +321,7 @@ pub async fn start_schedule_preview_task(
         "schedule": job.schedule.clone(),
         "params": job.params.clone(),
     });
-    let label = format!("{}（scheduler preview dry run）", job.name);
+    let label = format!("定时任务: {}", job.name);
     let task = sqlx::query_as::<_, tasks::TaskRun>(
         "INSERT INTO task_runs(id, kind, label, source, params, status, total)
          VALUES ($1, $2, $3, $4, $5, 'pending', 1)
@@ -335,34 +346,55 @@ pub async fn start_schedule_preview_task(
     .await?;
     tx.commit().await?;
 
-    spawn_schedule_preview_worker(state, job.id, task.id, job.kind, label, source.to_string());
+    spawn_schedule_worker(
+        state,
+        job.id,
+        task.id,
+        job.kind,
+        label,
+        source.to_string(),
+        job.params,
+    );
     Ok(task)
 }
 
-fn spawn_schedule_preview_worker(
+fn spawn_schedule_worker(
     state: AppState,
     schedule_id: Uuid,
     task_id: Uuid,
     kind: String,
     label: String,
     source: String,
+    params: Value,
 ) {
     tokio::spawn(async move {
         let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
             return;
         };
-        if let Err(err) =
-            run_schedule_preview_worker(&state, schedule_id, task_id, &kind, &label, &source).await
+        if let Err(err) = run_schedule_worker(
+            &state,
+            schedule_id,
+            task_id,
+            &kind,
+            &label,
+            &source,
+            &params,
+        )
+        .await
         {
             let message = err.to_string();
+            if message == SCHEDULE_CANCELLED_SENTINEL {
+                let _ = update_schedule_finished(&state.pool, schedule_id, "cancelled", None).await;
+                return;
+            }
             let _ = tasks::finish_error(
                 &state.pool,
                 task_id,
                 &message,
                 Some(serde_json::json!({
                     "ok": false,
-                    "preview": true,
-                    "dry_run": true,
+                    "preview": false,
+                    "dry_run": false,
                     "message": message,
                 })),
             )
@@ -373,40 +405,457 @@ fn spawn_schedule_preview_worker(
     });
 }
 
-async fn run_schedule_preview_worker(
+async fn run_schedule_worker(
     state: &AppState,
     schedule_id: Uuid,
     task_id: Uuid,
     kind: &str,
     label: &str,
     source: &str,
+    params: &Value,
 ) -> AppResult<()> {
-    let running_message = "scheduler preview worker dry run: 不执行真实媒体变更";
+    let running_message = "scheduler worker running";
     tasks::mark_running(&state.pool, task_id, running_message).await?;
-    if tasks::cancel_requested(&state.pool, task_id).await {
-        tasks::finish_cancelled(&state.pool, task_id).await?;
-        update_schedule_finished(&state.pool, schedule_id, "cancelled", None).await?;
-        return Ok(());
-    }
-    tasks::set_progress(&state.pool, task_id, 1, running_message).await?;
-    let done_message = "scheduler preview worker dry run 完成：未执行真实业务";
+    check_schedule_cancelled(state, task_id).await?;
+
+    let result = match kind {
+        "scan_all" => run_scheduled_scan_all(state, task_id, params).await?,
+        "zhuigeng_scan_airing" => {
+            run_scheduled_zhuigeng_scan_airing(state, task_id, params).await?
+        }
+        "fix_posters_all" => run_scheduled_fix_posters_all(state, task_id, params).await?,
+        "refresh_no_rating_all" => {
+            run_scheduled_refresh_no_rating_all(state, task_id, params).await?
+        }
+        "monitor_incremental" => run_scheduled_monitor_incremental(state, task_id, params).await?,
+        _ => {
+            return Err(AppError::BadRequest(format!(
+                "unknown schedule kind: {kind}"
+            )));
+        }
+    };
+
+    let done_message = format!("scheduler worker 完成: {kind}");
     tasks::finish_done_with_message(
         &state.pool,
         task_id,
-        done_message,
+        &done_message,
         serde_json::json!({
             "ok": true,
-            "preview": true,
-            "dry_run": true,
+            "preview": false,
+            "dry_run": false,
             "source": source,
             "kind": kind,
             "label": label,
             "message": done_message,
+            "detail": result,
         }),
     )
     .await?;
     update_schedule_finished(&state.pool, schedule_id, "done", None).await?;
     Ok(())
+}
+
+async fn run_scheduled_scan_all(
+    state: &AppState,
+    task_id: Uuid,
+    _params: &Value,
+) -> AppResult<Value> {
+    tasks::set_total(&state.pool, task_id, 1).await?;
+    tasks::set_progress(&state.pool, task_id, 0, "触发 Emby 全库刷新").await?;
+    check_schedule_cancelled(state, task_id).await?;
+    let client = scheduled_emby_client(state).await?;
+    let code = client.refresh_library().await?;
+    tasks::set_progress(&state.pool, task_id, 1, "Emby 全库刷新已触发").await?;
+    Ok(serde_json::json!({
+        "action": "refresh_library",
+        "refresh_code": code,
+    }))
+}
+
+async fn run_scheduled_zhuigeng_scan_airing(
+    state: &AppState,
+    task_id: Uuid,
+    params: &Value,
+) -> AppResult<Value> {
+    let client = scheduled_emby_client(state).await?;
+    let keyword = params
+        .get("keyword")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("追更");
+    let libraries = client
+        .libraries()
+        .await?
+        .into_iter()
+        .filter(|library| {
+            library.name.contains(keyword)
+                && library
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    tasks::set_total(&state.pool, task_id, libraries.len().max(1) as i64).await?;
+    if libraries.is_empty() {
+        tasks::set_progress(&state.pool, task_id, 1, "未找到追更库").await?;
+        return Ok(serde_json::json!({
+            "action": "refresh_airing_libraries",
+            "keyword": keyword,
+            "matched_libraries": 0,
+            "items": [],
+        }));
+    }
+
+    let mut items = Vec::new();
+    for (index, library) in libraries.iter().enumerate() {
+        check_schedule_cancelled(state, task_id).await?;
+        let id = library.id.as_deref().unwrap_or_default();
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            index as i64,
+            &format!("刷新追更库 {}", library.name),
+        )
+        .await?;
+        let code = client.refresh_item(id, true, false).await?;
+        items.push(serde_json::json!({
+            "lib": library.name,
+            "id": id,
+            "refresh_code": code,
+        }));
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            (index + 1) as i64,
+            &format!("已刷新追更库 {}/{}", index + 1, libraries.len()),
+        )
+        .await?;
+    }
+
+    Ok(serde_json::json!({
+        "action": "refresh_airing_libraries",
+        "keyword": keyword,
+        "matched_libraries": libraries.len(),
+        "items": items,
+    }))
+}
+
+async fn run_scheduled_fix_posters_all(
+    state: &AppState,
+    task_id: Uuid,
+    params: &Value,
+) -> AppResult<Value> {
+    let client = scheduled_emby_client(state).await?;
+    let limit = params_usize(params, "limit", DEFAULT_POSTER_FIX_LIMIT, 1, 1000);
+    tasks::set_progress(&state.pool, task_id, 0, "扫描无海报项目").await?;
+    let detected = posters::detect_mismatched_posters(
+        &client,
+        posters::PosterDetectRequest {
+            lib: params
+                .get("lib")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            limit: Some(limit),
+            include_missing_primary: Some(true),
+        },
+    )
+    .await?;
+    let targets = detected
+        .items
+        .into_iter()
+        .filter(|item| !item.has_poster)
+        .take(limit)
+        .collect::<Vec<_>>();
+    tasks::set_total(&state.pool, task_id, targets.len().max(1) as i64).await?;
+    if targets.is_empty() {
+        tasks::set_progress(&state.pool, task_id, 1, "没有需要自动修复的无海报项目").await?;
+        return Ok(serde_json::json!({
+            "action": "fix_posters_all",
+            "total": 0,
+            "ok_count": 0,
+            "results": [],
+        }));
+    }
+
+    let mut results = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        check_schedule_cancelled(state, task_id).await?;
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            index as i64,
+            &format!("修海报 {}", target.emby_name),
+        )
+        .await?;
+        results.push(
+            posters::fix_poster_one(&state.pool, &client, &target.id, &target.item_type).await,
+        );
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            (index + 1) as i64,
+            &format!("海报修复 {}/{}", index + 1, targets.len()),
+        )
+        .await?;
+        tokio::time::sleep(StdDuration::from_millis(500)).await;
+    }
+    let ok_count = results.iter().filter(|row| row.ok).count();
+    Ok(serde_json::json!({
+        "action": "fix_posters_all",
+        "total": results.len(),
+        "ok_count": ok_count,
+        "results": results,
+    }))
+}
+
+async fn run_scheduled_refresh_no_rating_all(
+    state: &AppState,
+    task_id: Uuid,
+    params: &Value,
+) -> AppResult<Value> {
+    let client = scheduled_emby_client(state).await?;
+    let limit = params_usize(params, "limit", DEFAULT_SERIES_REFRESH_LIMIT, 1, 5000);
+    tasks::set_progress(&state.pool, task_id, 0, "读取剧集库").await?;
+    let mut targets = Vec::new();
+    for library in client.libraries().await? {
+        if !is_tv_library(&library) {
+            continue;
+        }
+        let Some(parent_id) = library.id.as_deref().filter(|id| !id.trim().is_empty()) else {
+            continue;
+        };
+        for item in client
+            .series(parent_id, limit.saturating_sub(targets.len()))
+            .await?
+        {
+            let Some(id) = item.id else {
+                continue;
+            };
+            targets.push((library.name.clone(), id, item.name.unwrap_or_default()));
+            if targets.len() >= limit {
+                break;
+            }
+        }
+        if targets.len() >= limit {
+            break;
+        }
+    }
+
+    tasks::set_total(&state.pool, task_id, targets.len().max(1) as i64).await?;
+    if targets.is_empty() {
+        tasks::set_progress(&state.pool, task_id, 1, "没有找到剧集条目").await?;
+        return Ok(serde_json::json!({
+            "action": "refresh_no_rating_all",
+            "refreshed": 0,
+            "note": "Rust 当前未单独读取评分字段，本任务会刷新剧集元数据以补齐评分/海报/简介",
+        }));
+    }
+
+    let mut refreshed = Vec::new();
+    for (index, (lib, id, name)) in targets.iter().enumerate() {
+        check_schedule_cancelled(state, task_id).await?;
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            index as i64,
+            &format!("刷新元数据 {}", name),
+        )
+        .await?;
+        let code = client.refresh_item(id, true, false).await?;
+        refreshed.push(serde_json::json!({
+            "lib": lib,
+            "id": id,
+            "name": name,
+            "refresh_code": code,
+        }));
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            (index + 1) as i64,
+            &format!("元数据刷新 {}/{}", index + 1, targets.len()),
+        )
+        .await?;
+        tokio::time::sleep(StdDuration::from_millis(500)).await;
+    }
+
+    Ok(serde_json::json!({
+        "action": "refresh_no_rating_all",
+        "refreshed": refreshed.len(),
+        "note": "Rust 当前未单独读取评分字段，本任务会刷新剧集元数据以补齐评分/海报/简介",
+        "items": refreshed,
+    }))
+}
+
+async fn run_scheduled_monitor_incremental(
+    state: &AppState,
+    task_id: Uuid,
+    params: &Value,
+) -> AppResult<Value> {
+    let limit = params_usize(params, "limit", DEFAULT_INCREMENTAL_LIMIT, 1, 5000);
+    tasks::set_progress(&state.pool, task_id, 0, "扫描媒体根增量目录").await?;
+    let due = collect_incremental_tops(state, limit).await?;
+    tasks::set_total(&state.pool, task_id, due.len().max(1) as i64).await?;
+    if due.is_empty() {
+        tasks::set_progress(&state.pool, task_id, 1, "没有发现增量 top 目录").await?;
+        return Ok(serde_json::json!({
+            "action": "monitor_incremental",
+            "processed": 0,
+            "new_strm": 0,
+            "attention": [],
+        }));
+    }
+
+    let mut processed = 0usize;
+    let mut new_strm = 0usize;
+    let mut attention = Vec::new();
+    for (index, top) in due.iter().enumerate() {
+        check_schedule_cancelled(state, task_id).await?;
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            index as i64,
+            &format!("补扫 {}/{}", top.lib, top.top),
+        )
+        .await?;
+        let result =
+            media_fs::generate_missing_strm_for_library(state, &top.lib, Some(&top.top), true)?;
+        new_strm += result.new_count;
+        attention.extend(result.attention);
+        sqlx::query(
+            "INSERT INTO autostrm_seen(lib, top, mtime, updated_at)
+             VALUES ($1, $2, $3, now())
+             ON CONFLICT(lib, top) DO UPDATE
+             SET mtime = EXCLUDED.mtime, updated_at = now()",
+        )
+        .bind(&top.lib)
+        .bind(&top.top)
+        .bind(top.mtime)
+        .execute(&state.pool)
+        .await?;
+        processed += 1;
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            (index + 1) as i64,
+            &format!("增量补扫 {}/{}", index + 1, due.len()),
+        )
+        .await?;
+        tokio::time::sleep(StdDuration::from_millis(500)).await;
+    }
+
+    Ok(serde_json::json!({
+        "action": "monitor_incremental",
+        "processed": processed,
+        "new_strm": new_strm,
+        "attention": attention,
+    }))
+}
+
+async fn scheduled_emby_client(state: &AppState) -> AppResult<EmbyClient> {
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    if api_key.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "api_key is not configured; set it via /api/v2/config before running schedules"
+                .to_string(),
+        ));
+    }
+    Ok(EmbyClient::new(emby_url, api_key, state.http.clone()))
+}
+
+async fn check_schedule_cancelled(state: &AppState, task_id: Uuid) -> AppResult<()> {
+    if tasks::cancel_requested(&state.pool, task_id).await {
+        tasks::finish_cancelled(&state.pool, task_id).await?;
+        return Err(AppError::Conflict(SCHEDULE_CANCELLED_SENTINEL.to_string()));
+    }
+    Ok(())
+}
+
+fn params_usize(params: &Value, key: &str, default: usize, min: usize, max: usize) -> usize {
+    params
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn is_tv_library(library: &EmbyLibrary) -> bool {
+    let value = library.library_type.to_ascii_lowercase();
+    value.contains("tv") || value.contains("show")
+}
+
+#[derive(Debug)]
+struct IncrementalTop {
+    lib: String,
+    top: String,
+    mtime: i64,
+}
+
+async fn collect_incremental_tops(
+    state: &AppState,
+    limit: usize,
+) -> AppResult<Vec<IncrementalTop>> {
+    let mut due = Vec::new();
+    let root = &state.settings.cd_root;
+    if !root.is_dir() {
+        return Err(AppError::NotFound(format!(
+            "媒体根不存在: {}",
+            root.display()
+        )));
+    }
+    let libs = read_dir_names(root)?;
+    for lib in libs {
+        let lib_path = root.join(&lib);
+        if !lib_path.is_dir() {
+            continue;
+        }
+        for top in read_dir_names(&lib_path)? {
+            let top_path = lib_path.join(&top);
+            if !top_path.is_dir() {
+                continue;
+            }
+            let mtime = path_mtime_seconds(&top_path);
+            let seen: Option<i64> =
+                sqlx::query_scalar("SELECT mtime FROM autostrm_seen WHERE lib = $1 AND top = $2")
+                    .bind(&lib)
+                    .bind(&top)
+                    .fetch_optional(&state.pool)
+                    .await?;
+            if seen.is_none_or(|value| mtime > value) {
+                due.push(IncrementalTop {
+                    lib: lib.clone(),
+                    top,
+                    mtime,
+                });
+            }
+            if due.len() >= limit {
+                return Ok(due);
+            }
+        }
+    }
+    Ok(due)
+}
+
+fn read_dir_names(path: &FsPath) -> AppResult<Vec<String>> {
+    let mut names = std::fs::read_dir(path)
+        .map_err(|err| AppError::Anyhow(err.into()))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    names.sort();
+    Ok(names)
+}
+
+fn path_mtime_seconds(path: &FsPath) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .unwrap_or_else(|_| SystemTime::now())
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default()
 }
 
 async fn update_schedule_finished(

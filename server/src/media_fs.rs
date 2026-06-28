@@ -1264,7 +1264,7 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-fn generate_missing_strm_for_library(
+pub fn generate_missing_strm_for_library(
     state: &AppState,
     lib: &str,
     keyword: Option<&str>,

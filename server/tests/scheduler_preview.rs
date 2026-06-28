@@ -9,14 +9,23 @@ use emby_manager::{
 };
 use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
-use std::{env, path::PathBuf, time::Duration};
-use tokio::time::sleep;
+use std::{
+    env,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    time::sleep,
+};
 use uuid::Uuid;
 
 static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test]
-async fn run_schedule_creates_preview_task_and_finishes_done() {
+async fn run_schedule_creates_real_task_and_finishes_done() {
     let _guard = DB_LOCK.lock().await;
     let Some(state) = test_state().await else {
         eprintln!(
@@ -24,34 +33,47 @@ async fn run_schedule_creates_preview_task_and_finishes_done() {
         );
         return;
     };
+    let (base_url, requests) = spawn_fake_emby(vec![FakeResponse::no_content()]).await;
+    configure_emby(&state, &base_url).await;
     let job = insert_schedule(&state, "preview_ok", "scan_all", true).await;
 
     let response = scheduler::run_schedule(State(state.clone()), Path(job.id))
         .await
-        .expect("run schedule should create a preview task")
+        .expect("run schedule should create a real task")
         .0;
 
     assert_eq!(response.task.kind, "scan_all");
     assert_eq!(response.task.source, "manual");
     assert_eq!(response.task.params["schedule_id"], json!(job.id));
-    assert!(response.task.label.contains("scheduler preview dry run"));
+    assert!(!response.task.label.contains("preview dry run"));
 
     let task = wait_for_task_status(&state, response.tid, "done").await;
     assert_eq!(task["source"], "manual");
     assert_eq!(task["kind"], "scan_all");
     assert_eq!(task["params"]["params"], json!({"scope": "test"}));
-    assert_eq!(task["result"]["dry_run"], true);
+    assert_eq!(task["result"]["dry_run"], false);
+    assert_eq!(task["result"]["preview"], false);
+    assert_eq!(task["result"]["detail"]["action"], "refresh_library");
+    assert_eq!(task["result"]["detail"]["refresh_code"], 204);
     assert!(
         task["status_text"]
             .as_str()
             .unwrap_or_default()
-            .contains("preview worker dry run"),
+            .contains("scheduler worker 完成"),
         "{task}"
     );
 
     let schedule = load_schedule(&state, job.id).await;
     assert_eq!(schedule.last_status.as_deref(), Some("done"));
     assert_eq!(schedule.last_task_id, Some(response.tid));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].starts_with("POST /Library/Refresh?api_key=secret-key"),
+        "{}",
+        requests[0]
+    );
 }
 
 #[tokio::test]
@@ -91,7 +113,7 @@ async fn run_schedule_rejects_unknown_kind_without_creating_task() {
 }
 
 #[tokio::test]
-async fn scheduler_tick_starts_due_preview_task_once() {
+async fn scheduler_tick_starts_due_real_task_once() {
     let _guard = DB_LOCK.lock().await;
     let Some(state) = test_state().await else {
         eprintln!(
@@ -99,6 +121,8 @@ async fn scheduler_tick_starts_due_preview_task_once() {
         );
         return;
     };
+    let (base_url, requests) = spawn_fake_emby(vec![FakeResponse::no_content()]).await;
+    configure_emby(&state, &base_url).await;
     let now = Utc::now();
     let job = sqlx::query_as::<_, ScheduleJob>(
         "INSERT INTO schedule_jobs(id, name, kind, params, schedule, enabled, last_run_at)
@@ -124,12 +148,33 @@ async fn scheduler_tick_starts_due_preview_task_once() {
     let task = wait_for_task_status(&state, task_id, "done").await;
     assert_eq!(task["source"], "schedule");
     assert_eq!(task["params"]["schedule_id"], json!(job.id));
-    assert_eq!(task["result"]["dry_run"], true);
+    assert_eq!(task["result"]["dry_run"], false);
+    assert_eq!(task["result"]["detail"]["action"], "refresh_library");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
 
     let started_again = scheduler::tick_due_schedules(&state, now)
         .await
         .expect("second tick due schedules");
     assert_eq!(started_again, 0);
+}
+
+async fn configure_emby(state: &AppState, base_url: &str) {
+    for (key, value) in [
+        ("emby_url", json!(base_url)),
+        ("api_key", json!("secret-key")),
+    ] {
+        sqlx::query(
+            "INSERT INTO app_settings(key, value, updated_at) VALUES ($1, $2, now())
+             ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&state.pool)
+        .await
+        .expect("save Emby config");
+    }
 }
 
 async fn insert_schedule(state: &AppState, name: &str, kind: &str, enabled: bool) -> ScheduleJob {
@@ -219,4 +264,48 @@ fn test_settings(database_url: String) -> Settings {
         docker_bin: PathBuf::from("/usr/bin/docker"),
         task_concurrency: 1,
     }
+}
+
+#[derive(Clone)]
+struct FakeResponse {
+    status: &'static str,
+    body: &'static str,
+}
+
+impl FakeResponse {
+    fn no_content() -> Self {
+        Self {
+            status: "204 No Content",
+            body: "",
+        }
+    }
+}
+
+async fn spawn_fake_emby(responses: Vec<FakeResponse>) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+
+    tokio::spawn(async move {
+        for response in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            captured
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..n]).to_string());
+
+            let raw = format!(
+                "HTTP/1.1 {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response.status,
+                response.body.len(),
+                response.body
+            );
+            socket.write_all(raw.as_bytes()).await.unwrap();
+        }
+    });
+
+    (format!("http://{addr}"), requests)
 }

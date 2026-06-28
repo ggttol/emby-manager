@@ -514,7 +514,7 @@ fn spawn_fix_batch(
     });
 }
 
-async fn fix_poster_one(
+pub async fn fix_poster_one(
     pool: &sqlx::PgPool,
     client: &EmbyClient,
     item_id: &str,
