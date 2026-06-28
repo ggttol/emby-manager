@@ -356,6 +356,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/manage/delete/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["execute_delete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/manage/move": {
         parameters: {
             query?: never;
@@ -1062,6 +1078,18 @@ export interface components {
             ok: boolean;
             token: string;
             username: string;
+        };
+        ManageDeleteExecuteResult: {
+            deleted_from: string[];
+            dry_run: boolean;
+            emby_gone: boolean;
+            folder: string;
+            notified: boolean;
+            ok: boolean;
+            operation: string;
+            preview: boolean;
+            /** Format: uuid */
+            undo_id: string;
         };
         ManageDeleteRequest: {
             folder: string;
@@ -1986,6 +2014,29 @@ export interface operations {
         };
     };
     preview_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManageDeleteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    execute_delete: {
         parameters: {
             query?: never;
             header?: never;

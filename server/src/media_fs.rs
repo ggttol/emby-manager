@@ -15,6 +15,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -145,12 +146,31 @@ pub struct ManagePreviewResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ManageExecuteQuery {
+    pub execute: Option<bool>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ManageDeleteExecuteResult {
+    pub ok: bool,
+    pub preview: bool,
+    pub dry_run: bool,
+    pub operation: String,
+    pub folder: String,
+    pub emby_gone: bool,
+    pub deleted_from: Vec<String>,
+    pub notified: bool,
+    pub undo_id: Uuid,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/libraries", get(libraries))
         .route("/api/v2/libraries/scan", post(scan_library))
         .route("/api/v2/libraries/strm", get(list_strm))
-        .route("/api/v2/manage/delete", post(preview_delete))
+        .route("/api/v2/manage/delete", post(manage_delete))
+        .route("/api/v2/manage/delete/execute", post(execute_delete))
         .route("/api/v2/manage/move", post(preview_move))
 }
 
@@ -276,6 +296,43 @@ pub async fn preview_delete(
     Ok(Json(task))
 }
 
+pub async fn manage_delete(
+    State(state): State<AppState>,
+    Query(query): Query<ManageExecuteQuery>,
+    Json(req): Json<ManageDeleteRequest>,
+) -> AppResult<Json<TaskRun>> {
+    if query.execute.unwrap_or(false) {
+        execute_delete(State(state), Json(req)).await
+    } else {
+        preview_delete(State(state), Json(req)).await
+    }
+}
+
+#[utoipa::path(post, path = "/api/v2/manage/delete/execute", tag = "media", request_body = ManageDeleteRequest, responses((status = 200, body = TaskRun)))]
+pub async fn execute_delete(
+    State(state): State<AppState>,
+    Json(req): Json<ManageDeleteRequest>,
+) -> AppResult<Json<TaskRun>> {
+    let plan = plan_delete_execute(&state, &req)?;
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    ensure_api_key_configured(&api_key)?;
+
+    let params = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
+    let label = format!("删除: {}/{}", req.lib.trim(), req.folder.trim());
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "manage_delete_execute",
+        &label,
+        4,
+        "manual",
+        params,
+    )
+    .await?;
+    spawn_delete_execute(state, task.id, emby_url, api_key, req, plan);
+    Ok(Json(task))
+}
+
 #[utoipa::path(post, path = "/api/v2/manage/move", tag = "media", request_body = ManageMoveRequest, responses((status = 200, body = TaskRun)))]
 pub async fn preview_move(
     State(state): State<AppState>,
@@ -366,6 +423,145 @@ fn spawn_manage_preview(
     });
 }
 
+fn spawn_delete_execute(
+    state: AppState,
+    id: Uuid,
+    emby_url: String,
+    api_key: String,
+    req: ManageDeleteRequest,
+    plan: DeleteExecutePlan,
+) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, id, "任务并发槽不可用", None).await;
+            return;
+        };
+        if tasks::cancel_requested(&state.pool, id).await {
+            let _ = tasks::finish_cancelled(&state.pool, id).await;
+            return;
+        }
+        let _ = tasks::mark_running(&state.pool, id, "先删除 Emby Item").await;
+        let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+        match run_delete_execute(&state, id, &client, req, plan).await {
+            Ok(result) => {
+                let _ = tasks::finish_done(
+                    &state.pool,
+                    id,
+                    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+                )
+                .await;
+            }
+            Err(err) if err.to_string() == TASK_CANCELLED_SENTINEL => {}
+            Err(err) => {
+                let _ = tasks::finish_error(&state.pool, id, &err.to_string(), None).await;
+            }
+        }
+    });
+}
+
+async fn run_delete_execute(
+    state: &AppState,
+    id: Uuid,
+    client: &EmbyClient,
+    req: ManageDeleteRequest,
+    plan: DeleteExecutePlan,
+) -> AppResult<ManageDeleteExecuteResult> {
+    tasks::set_total(&state.pool, id, 4).await?;
+    if tasks::cancel_requested(&state.pool, id).await {
+        tasks::finish_cancelled(&state.pool, id).await?;
+        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+    }
+
+    let mut emby_gone = true;
+    if let Some(item_id) = req.item_id.as_deref().and_then(non_empty_trimmed) {
+        client.delete_item(item_id).await?;
+        emby_gone = verify_emby_delete(client, item_id).await;
+    }
+    tasks::set_progress(&state.pool, id, 1, "Emby Item 删除请求已完成").await?;
+    if tasks::cancel_requested(&state.pool, id).await {
+        tasks::finish_cancelled(&state.pool, id).await?;
+        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+    }
+
+    let deleted_from = delete_planned_paths(&plan).await?;
+    tasks::set_progress(&state.pool, id, 2, "磁盘删除已完成").await?;
+    if tasks::cancel_requested(&state.pool, id).await {
+        tasks::finish_cancelled(&state.pool, id).await?;
+        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+    }
+
+    let notified = if deleted_from.is_empty() {
+        false
+    } else {
+        client.notify_media_deleted(&plan.emby_deleted_path).await?;
+        true
+    };
+    tasks::set_progress(&state.pool, id, 3, "Emby Deleted 通知已处理").await?;
+
+    let undo_id = Uuid::new_v4();
+    let payload = serde_json::json!({
+        "lib": req.lib.trim(),
+        "folder": req.folder.trim(),
+        "deleted_from": deleted_from,
+    });
+    sqlx::query("INSERT INTO undo_entries(id, op, payload) VALUES ($1, 'delete', $2)")
+        .bind(undo_id)
+        .bind(payload)
+        .execute(&state.pool)
+        .await?;
+    tasks::set_progress(&state.pool, id, 4, "undo log 已写入").await?;
+
+    Ok(ManageDeleteExecuteResult {
+        ok: true,
+        preview: false,
+        dry_run: false,
+        operation: "delete".to_string(),
+        folder: req.folder.trim().to_string(),
+        emby_gone,
+        deleted_from,
+        notified,
+        undo_id,
+    })
+}
+
+async fn verify_emby_delete(client: &EmbyClient, item_id: &str) -> bool {
+    match client.item_exists(item_id).await {
+        Ok(false) => true,
+        Ok(true) => {
+            sleep(Duration::from_millis(500)).await;
+            let _ = client.delete_item(item_id).await;
+            match client.item_exists(item_id).await {
+                Ok(exists) => !exists,
+                Err(_) => true,
+            }
+        }
+        Err(_) => true,
+    }
+}
+
+async fn delete_planned_paths(plan: &DeleteExecutePlan) -> AppResult<Vec<String>> {
+    let mut deleted_from = Vec::new();
+    for (path, label) in [(&plan.cd_target, "115"), (&plan.strm_target, "strm")] {
+        if !path.exists() {
+            continue;
+        }
+        let metadata = tokio::fs::symlink_metadata(path)
+            .await
+            .map_err(anyhow::Error::from)?;
+        if metadata.is_dir() {
+            tokio::fs::remove_dir_all(path)
+                .await
+                .map_err(anyhow::Error::from)?;
+        } else {
+            tokio::fs::remove_file(path)
+                .await
+                .map_err(anyhow::Error::from)?;
+        }
+        deleted_from.push(label.to_string());
+    }
+    Ok(deleted_from)
+}
+
 fn plan_delete(state: &AppState, req: &ManageDeleteRequest) -> AppResult<Vec<PathBuf>> {
     let lib_root = safe_under(
         &state.settings.strm_root,
@@ -373,6 +569,28 @@ fn plan_delete(state: &AppState, req: &ManageDeleteRequest) -> AppResult<Vec<Pat
     )?;
     let target = safe_under(&lib_root, required_segment(&req.folder, "folder")?)?;
     Ok(vec![target])
+}
+
+#[derive(Debug, Clone)]
+struct DeleteExecutePlan {
+    cd_target: PathBuf,
+    strm_target: PathBuf,
+    emby_deleted_path: String,
+}
+
+fn plan_delete_execute(
+    state: &AppState,
+    req: &ManageDeleteRequest,
+) -> AppResult<DeleteExecutePlan> {
+    let lib = required_segment(&req.lib, "lib")?;
+    let folder = required_segment(&req.folder, "folder")?;
+    let cd_lib = safe_under(&state.settings.cd_root, lib)?;
+    let strm_lib = safe_under(&state.settings.strm_root, lib)?;
+    Ok(DeleteExecutePlan {
+        cd_target: safe_under(&cd_lib, folder)?,
+        strm_target: safe_under(&strm_lib, folder)?,
+        emby_deleted_path: format!("/strm/{lib}/{folder}"),
+    })
 }
 
 fn plan_move(state: &AppState, req: &ManageMoveRequest) -> AppResult<Vec<PathBuf>> {

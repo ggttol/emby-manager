@@ -313,6 +313,49 @@ impl EmbyClient {
         self.post_empty("/Library/Refresh", &[]).await
     }
 
+    pub async fn delete_item(&self, item_id: &str) -> anyhow::Result<u16> {
+        if item_id.trim().is_empty() {
+            bail!("item_id is required for Emby delete");
+        }
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let path = format!("/Items/{}", urlencoding::encode(item_id.trim()));
+        let url = format!("{}{}", self.base_url, path);
+        let status = self
+            .http
+            .delete(url)
+            .query(&[("api_key", self.api_key.as_str())])
+            .send()
+            .await
+            .with_context(|| format!("failed to call Emby {path}"))?
+            .error_for_status()
+            .with_context(|| format!("Emby {path} returned an error"))?
+            .status();
+        Ok(status.as_u16())
+    }
+
+    pub async fn item_exists(&self, item_id: &str) -> anyhow::Result<bool> {
+        if item_id.trim().is_empty() {
+            bail!("item_id is required for Emby item lookup");
+        }
+        let page = self.items_by_ids_limited(item_id.trim(), "", 1).await?;
+        Ok(!page.items.is_empty())
+    }
+
+    pub async fn notify_media_deleted(&self, path: &str) -> anyhow::Result<u16> {
+        if path.trim().is_empty() {
+            bail!("path is required for Emby media deleted notification");
+        }
+        let body = serde_json::json!({
+            "Updates": [{
+                "Path": path.trim(),
+                "UpdateType": "Deleted"
+            }]
+        });
+        self.post_json_status("/Library/Media/Updated", &body).await
+    }
+
     pub async fn refresh_item(
         &self,
         item_id: &str,
@@ -577,10 +620,20 @@ impl EmbyClient {
     }
 
     async fn items_by_ids(&self, ids: &str, fields: &str) -> anyhow::Result<EmbyItemsPage> {
+        self.items_by_ids_limited(ids, fields, 100).await
+    }
+
+    async fn items_by_ids_limited(
+        &self,
+        ids: &str,
+        fields: &str,
+        limit: usize,
+    ) -> anyhow::Result<EmbyItemsPage> {
         if !self.has_api_key() {
             bail!("api_key is not configured for Emby requests");
         }
         let url = format!("{}/Items", self.base_url);
+        let limit = limit.clamp(1, 100_000).to_string();
         Ok(self
             .http
             .get(url)
@@ -588,6 +641,7 @@ impl EmbyClient {
                 ("api_key", self.api_key.as_str()),
                 ("Ids", ids),
                 ("Fields", fields),
+                ("Limit", limit.as_str()),
             ])
             .send()
             .await

@@ -2,6 +2,7 @@ import { ArrowRight, CheckCircle2, FileWarning, FolderInput, RefreshCw, RotateCc
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { ConfirmDanger } from './Modal';
 import { useToast } from './Toast';
 
 type EmbyLibrary = components['schemas']['EmbyLibrary'];
@@ -71,6 +72,7 @@ export function ManagePanel() {
   const [moveReason, setMoveReason] = useState('');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState<'delete' | 'move' | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState('');
   const [lastTask, setLastTask] = useState<TaskRun | null>(null);
   const toast = useToast();
@@ -139,6 +141,36 @@ export function ManagePanel() {
     }
   };
 
+  const executeDelete = async () => {
+    if (!deleteLib.trim() || !deleteFolder.trim()) {
+      toast.push('先填写库名和 folder', 'warn');
+      return;
+    }
+    setConfirmDelete(false);
+    setSubmitting('delete');
+    setError('');
+    try {
+      const payload: ManageDeleteRequest = {
+        lib: deleteLib.trim(),
+        folder: deleteFolder.trim(),
+        item_id: deleteItemId.trim() || null,
+        reason: deleteReason.trim() || null
+      };
+      const task = await api<TaskRun>('/api/v2/manage/delete/execute', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      setLastTask(task);
+      toast.push(`已创建真实删除任务：${task.label || task.kind}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`真实删除任务创建失败：${message}`, 'error');
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
   const submitMove = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!fromLib.trim() || !fromFolder.trim() || !toLib.trim()) {
@@ -183,10 +215,24 @@ export function ManagePanel() {
 
   return (
     <section className="managePanel">
+      {confirmDelete && (
+        <ConfirmDanger
+          title="确认真实删除"
+          confirmText="确认删除"
+          onCancel={() => setConfirmDelete(false)}
+          onConfirm={executeDelete}
+          body={(
+            <div className="dangerCopy">
+              <p>将先删除 Emby Item，再删除媒体目录和 STRM 目录，并写入 undo 记录。</p>
+              <code>{deleteLib.trim()}/{deleteFolder.trim()}</code>
+            </div>
+          )}
+        />
+      )}
       <div className="manageToolbar">
         <div>
-          <strong>删除·移动预览</strong>
-          <span>当前 Rust 版只生成 dry-run 任务，不删除文件、不移动目录、不调用 Emby DELETE。</span>
+          <strong>删除·移动</strong>
+          <span>删除支持预览和真实执行；移动仍保持 dry-run 预览。</span>
         </div>
         <button className="btn ghost" onClick={load} disabled={loading}>
           <RefreshCw size={16} />
@@ -195,7 +241,7 @@ export function ManagePanel() {
       </div>
 
       <div className="notice warn scanNotice">
-        真实危险写路径尚未接入。后端仍会做路径防穿越校验；预览任务结果请在任务中心查看。
+        真实删除会按“先 Emby DELETE，再动磁盘”的顺序执行；请先生成预览并核对路径。
       </div>
       {error && <div className="notice warn whitespaceNotice">{error}</div>}
 
@@ -203,8 +249,8 @@ export function ManagePanel() {
         <article className="statCard warn">
           <div><FileWarning /></div>
           <span>写操作</span>
-          <strong>未启用</strong>
-          <small>dry-run preview only</small>
+          <strong>删除可执行</strong>
+          <small>move remains preview</small>
         </article>
         <article className="statCard neutral">
           <div><RotateCcw /></div>
@@ -220,7 +266,7 @@ export function ManagePanel() {
         </article>
         <article className={`statCard ${lastTask ? 'ok' : 'neutral'}`}>
           <div><CheckCircle2 /></div>
-          <span>最近预览</span>
+          <span>最近任务</span>
           <strong>{lastTask?.status || '无'}</strong>
           <small>{lastTask?.id || '尚未创建任务'}</small>
         </article>
@@ -230,7 +276,7 @@ export function ManagePanel() {
         <form className="manageForm" onSubmit={submitDelete}>
           <div className="manageFormHead">
             <Trash2 size={18} />
-            <strong>删除预览</strong>
+            <strong>删除</strong>
           </div>
           {renderLibSelect('删除库名', deleteLib, setDeleteLib)}
           <label>
@@ -245,9 +291,14 @@ export function ManagePanel() {
             <span>原因</span>
             <input className="input" aria-label="删除原因" value={deleteReason} onChange={(event) => setDeleteReason(event.target.value)} placeholder="可选，写入预览参数" />
           </label>
-          <button className="btn" disabled={submitting !== null}>
-            {submitting === 'delete' ? '创建中' : '生成删除预览任务'}
-          </button>
+          <div className="inlineActions">
+            <button className="btn" disabled={submitting !== null}>
+              {submitting === 'delete' ? '创建中' : '生成删除预览任务'}
+            </button>
+            <button type="button" className="btn danger" disabled={submitting !== null} onClick={() => setConfirmDelete(true)}>
+              真实删除
+            </button>
+          </div>
         </form>
 
         <form className="manageForm" onSubmit={submitMove}>
@@ -281,7 +332,7 @@ export function ManagePanel() {
 
       {lastTask && (
         <section className="readonlyBlock">
-          <h2>最近预览任务</h2>
+          <h2>最近任务</h2>
           <div className="taskMeta manageTaskMeta">
             <div><dt>任务</dt><dd>{lastTask.label || lastTask.kind}</dd></div>
             <div><dt>状态</dt><dd>{lastTask.status}</dd></div>

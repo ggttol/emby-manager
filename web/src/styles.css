@@ -2367,6 +2367,34 @@ main {
   color: var(--accent);
 }
 
+.inlineActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.inlineActions .btn {
+  flex: 1 1 160px;
+}
+
+.dangerCopy {
+  display: grid;
+  gap: 8px;
+}
+
+.dangerCopy p {
+  margin: 0;
+}
+
+.dangerCopy code {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
 .manageTaskMeta {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }

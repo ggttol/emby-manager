@@ -138,10 +138,12 @@ fn openapi_registers_manage_preview_paths_and_schemas() {
     let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
     let paths = doc["paths"].as_object().unwrap();
     assert!(paths.contains_key("/api/v2/manage/delete"));
+    assert!(paths.contains_key("/api/v2/manage/delete/execute"));
     assert!(paths.contains_key("/api/v2/manage/move"));
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();
     assert!(schemas.contains_key("ManageDeleteRequest"));
+    assert!(schemas.contains_key("ManageDeleteExecuteResult"));
     assert!(schemas.contains_key("ManageMoveRequest"));
     assert!(schemas.contains_key("ManagePreviewResult"));
 }

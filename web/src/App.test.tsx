@@ -873,6 +873,7 @@ describe('App shell', () => {
 
   it('creates delete preview tasks from the manage panel with csrf', async () => {
     let previewPayload: unknown = null;
+    let executePayload: unknown = null;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/libraries') {
         return jsonResponse({
@@ -920,14 +921,36 @@ describe('App shell', () => {
           source: 'api'
         });
       }
+      if (url.pathname === '/api/v2/manage/delete/execute') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        executePayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+          kind: 'manage_delete_execute',
+          label: '删除: 电影/旧电影',
+          status: 'pending',
+          progress: 0,
+          total: 4,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
       return undefined;
     });
 
     render(<App />);
 
     fireEvent.click(await screen.findByRole('button', { name: '删除·移动' }));
-    expect(await screen.findByText('删除·移动预览')).toBeInTheDocument();
-    expect(screen.getByText(/真实危险写路径尚未接入/)).toBeInTheDocument();
+    expect(await screen.findByText(/先 Emby DELETE，再动磁盘/)).toBeInTheDocument();
     expect(screen.getByText('legacy-1')).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('删除库名'), { target: { value: '电影' } });
@@ -943,6 +966,18 @@ describe('App shell', () => {
       reason: '重复资源'
     }));
     expect(await screen.findByText('删除预览: 电影/旧电影')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '真实删除' }));
+    expect(await screen.findByText('确认真实删除')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认删除' }));
+
+    await waitFor(() => expect(executePayload).toEqual({
+      lib: '电影',
+      folder: '旧电影',
+      item_id: 'item-1',
+      reason: '重复资源'
+    }));
+    expect(await screen.findByText('删除: 电影/旧电影')).toBeInTheDocument();
   });
 
   it('loads and saves Emby user policy from the users tab', async () => {

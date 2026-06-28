@@ -23,8 +23,9 @@ use crate::{
     },
     logs::{AppLogEntry, LogListQuery, LogListResponse},
     media_fs::{
-        LibrariesResponse, ManageDeleteRequest, ManageMoveRequest, ManagePreviewResult,
-        ScanLibraryItemResult, ScanLibraryRequest, ScanLibraryResult, StrmEntry, StrmListResponse,
+        LibrariesResponse, ManageDeleteExecuteResult, ManageDeleteRequest, ManageMoveRequest,
+        ManagePreviewResult, ScanLibraryItemResult, ScanLibraryRequest, ScanLibraryResult,
+        StrmEntry, StrmListResponse,
     },
     posters::{
         PosterApplyRequest, PosterApplyResponse, PosterDetectRequest, PosterDetectResponse,
@@ -70,6 +71,7 @@ use utoipa::OpenApi;
         crate::media_fs::scan_library,
         crate::media_fs::list_strm,
         crate::media_fs::preview_delete,
+        crate::media_fs::execute_delete,
         crate::media_fs::preview_move,
         crate::posters::detect_mismatch,
         crate::posters::search,
@@ -127,6 +129,7 @@ use utoipa::OpenApi;
         ScanLibraryResult,
         ScanLibraryItemResult,
         ManageDeleteRequest,
+        ManageDeleteExecuteResult,
         ManageMoveRequest,
         ManagePreviewResult,
         StrmEntry,
