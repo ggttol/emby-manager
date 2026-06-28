@@ -388,6 +388,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/posters/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["apply"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/posters/detect-mismatch": {
         parameters: {
             query?: never;
@@ -398,6 +414,38 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["detect_mismatch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/posters/fix-batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["fix_batch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/posters/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["search"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1031,6 +1079,24 @@ export interface components {
             module: string;
             ok: boolean;
         };
+        PosterApplyRequest: {
+            id: string;
+            name?: string | null;
+            tmdb: string;
+            type: string;
+        };
+        PosterApplyResponse: {
+            /** Format: int32 */
+            apply_status: number;
+            /** Format: int32 */
+            image_download_status?: number | null;
+            name: string;
+            ok: boolean;
+            poster: boolean;
+            /** Format: int32 */
+            refresh_status: number;
+            tmdb: string;
+        };
         PosterDetectRequest: {
             include_missing_primary?: boolean | null;
             lib?: string | null;
@@ -1046,6 +1112,40 @@ export interface components {
             total: number;
             truncated: boolean;
             warnings: string[];
+        };
+        PosterFixBatchRequest: {
+            ids: string[];
+            type: string;
+        };
+        PosterFixBatchResult: {
+            ok_count: number;
+            results: components["schemas"]["PosterFixOneResult"][];
+            total: number;
+        };
+        PosterFixOneResult: {
+            err: string;
+            id: string;
+            name: string;
+            ok: boolean;
+            tmdb?: string | null;
+        };
+        PosterSearchCandidate: {
+            img: string;
+            name: string;
+            overview: string;
+            tmdb: string;
+            /** Format: int32 */
+            year?: number | null;
+        };
+        PosterSearchRequest: {
+            id: string;
+            limit?: number | null;
+            name: string;
+            type: string;
+        };
+        PosterSearchResponse: {
+            candidates: components["schemas"]["PosterSearchCandidate"][];
+            ok: boolean;
         };
         PosterSignal: {
             kind: string;
@@ -1890,6 +1990,29 @@ export interface operations {
             };
         };
     };
+    apply: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PosterApplyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PosterApplyResponse"];
+                };
+            };
+        };
+    };
     detect_mismatch: {
         parameters: {
             query?: never;
@@ -1909,6 +2032,52 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PosterDetectResponse"];
+                };
+            };
+        };
+    };
+    fix_batch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PosterFixBatchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    search: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PosterSearchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PosterSearchResponse"];
                 };
             };
         };

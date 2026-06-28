@@ -1914,6 +1914,14 @@ main {
   gap: 12px;
 }
 
+.postersToolbarActions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 .postersToolbar > div {
   display: grid;
   gap: 3px;
@@ -1960,7 +1968,7 @@ main {
 }
 
 .postersTable {
-  min-width: 980px;
+  min-width: 1180px;
 }
 
 .postersTable td strong,
@@ -1996,6 +2004,73 @@ main {
   max-width: 310px;
   overflow-wrap: anywhere;
   text-transform: none;
+}
+
+.posterActions {
+  display: grid;
+  gap: 8px;
+  min-width: 220px;
+}
+
+.posterManualApply {
+  display: grid;
+  grid-template-columns: minmax(86px, 1fr) auto;
+  gap: 6px;
+}
+
+.posterManualApply .input {
+  min-height: 32px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.posterCandidates {
+  display: grid;
+  gap: 6px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.posterCandidate {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 2px 8px;
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.posterCandidate:hover:not(:disabled) {
+  border-color: #94c5bc;
+  background: #edf6f3;
+}
+
+.posterCandidate img,
+.posterCandidate > span {
+  grid-row: 1 / span 2;
+  width: 42px;
+  height: 62px;
+  border-radius: 6px;
+  background: #dfe5da;
+  object-fit: cover;
+}
+
+.posterCandidate strong,
+.posterCandidate small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.posterCandidate small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .insightPanel,
@@ -2418,6 +2493,7 @@ main {
   .postersToolbar,
   .postersResultHead,
   .postersFilterBar,
+  .postersToolbarActions,
   .insightToolbar,
   .manageToolbar,
   .manageForms,

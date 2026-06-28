@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, ImageOff, RefreshCw, SearchCheck } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ImageOff, RefreshCw, SearchCheck, Wand2 } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
@@ -8,7 +8,11 @@ type EmbyLibrary = components['schemas']['EmbyLibrary'];
 type LibrariesResponse = components['schemas']['LibrariesResponse'];
 type PosterDetectRequest = components['schemas']['PosterDetectRequest'];
 type PosterDetectResponse = components['schemas']['PosterDetectResponse'];
+type PosterApplyResponse = components['schemas']['PosterApplyResponse'];
+type PosterSearchCandidate = components['schemas']['PosterSearchCandidate'];
+type PosterSearchResponse = components['schemas']['PosterSearchResponse'];
 type PosterSignalItem = components['schemas']['PosterSignalItem'];
+type TaskRun = components['schemas']['TaskRun'];
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -40,6 +44,10 @@ export function PostersPanel() {
   const [result, setResult] = useState<PosterDetectResponse | null>(null);
   const [loadingLibraries, setLoadingLibraries] = useState(true);
   const [scanning, setScanning] = useState(false);
+  const [rowLoading, setRowLoading] = useState<string | null>(null);
+  const [batchStarting, setBatchStarting] = useState(false);
+  const [candidates, setCandidates] = useState<Record<string, PosterSearchCandidate[]>>({});
+  const [manualTmdb, setManualTmdb] = useState<Record<string, string>>({});
   const [error, setError] = useState('');
   const toast = useToast();
 
@@ -86,6 +94,8 @@ export function PostersPanel() {
         body: JSON.stringify(payload)
       });
       setResult(data);
+      setCandidates({});
+      setManualTmdb({});
       toast.push(`海报检测完成：${count(data.total)} 条信号`, data.total ? 'warn' : 'ok');
     } catch (e) {
       const message = errorMessage(e);
@@ -96,21 +106,138 @@ export function PostersPanel() {
     }
   };
 
+  const searchName = (item: PosterSignalItem) => item.folder_clean || item.folder || item.name || item.emby_name;
+
+  const searchItem = async (item: PosterSignalItem) => {
+    setRowLoading(item.id);
+    setError('');
+    try {
+      const data = await api<PosterSearchResponse>('/api/v2/posters/search', {
+        method: 'POST',
+        body: JSON.stringify({
+          id: item.id,
+          name: searchName(item),
+          type: item.type,
+          limit: 8
+        })
+      });
+      const sorted = [...data.candidates].sort((a, b) => Number(Boolean(b.img)) - Number(Boolean(a.img)));
+      setCandidates((prev) => ({ ...prev, [item.id]: sorted }));
+      toast.push(sorted.length ? `找到 ${sorted.length} 个候选` : '没有搜到候选', sorted.length ? 'ok' : 'warn');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`海报搜索失败：${message}`, 'error');
+    } finally {
+      setRowLoading(null);
+    }
+  };
+
+  const removeResolvedItem = (item: PosterSignalItem) => {
+    setResult((prev) => {
+      if (!prev) return prev;
+      const wasMismatch = item.signals.some((signal) => signal.kind !== 'missing_primary');
+      return {
+        ...prev,
+        total: Math.max(0, prev.total - 1),
+        missing_primary_total: item.has_poster ? prev.missing_primary_total : Math.max(0, prev.missing_primary_total - 1),
+        mismatch_total: wasMismatch ? Math.max(0, prev.mismatch_total - 1) : prev.mismatch_total,
+        items: prev.items.filter((row) => row.id !== item.id)
+      };
+    });
+    setCandidates((prev) => {
+      const next = { ...prev };
+      delete next[item.id];
+      return next;
+    });
+  };
+
+  const applyItem = async (item: PosterSignalItem, tmdb: string) => {
+    const value = tmdb.trim();
+    if (!value) {
+      toast.push('先选择或填写 tmdbid', 'warn');
+      return;
+    }
+    setRowLoading(item.id);
+    setError('');
+    try {
+      const data = await api<PosterApplyResponse>('/api/v2/posters/apply', {
+        method: 'POST',
+        body: JSON.stringify({
+          id: item.id,
+          tmdb: value,
+          type: item.type,
+          name: item.name || item.emby_name
+        })
+      });
+      if (data.poster) {
+        toast.push(`已修复「${data.name || item.name}」海报`, 'ok');
+        removeResolvedItem(item);
+      } else {
+        toast.push(`已绑定 ${data.tmdb}，但 Primary poster 还没拉到`, 'warn');
+      }
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`海报应用失败：${message}`, 'error');
+    } finally {
+      setRowLoading(null);
+    }
+  };
+
+  const startBatch = async () => {
+    const items = (result?.items || []).filter((item) => item.id);
+    if (!items.length) {
+      toast.push('当前没有可批量处理的条目', 'warn');
+      return;
+    }
+    const groups = items.reduce<Record<string, string[]>>((acc, item) => {
+      const kind = item.type === 'Series' ? 'Series' : 'Movie';
+      acc[kind] = [...(acc[kind] || []), item.id];
+      return acc;
+    }, {});
+    setBatchStarting(true);
+    setError('');
+    try {
+      const tasks: TaskRun[] = [];
+      for (const [kind, ids] of Object.entries(groups)) {
+        const task = await api<TaskRun>('/api/v2/posters/fix-batch', {
+          method: 'POST',
+          body: JSON.stringify({ ids, type: kind })
+        });
+        tasks.push(task);
+      }
+      toast.push(`已创建 ${tasks.length} 个海报批量任务，打开任务中心查看进度`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`批量海报任务创建失败：${message}`, 'error');
+    } finally {
+      setBatchStarting(false);
+    }
+  };
+
   return (
     <section className="postersPanel">
       <div className="postersToolbar">
         <div>
           <strong>海报检测工作台</strong>
-          <span>当前 Rust 版只检测缺 Primary poster 和 folder tmdbid 绑定异常；搜索与批量修复尚未接入。</span>
+          <span>检测缺 Primary poster 和 folder tmdbid 绑定异常，可重搜候选、手动绑定或启动批量自动修复。</span>
         </div>
-        <button className="btn ghost" onClick={loadLibraries} disabled={loadingLibraries}>
-          <RefreshCw size={16} />
-          {loadingLibraries ? '加载中' : '刷新库'}
-        </button>
+        <div className="postersToolbarActions">
+          <button className="btn ghost" onClick={loadLibraries} disabled={loadingLibraries}>
+            <RefreshCw size={16} />
+            {loadingLibraries ? '加载中' : '刷新库'}
+          </button>
+          <button className="btn ghost" onClick={startBatch} disabled={batchStarting || !(result?.items || []).length}>
+            <Wand2 size={16} />
+            {batchStarting ? '创建中' : '批量自动修复'}
+          </button>
+        </div>
       </div>
 
       <div className="notice warn scanNotice">
-        修复动作未接入 Rust：这里不会改 Emby 元数据、不会下载 poster，也不会批量 Apply。确认信号后仍需回旧版或手工处理。
+        Apply 会改 Emby ProviderIds.Tmdb 并触发 FullRefresh；Rust 会先写 rebind undo 记录。批量自动修复按旧版保守策略串行执行，只接受名字匹配且带图的候选。
       </div>
 
       <form className="postersFilterBar" onSubmit={runDetect}>
@@ -206,6 +333,7 @@ export function PostersPanel() {
                 <th>目录</th>
                 <th>Tmdb</th>
                 <th>信号</th>
+                <th>操作</th>
               </tr>
             </thead>
             <tbody>
@@ -235,6 +363,41 @@ export function PostersPanel() {
                         </span>
                       ))}
                       {item.reasons.map((reason) => <small key={reason}>{reason}</small>)}
+                    </div>
+                  </td>
+                  <td>
+                    <div className="posterActions">
+                      <button className="btn compact ghost" onClick={() => searchItem(item)} disabled={rowLoading === item.id || !item.id}>
+                        {rowLoading === item.id ? '处理中' : '重搜候选'}
+                      </button>
+                      <div className="posterManualApply">
+                        <input
+                          className="input"
+                          aria-label={`${item.emby_name} 手动 tmdbid`}
+                          value={manualTmdb[item.id] || ''}
+                          onChange={(event) => setManualTmdb((prev) => ({ ...prev, [item.id]: event.target.value }))}
+                          placeholder="tmdbid"
+                        />
+                        <button className="btn compact" onClick={() => applyItem(item, manualTmdb[item.id] || '')} disabled={rowLoading === item.id}>
+                          绑定
+                        </button>
+                      </div>
+                      {(candidates[item.id] || []).length > 0 && (
+                        <div className="posterCandidates">
+                          {(candidates[item.id] || []).map((candidate) => (
+                            <button
+                              className="posterCandidate"
+                              key={`${item.id}-${candidate.tmdb}-${candidate.name}`}
+                              onClick={() => applyItem(item, candidate.tmdb)}
+                              disabled={rowLoading === item.id || !candidate.tmdb}
+                            >
+                              {candidate.img ? <img src={candidate.img} alt="" loading="lazy" /> : <span />}
+                              <strong>{candidate.name || '未命名'} {candidate.year || ''}</strong>
+                              <small>tmdb:{candidate.tmdb || '无'} · {candidate.img ? '有图' : '无图'}</small>
+                            </button>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </td>
                 </tr>

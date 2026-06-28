@@ -68,6 +68,44 @@ struct EmbyItemsPage {
     total_record_count: Option<usize>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct EmbyRemoteSearchCandidate {
+    #[serde(rename = "Name")]
+    pub name: Option<String>,
+    #[serde(rename = "ProductionYear")]
+    pub production_year: Option<i32>,
+    #[serde(rename = "ProviderIds", default)]
+    pub provider_ids: BTreeMap<String, Value>,
+    #[serde(rename = "ImageUrl")]
+    pub image_url: Option<String>,
+    #[serde(rename = "Overview")]
+    pub overview: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteSearchInfo<'a> {
+    #[serde(rename = "Name")]
+    name: &'a str,
+    #[serde(rename = "ProviderIds")]
+    provider_ids: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteSearchRequest<'a> {
+    #[serde(rename = "SearchInfo")]
+    search_info: RemoteSearchInfo<'a>,
+    #[serde(rename = "ItemId")]
+    item_id: &'a str,
+    #[serde(rename = "IncludeDisabledProviders")]
+    include_disabled_providers: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct RemoteSearchApplyRequest<'a> {
+    #[serde(rename = "ProviderIds")]
+    provider_ids: BTreeMap<&'static str, &'a str>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct EmbyLibrary {
     pub id: Option<String>,
@@ -220,6 +258,85 @@ impl EmbyClient {
         .await
     }
 
+    pub async fn item(&self, item_id: &str, fields: &str) -> anyhow::Result<Option<EmbyItem>> {
+        if item_id.trim().is_empty() {
+            bail!("item_id is required for Emby item lookup");
+        }
+        let page = self.items_by_ids(item_id.trim(), fields).await?;
+        Ok(page.items.into_iter().next())
+    }
+
+    pub async fn remote_search(
+        &self,
+        item_id: &str,
+        name: &str,
+        item_type: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<EmbyRemoteSearchCandidate>> {
+        if item_id.trim().is_empty() {
+            bail!("item_id is required for Emby remote search");
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("name is required for Emby remote search");
+        }
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let kind = remote_search_kind(item_type)?;
+        let path = format!("/Items/RemoteSearch/{kind}");
+        let body = RemoteSearchRequest {
+            search_info: RemoteSearchInfo {
+                name,
+                provider_ids: BTreeMap::new(),
+            },
+            item_id: item_id.trim(),
+            include_disabled_providers: true,
+        };
+        let mut candidates: Vec<EmbyRemoteSearchCandidate> = self.post_json(&path, &body).await?;
+        candidates.truncate(limit.min(50));
+        Ok(candidates)
+    }
+
+    pub async fn apply_remote_search(&self, item_id: &str, tmdb: &str) -> anyhow::Result<u16> {
+        if item_id.trim().is_empty() {
+            bail!("item_id is required for Emby remote search apply");
+        }
+        if tmdb.trim().is_empty() {
+            bail!("tmdb is required for Emby remote search apply");
+        }
+        let path = format!(
+            "/Items/RemoteSearch/Apply/{}",
+            urlencoding::encode(item_id.trim())
+        );
+        let body = RemoteSearchApplyRequest {
+            provider_ids: BTreeMap::from([("Tmdb", tmdb.trim())]),
+        };
+        self.post_json_status(&path, &body).await
+    }
+
+    pub async fn download_primary_image(
+        &self,
+        item_id: &str,
+        image_url: &str,
+    ) -> anyhow::Result<u16> {
+        if item_id.trim().is_empty() {
+            bail!("item_id is required for Emby primary image download");
+        }
+        if image_url.trim().is_empty() {
+            bail!("image_url is required for Emby primary image download");
+        }
+        let path = format!(
+            "/Items/{}/RemoteImages/Download",
+            urlencoding::encode(item_id.trim())
+        );
+        self.post_empty(
+            &path,
+            &[("Type", "Primary"), ("ImageUrl", image_url.trim())],
+        )
+        .await
+    }
+
     pub async fn users(&self) -> anyhow::Result<Vec<EmbyUser>> {
         self.get_json("/Users").await
     }
@@ -301,6 +418,51 @@ impl EmbyClient {
             .await?)
     }
 
+    async fn post_json<T, B>(&self, path: &str, body: &B) -> anyhow::Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+        B: Serialize + ?Sized,
+    {
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let url = format!("{}{}", self.base_url, path);
+        Ok(self
+            .http
+            .post(url)
+            .query(&[("api_key", self.api_key.as_str())])
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("failed to call Emby {path}"))?
+            .error_for_status()
+            .with_context(|| format!("Emby {path} returned an error"))?
+            .json()
+            .await?)
+    }
+
+    async fn post_json_status<B>(&self, path: &str, body: &B) -> anyhow::Result<u16>
+    where
+        B: Serialize + ?Sized,
+    {
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let url = format!("{}{}", self.base_url, path);
+        let status = self
+            .http
+            .post(url)
+            .query(&[("api_key", self.api_key.as_str())])
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("failed to call Emby {path}"))?
+            .error_for_status()
+            .with_context(|| format!("Emby {path} returned an error"))?
+            .status();
+        Ok(status.as_u16())
+    }
+
     async fn items_page(
         &self,
         parent_id: &str,
@@ -325,6 +487,28 @@ impl EmbyClient {
                 ("SortBy", "SortName"),
                 ("StartIndex", &start_index.to_string()),
                 ("Limit", &limit.to_string()),
+            ])
+            .send()
+            .await
+            .context("failed to call Emby /Items")?
+            .error_for_status()
+            .context("Emby /Items returned an error")?
+            .json()
+            .await?)
+    }
+
+    async fn items_by_ids(&self, ids: &str, fields: &str) -> anyhow::Result<EmbyItemsPage> {
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let url = format!("{}/Items", self.base_url);
+        Ok(self
+            .http
+            .get(url)
+            .query(&[
+                ("api_key", self.api_key.as_str()),
+                ("Ids", ids),
+                ("Fields", fields),
             ])
             .send()
             .await
@@ -398,5 +582,13 @@ fn push_path(paths: &mut Vec<String>, path: String) {
     let path = path.trim();
     if !path.is_empty() && !paths.iter().any(|existing| existing == path) {
         paths.push(path.to_string());
+    }
+}
+
+fn remote_search_kind(item_type: &str) -> anyhow::Result<&'static str> {
+    match item_type.trim().to_ascii_lowercase().as_str() {
+        "series" | "tvshow" | "tvshows" | "show" => Ok("Series"),
+        "movie" | "movies" => Ok("Movie"),
+        other => bail!("unsupported Emby remote search type: {other}"),
     }
 }

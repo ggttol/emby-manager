@@ -563,8 +563,11 @@ describe('App shell', () => {
     }));
   });
 
-  it('runs poster mismatch detection with csrf and renders readonly repair notice', async () => {
+  it('runs poster detection, search, apply, and batch tasks with csrf', async () => {
     let detectPayload: unknown = null;
+    let searchPayload: unknown = null;
+    let applyPayload: unknown = null;
+    const batchPayloads: unknown[] = [];
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/libraries') {
         return jsonResponse({
@@ -636,6 +639,57 @@ describe('App shell', () => {
           ]
         });
       }
+      if (url.pathname === '/api/v2/posters/search') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        searchPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: true,
+          candidates: [
+            { name: '正确电影', year: 2024, tmdb: '123', img: 'https://img.example/poster.jpg', overview: '候选简介' },
+            { name: '无图电影', year: 2023, tmdb: '124', img: '', overview: '' }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/posters/apply') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        applyPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: true,
+          name: '错绑电影',
+          poster: true,
+          tmdb: '123',
+          apply_status: 204,
+          refresh_status: 204,
+          image_download_status: null
+        });
+      }
+      if (url.pathname === '/api/v2/posters/fix-batch') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        batchPayloads.push(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          id: '12121212-1212-4212-8212-121212121212',
+          kind: 'poster_fix_batch',
+          label: '批量海报修复: Series x 1',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
       return undefined;
     });
 
@@ -643,7 +697,7 @@ describe('App shell', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '海报修复' }));
     expect(await screen.findByText('海报检测工作台')).toBeInTheDocument();
-    expect(screen.getByText(/修复动作未接入 Rust/)).toBeInTheDocument();
+    expect(screen.getByText(/Apply 会改 Emby ProviderIds.Tmdb/)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('海报目标库'), { target: { value: '电影' } });
     fireEvent.change(screen.getByLabelText('海报扫描上限'), { target: { value: '80' } });
@@ -659,6 +713,27 @@ describe('App shell', () => {
     expect(screen.getByText('Emby: 456')).toBeInTheDocument();
     expect(screen.getByText('folder: 123')).toBeInTheDocument();
     expect(screen.getByText('library 电影 was truncated at 80 of unknown items')).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: '重搜候选' })[0]);
+    await waitFor(() => expect(searchPayload).toEqual({
+      id: 'item-1',
+      name: '错绑电影',
+      type: 'Movie',
+      limit: 8
+    }));
+    expect(await screen.findByText('正确电影 2024')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('正确电影 2024'));
+    await waitFor(() => expect(applyPayload).toEqual({
+      id: 'item-1',
+      tmdb: '123',
+      type: 'Movie',
+      name: '错绑电影'
+    }));
+    expect(await screen.findByText('已修复「错绑电影」海报')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '批量自动修复' }));
+    await waitFor(() => expect(batchPayloads).toEqual([{ ids: ['item-2'], type: 'Series' }]));
   });
 
   it('renders zhuigeng and gaps readonly panels through the gaps scan api', async () => {

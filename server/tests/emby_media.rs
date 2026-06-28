@@ -124,6 +124,76 @@ async fn emby_client_triggers_global_library_refresh() {
     );
 }
 
+#[tokio::test]
+async fn emby_client_search_apply_and_download_poster_requests_are_typed_and_encoded() {
+    let candidates = r#"[
+        {
+            "Name": "沙丘",
+            "ProductionYear": 2021,
+            "ProviderIds": {"Tmdb": "438631"},
+            "ImageUrl": "https://image.tmdb.org/t/p/original/poster.jpg?sig=a&b=1",
+            "Overview": "overview"
+        }
+    ]"#;
+    let (base_url, requests) = spawn_fake_emby_many(vec![candidates, "{}", "{}"]).await;
+    let client = EmbyClient::new(base_url, "secret-key", reqwest::Client::new());
+
+    let found = client
+        .remote_search("id?evil=1&x=2#frag", "沙丘", "Movie", 8)
+        .await
+        .unwrap();
+    let apply = client
+        .apply_remote_search("id?evil=1&x=2#frag", "438631")
+        .await
+        .unwrap();
+    let download = client
+        .download_primary_image(
+            "id?evil=1&x=2#frag",
+            "https://image.tmdb.org/t/p/original/poster.jpg?sig=a&b=1",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].provider_ids.get("Tmdb").unwrap(), "438631");
+    assert_eq!(apply, 204);
+    assert_eq!(download, 204);
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[0].starts_with("POST /Items/RemoteSearch/Movie?api_key=secret-key "),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        request_body(&requests[0]).contains("\"ItemId\":\"id?evil=1&x=2#frag\""),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[1].starts_with("POST /Items/RemoteSearch/Apply/id%3Fevil%3D1%26x%3D2%23frag?"),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        request_body(&requests[1]).contains("\"Tmdb\":\"438631\""),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        requests[2].starts_with("POST /Items/id%3Fevil%3D1%26x%3D2%23frag/RemoteImages/Download?"),
+        "{}",
+        requests[2]
+    );
+    assert!(requests[2].contains("Type=Primary"), "{}", requests[2]);
+    assert!(
+        requests[2].contains("ImageUrl=https%3A%2F%2Fimage.tmdb.org"),
+        "{}",
+        requests[2]
+    );
+}
+
 async fn spawn_fake_emby_many(bodies: Vec<&'static str>) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -155,4 +225,8 @@ async fn spawn_fake_emby_many(bodies: Vec<&'static str>) -> (String, Arc<Mutex<V
     });
 
     (format!("http://{addr}"), requests)
+}
+
+fn request_body(request: &str) -> &str {
+    request.split("\r\n\r\n").nth(1).unwrap_or_default()
 }
