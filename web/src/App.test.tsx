@@ -419,6 +419,144 @@ describe('App shell', () => {
     ]);
   });
 
+  it('previews 115 share files and creates save/offline/scan tasks with csrf', async () => {
+    let snapPayload: unknown = null;
+    let savePayload: unknown = null;
+    let offlinePayload: unknown = null;
+    let scanPayload: unknown = null;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/c115/test') {
+        return jsonResponse({ ok: true, uid: '115-user', used: '8.2 TB' });
+      }
+      if (url.pathname === '/api/v2/config') {
+        return jsonResponse({ settings: { c115_cid_map: { 电影: '12345' } } });
+      }
+      if (url.pathname === '/api/v2/c115/snap') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        snapPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: true,
+          share: 'abc',
+          rc: 'urlpw',
+          share_title: 'Share Title',
+          file_size: null,
+          files: [
+            { id: 'fid-1', name: 'Episode 1', size: 1024, is_dir: false },
+            { id: 'fid-2', name: 'Episode 2', size: 2048, is_dir: false }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/c115/save') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        savePayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: '66666666-6666-4666-8666-666666666666',
+          kind: 'c115_save',
+          label: '115 转存: Share Title',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
+      if (url.pathname === '/api/v2/c115/offline') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        offlinePayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: '77777777-7777-4777-8777-777777777777',
+          kind: 'c115_offline',
+          label: '115 离线: magnet',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:01Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:01Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
+      if (url.pathname === '/api/v2/libraries/scan') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        scanPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: '88888888-8888-4888-8888-888888888888',
+          kind: 'scan_library',
+          label: '扫描电影',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:02Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:02Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '115 转存' }));
+    expect(await screen.findByText('UID 115-user · 8.2 TB')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('115 分享链接'), {
+      target: { value: 'https://115.com/s/abc?password=urlpw' }
+    });
+    fireEvent.change(screen.getByLabelText('默认提取码'), { target: { value: 'fallback' } });
+    fireEvent.click(screen.getByRole('button', { name: '先看文件' }));
+
+    expect(await screen.findByText('Share Title')).toBeInTheDocument();
+    expect(snapPayload).toEqual({ url: 'https://115.com/s/abc?password=urlpw', pwd: 'urlpw' });
+    fireEvent.click(screen.getAllByRole('checkbox')[1]);
+    fireEvent.click(screen.getByRole('button', { name: '创建转存任务' }));
+
+    await waitFor(() => expect(savePayload).toEqual({
+      url: 'https://115.com/s/abc?password=urlpw',
+      pwd: 'urlpw',
+      lib: '电影',
+      file_ids: ['fid-1'],
+      label: 'Share Title'
+    }));
+
+    fireEvent.change(screen.getByLabelText('115 离线链接'), { target: { value: 'magnet:?xt=urn:btih:abc' } });
+    fireEvent.click(screen.getByRole('button', { name: '创建离线任务' }));
+
+    await waitFor(() => expect(offlinePayload).toEqual({
+      url: 'magnet:?xt=urn:btih:abc',
+      lib: '电影',
+      label: 'magnet:?xt=urn:btih:abc'
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: '扫目标库' }));
+    await waitFor(() => expect(scanPayload).toEqual({ lib: '电影' }));
+  });
+
   it('shows login panel and enters the shell after login', async () => {
     mockApi((url) => {
       if (url.pathname === '/api/v2/auth/me') {

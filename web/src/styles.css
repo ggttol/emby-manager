@@ -923,6 +923,177 @@ main {
   min-width: 960px;
 }
 
+.c115Panel {
+  display: grid;
+  gap: 14px;
+}
+
+.c115Meta,
+.c115TargetBar,
+.c115OfflineBox,
+.c115SnapHead,
+.c115FileTools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.c115Meta > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.c115Meta strong,
+.c115SnapHead strong,
+.c115AutoCid strong {
+  font-size: 15px;
+}
+
+.c115Meta span,
+.c115SnapHead span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.c115MetaActions {
+  display: flex;
+  gap: 8px;
+}
+
+.c115TargetBar,
+.c115ShareGrid,
+.c115OfflineBox,
+.c115SnapBox,
+.c115AutoCid {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.c115TargetBar {
+  align-items: end;
+}
+
+.c115TargetBar label,
+.c115ShareGrid label,
+.c115OfflineBox label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.c115TargetBar label {
+  min-width: min(280px, 100%);
+}
+
+.c115ShareGrid {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(130px, 180px) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.c115WideField {
+  min-width: 0;
+}
+
+.c115Textarea {
+  min-height: 104px;
+  resize: vertical;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.c115Textarea.small {
+  min-height: 72px;
+}
+
+.c115ActionStack {
+  display: grid;
+  gap: 8px;
+}
+
+.c115SnapBox,
+.c115AutoCid {
+  display: grid;
+  gap: 10px;
+}
+
+.c115FileList {
+  display: grid;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.c115FileRow {
+  display: grid;
+  grid-template-columns: 28px 44px minmax(0, 1fr) minmax(62px, auto);
+  align-items: center;
+  gap: 8px;
+  min-height: 39px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.c115FileRow:last-child {
+  border-bottom: 0;
+}
+
+.c115FileRow input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.c115FileRow strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.c115FileRow em {
+  color: var(--muted);
+  font-style: normal;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.c115OfflineBox {
+  align-items: end;
+}
+
+.c115OfflineBox label {
+  flex: 1 1 320px;
+}
+
+.c115AutoCid > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.badge.warn {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.c115Progress {
+  margin-top: 0;
+}
+
 .catalogTable th:first-child,
 .catalogTable td:first-child {
   width: 64px;
@@ -1171,6 +1342,13 @@ main {
   .catalogResultHead,
   .catalogSearchBar,
   .catalogTargetBar,
+  .c115Meta,
+  .c115MetaActions,
+  .c115TargetBar,
+  .c115ShareGrid,
+  .c115OfflineBox,
+  .c115SnapHead,
+  .c115FileTools,
   .modalActions {
     align-items: stretch;
     flex-direction: column;

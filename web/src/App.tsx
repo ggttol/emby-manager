@@ -22,6 +22,7 @@ import {
 } from './api/client';
 import { TaskCenter } from './components/TaskCenter';
 import { ToastProvider, useToast } from './components/Toast';
+import { C115Panel } from './components/C115Panel';
 import { CatalogPanel } from './components/CatalogPanel';
 import { UsersPanel } from './components/UsersPanel';
 
@@ -163,6 +164,14 @@ function TabPanel({ tab }: { tab: Tab }) {
     return (
       <section className="panel">
         <CatalogPanel />
+      </section>
+    );
+  }
+
+  if (tab.id === 'c115') {
+    return (
+      <section className="panel">
+        <C115Panel />
       </section>
     );
   }
