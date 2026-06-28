@@ -12,8 +12,13 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::{
     env,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 use tokio::time::{Duration, sleep};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -103,6 +108,11 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
     assert_eq!(cleanup["logs"]["errors_7d"], 1);
     assert_eq!(cleanup["strm"]["empty_directory_samples"][0], "Empty");
     assert_eq!(
+        cleanup["cleanup_candidates"].as_array().unwrap().len(),
+        0,
+        "{cleanup}"
+    );
+    assert_eq!(
         cleanup["strm"]["other_file_samples"][0],
         "Shows/Season 1/poster.jpg"
     );
@@ -113,6 +123,178 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
             .iter()
             .any(|todo| todo["area"] == "tasks" && todo["severity"] == "high"),
         "{cleanup}"
+    );
+
+    let libraries = r#"[
+        {
+            "ItemId": "lib-movies",
+            "Name": "Movies",
+            "CollectionType": "movies",
+            "Locations": ["/strm/Movies"]
+        }
+    ]"#;
+    let items = r#"{
+        "Items": [
+            {
+                "Id": "low-old-missing",
+                "Name": "Low Old Missing",
+                "Type": "Movie",
+                "Path": "/strm/Movies/Low Old Missing/movie.strm",
+                "ProductionYear": 1995,
+                "CommunityRating": 4.0,
+                "ProviderIds": {},
+                "ImageTags": {}
+            },
+            {
+                "Id": "good-new",
+                "Name": "Good New",
+                "Type": "Movie",
+                "Path": "/strm/Movies/Good New/movie.strm",
+                "ProductionYear": 2024,
+                "CommunityRating": 8.0,
+                "ProviderIds": {"Tmdb": "123"},
+                "ImageTags": {"Primary": "poster"}
+            },
+            {
+                "Id": "old-missing-meta",
+                "Name": "Old Missing Meta",
+                "Type": "Movie",
+                "Path": "/strm/Movies/Old Missing Meta/movie.strm",
+                "ProductionYear": 2000,
+                "ProviderIds": {},
+                "ImageTags": {}
+            }
+        ],
+        "TotalRecordCount": 3
+    }"#;
+    let (emby_base, emby_requests) =
+        spawn_fake_emby_sequence(vec![libraries, items, libraries, items, libraries, items]).await;
+    configure_emby(&pool, &emby_base).await;
+
+    let (status, _, scored) = send(
+        &app,
+        Method::POST,
+        "/api/v2/cleanup/suggest",
+        Some(json!({
+            "lib": "Movies",
+            "top": 1,
+            "min_score": 50,
+            "dimensions": ["rating", "meta", "age"]
+        })),
+        &[
+            (COOKIE.as_str(), cookie.clone()),
+            ("x-csrf-token", csrf.clone()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{scored}");
+    assert_eq!(scored["cleanup_candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        scored["cleanup_candidates"][0]["item_id"],
+        json!("low-old-missing")
+    );
+    assert!(scored["cleanup_candidates"][0]["score"].as_f64().unwrap() >= 50.0);
+    assert!(scored["cleanup_candidates"][0]["dimensions"]["rating"].is_object());
+    assert!(scored["cleanup_candidates"][0]["dimensions"]["meta"].is_object());
+    assert!(scored["cleanup_candidates"][0]["dimensions"]["age"].is_object());
+    assert!(
+        scored["cleanup_candidates"][0]["dimensions"]["size"].is_null(),
+        "{scored}"
+    );
+
+    let (status, _, meta_only) = send(
+        &app,
+        Method::POST,
+        "/api/v2/cleanup/suggest",
+        Some(json!({
+            "lib": "Movies",
+            "top": 5,
+            "min_score": 20,
+            "dimensions": ["meta"]
+        })),
+        &[
+            (COOKIE.as_str(), cookie.clone()),
+            ("x-csrf-token", csrf.clone()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{meta_only}");
+    assert_eq!(meta_only["cleanup_candidates"].as_array().unwrap().len(), 2);
+    assert!(
+        meta_only["cleanup_candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["dimensions"]["rating"].is_null()
+                && item["dimensions"]["meta"].is_object()),
+        "{meta_only}"
+    );
+
+    let (status, _, size_only) = send(
+        &app,
+        Method::POST,
+        "/api/v2/cleanup/suggest",
+        Some(json!({
+            "lib": "Movies",
+            "top": 1,
+            "dimensions": ["size"]
+        })),
+        &[
+            (COOKIE.as_str(), cookie.clone()),
+            ("x-csrf-token", csrf.clone()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{size_only}");
+    assert_eq!(size_only["cleanup_candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        size_only["cleanup_candidates"][0]["dimensions"]["size"]["warning"],
+        json!("no_safe_local_size_metadata")
+    );
+    assert!(
+        size_only["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap_or_default().contains("size 维度")),
+        "{size_only}"
+    );
+
+    let (status, _, unknown_dimension) = send(
+        &app,
+        Method::POST,
+        "/api/v2/cleanup/suggest",
+        Some(json!({"dimensions": ["bogus"]})),
+        &[
+            (COOKIE.as_str(), cookie.clone()),
+            ("x-csrf-token", csrf.clone()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{unknown_dimension}");
+    assert_eq!(unknown_dimension["code"], json!("bad_request"));
+
+    let emby_requests = emby_requests.lock().unwrap();
+    assert_eq!(emby_requests.len(), 6);
+    assert!(
+        emby_requests[0].starts_with("GET /Library/VirtualFolders?api_key=secret-key"),
+        "{}",
+        emby_requests[0]
+    );
+    assert!(
+        emby_requests[1].starts_with("GET /Items?"),
+        "{}",
+        emby_requests[1]
+    );
+    assert!(
+        emby_requests[1].contains("ParentId=lib-movies"),
+        "{}",
+        emby_requests[1]
+    );
+    assert!(
+        emby_requests[1].contains("IncludeItemTypes=Movie"),
+        "{}",
+        emby_requests[1]
     );
 
     let (status, _, empty_preview) = send(
@@ -192,6 +374,7 @@ fn seed_strm_tree(base: &Path) -> PathBuf {
 async fn reset_and_seed_db(pool: &PgPool) {
     sqlx::query(
         "TRUNCATE sessions, auth_users, task_runs, schedule_jobs, app_logs, catalog_items,
+                  app_settings,
                   autostrm_seen, autostrm_unmatched
          RESTART IDENTITY CASCADE",
     )
@@ -260,6 +443,23 @@ async fn reset_and_seed_db(pool: &PgPool) {
     .expect("seed app_logs");
 }
 
+async fn configure_emby(pool: &PgPool, base_url: &str) {
+    for (key, value) in [
+        ("emby_url", json!(base_url)),
+        ("api_key", json!("secret-key")),
+    ] {
+        sqlx::query(
+            "INSERT INTO app_settings(key, value, updated_at) VALUES ($1, $2, now())
+             ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(pool)
+        .await
+        .expect("save fake Emby config");
+    }
+}
+
 async fn create_test_user(pool: &PgPool) -> String {
     let username = format!("insights_{}", Uuid::new_v4().simple());
     let hash = auth::hash_argon2("secret").unwrap();
@@ -312,6 +512,33 @@ async fn send(
         serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}))
     };
     (status, headers, body)
+}
+
+async fn spawn_fake_emby_sequence(bodies: Vec<&'static str>) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+
+    tokio::spawn(async move {
+        for body in bodies {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            captured
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..n]).to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+
+    (format!("http://{addr}"), requests)
 }
 
 fn request_cookie(headers: &HeaderMap) -> String {

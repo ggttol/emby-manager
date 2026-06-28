@@ -2092,6 +2092,10 @@ main {
   background: var(--surface-soft);
 }
 
+.createLibraryForm {
+  grid-template-columns: minmax(220px, 1fr) minmax(160px, 220px) auto;
+}
+
 .scanGrid label:not(.switchRow) {
   display: grid;
   gap: 5px;

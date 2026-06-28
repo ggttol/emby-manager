@@ -25,7 +25,11 @@ static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[tokio::test]
 async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
     let _guard = DB_LOCK.lock().await;
-    let Some(state) = test_state().await else {
+    let tmp = tempfile::tempdir().unwrap();
+    let cd_root = tmp.path().join("cd");
+    let strm_root = tmp.path().join("strm");
+    prepare_wizard_media_fixture(&cd_root, &strm_root);
+    let Some(state) = test_state_with_roots(cd_root.clone(), strm_root.clone()).await else {
         eprintln!("skipping wizard API DB test; set EMBY_MANAGER_WIZARD_TEST_DATABASE_URL");
         return;
     };
@@ -161,6 +165,40 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
     assert_eq!(
         task["result"]["transfer"]["items"][2]["action"],
         "unsupported"
+    );
+    assert_eq!(task["result"]["strm"]["triggered"], true);
+    assert_eq!(task["result"]["strm"]["lib"], "电影");
+    assert_eq!(task["result"]["strm"]["new_count"], 1);
+    assert_eq!(
+        task["result"]["strm"]["new_folders"]["Share Movie [tmdbid-100]"],
+        1
+    );
+    assert_eq!(task["result"]["dedup"]["triggered"], true);
+    assert_eq!(task["result"]["dedup"]["lib"], "电影");
+    assert_eq!(task["result"]["dedup"]["dups_count"], 0);
+    assert_eq!(task["result"]["dedup"]["review_count"], 0);
+    assert!(
+        task["result"]["dedup"]["dups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|group| group["keep"]["lib"] == "电影"
+                || group["remove"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|row| row["lib"] == "电影")),
+        "{task}"
+    );
+    assert!(
+        strm_root
+            .join("电影/Share Movie [tmdbid-100]/Share Movie.strm")
+            .is_file()
+    );
+    assert!(
+        !strm_root
+            .join("剧集/Other Show [tmdbid-999]/Other Show.strm")
+            .is_file()
     );
     assert_eq!(task["result"]["scan"]["triggered"], true);
     assert_eq!(task["result"]["scan"]["mode"], "library");
@@ -303,6 +341,27 @@ async fn configure_settings(state: &AppState, c115_base: &str, emby_base: &str) 
     }
 }
 
+fn prepare_wizard_media_fixture(cd_root: &std::path::Path, strm_root: &std::path::Path) {
+    let movie_dir = cd_root.join("电影/Share Movie [tmdbid-100]");
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    std::fs::write(movie_dir.join("Share Movie.mkv"), b"movie").unwrap();
+
+    let other_a = strm_root.join("剧集/Other Show [tmdbid-999]");
+    let other_b = strm_root.join("剧集/Other Show Copy [tmdbid-999]");
+    std::fs::create_dir_all(&other_a).unwrap();
+    std::fs::create_dir_all(&other_b).unwrap();
+    std::fs::write(
+        other_a.join("E01.strm"),
+        "/media/剧集/Other Show [tmdbid-999]/E01.mkv",
+    )
+    .unwrap();
+    std::fs::write(
+        other_b.join("E02.strm"),
+        "/media/剧集/Other Show Copy [tmdbid-999]/E02.mkv",
+    )
+    .unwrap();
+}
+
 async fn wait_for_task_status(state: &AppState, id: Uuid, status: &str) -> Value {
     for _ in 0..80 {
         let task: Value =
@@ -367,7 +426,7 @@ async fn spawn_fake_json_server(
     (format!("http://{addr}"), requests, handle)
 }
 
-async fn test_state() -> Option<AppState> {
+async fn test_state_with_roots(cd_root: PathBuf, strm_root: PathBuf) -> Option<AppState> {
     let database_url = wizard_test_database_url()?;
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -381,7 +440,10 @@ async fn test_state() -> Option<AppState> {
         .execute(&pool)
         .await
         .expect("reset wizard test tables");
-    Some(AppState::new(pool, test_settings(database_url)))
+    Some(AppState::new(
+        pool,
+        test_settings_with_roots(database_url, cd_root, strm_root),
+    ))
 }
 
 fn wizard_test_database_url() -> Option<String> {
@@ -392,7 +454,11 @@ fn wizard_test_database_url() -> Option<String> {
     url.to_ascii_lowercase().contains("test").then_some(url)
 }
 
-fn test_settings(database_url: String) -> Settings {
+fn test_settings_with_roots(
+    database_url: String,
+    cd_root: PathBuf,
+    strm_root: PathBuf,
+) -> Settings {
     Settings {
         host: "127.0.0.1".to_string(),
         port: 0,
@@ -400,8 +466,8 @@ fn test_settings(database_url: String) -> Settings {
         web_dist: PathBuf::from("/tmp"),
         legacy_dir: PathBuf::from("/tmp"),
         bootstrap_password: "admin".to_string(),
-        cd_root: PathBuf::from("/tmp/cd"),
-        strm_root: PathBuf::from("/tmp/strm"),
+        cd_root,
+        strm_root,
         docker_bin: PathBuf::from("/usr/bin/docker"),
         task_concurrency: 1,
     }

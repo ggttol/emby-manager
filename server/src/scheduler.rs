@@ -4,7 +4,7 @@ use crate::{
     error::{AppError, AppResult},
     media_fs, posters,
     state::AppState,
-    tasks,
+    tasks, zhuigeng,
 };
 use axum::{
     Json, Router,
@@ -476,70 +476,31 @@ async fn run_scheduled_scan_all(
 async fn run_scheduled_zhuigeng_scan_airing(
     state: &AppState,
     task_id: Uuid,
-    params: &Value,
+    _params: &Value,
 ) -> AppResult<Value> {
-    let client = scheduled_emby_client(state).await?;
-    let keyword = params
-        .get("keyword")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("追更");
-    let libraries = client
-        .libraries()
-        .await?
-        .into_iter()
-        .filter(|library| {
-            library.name.contains(keyword)
-                && library
-                    .id
-                    .as_deref()
-                    .is_some_and(|id| !id.trim().is_empty())
-        })
-        .collect::<Vec<_>>();
-    tasks::set_total(&state.pool, task_id, libraries.len().max(1) as i64).await?;
-    if libraries.is_empty() {
-        tasks::set_progress(&state.pool, task_id, 1, "未找到追更库").await?;
-        return Ok(serde_json::json!({
-            "action": "refresh_airing_libraries",
-            "keyword": keyword,
-            "matched_libraries": 0,
-            "items": [],
-        }));
-    }
+    let response = match zhuigeng::zhuigeng_scan_airing_for_state(state, Some(task_id)).await {
+        Err(AppError::Conflict(message)) if message == zhuigeng::ZHUIGENG_SCAN_AIRING_CANCELLED => {
+            return Err(AppError::Conflict(SCHEDULE_CANCELLED_SENTINEL.to_string()));
+        }
+        other => other?,
+    };
+    Ok(zhuigeng_scan_airing_schedule_detail(response))
+}
 
-    let mut items = Vec::new();
-    for (index, library) in libraries.iter().enumerate() {
-        check_schedule_cancelled(state, task_id).await?;
-        let id = library.id.as_deref().unwrap_or_default();
-        tasks::set_progress(
-            &state.pool,
-            task_id,
-            index as i64,
-            &format!("刷新追更库 {}", library.name),
-        )
-        .await?;
-        let code = client.refresh_item(id, true, false).await?;
-        items.push(serde_json::json!({
-            "lib": library.name,
-            "id": id,
-            "refresh_code": code,
-        }));
-        tasks::set_progress(
-            &state.pool,
-            task_id,
-            (index + 1) as i64,
-            &format!("已刷新追更库 {}/{}", index + 1, libraries.len()),
-        )
-        .await?;
-    }
-
-    Ok(serde_json::json!({
-        "action": "refresh_airing_libraries",
-        "keyword": keyword,
-        "matched_libraries": libraries.len(),
-        "items": items,
-    }))
+pub fn zhuigeng_scan_airing_schedule_detail(
+    response: zhuigeng::ZhuigengScanAiringResponse,
+) -> Value {
+    serde_json::json!({
+        "action": "zhuigeng_scan_airing",
+        "message": "已按 continuing 剧名串行扫描对应追更库",
+        "total": response.total,
+        "ok_count": response.ok_count,
+        "error_count": response.error_count,
+        "new_count": response.new_count,
+        "copy_text": response.copy_text,
+        "note": response.note,
+        "results": response.results,
+    })
 }
 
 async fn run_scheduled_fix_posters_all(

@@ -11,7 +11,7 @@ pub struct EmbyClient {
     http: Client,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EmbyVirtualFolder {
     #[serde(rename = "ItemId")]
     pub item_id: Option<String>,
@@ -25,13 +25,15 @@ pub struct EmbyVirtualFolder {
     pub library_options: Option<EmbyLibraryOptions>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EmbyLibraryOptions {
     #[serde(rename = "PathInfos", default)]
     pub path_infos: Vec<EmbyPathInfo>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EmbyPathInfo {
     #[serde(rename = "Path")]
     pub path: Option<String>,
@@ -76,6 +78,12 @@ pub struct EmbyItemsResult {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct EmbyCleanupItemsResult {
+    pub items: Vec<EmbyCleanupItem>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct EmbyItemsPage {
     #[serde(rename = "Items", default)]
@@ -88,6 +96,42 @@ struct EmbyItemsPage {
 struct EmbyEpisodesPage {
     #[serde(rename = "Items", default)]
     items: Vec<EmbyEpisode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbyCleanupItemsPage {
+    #[serde(rename = "Items", default)]
+    items: Vec<EmbyCleanupItem>,
+    #[serde(rename = "TotalRecordCount")]
+    total_record_count: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmbyCleanupItem {
+    #[serde(rename = "Id")]
+    pub id: Option<String>,
+    #[serde(rename = "Name")]
+    pub name: Option<String>,
+    #[serde(rename = "Path")]
+    pub path: Option<String>,
+    #[serde(rename = "ProductionYear")]
+    pub production_year: Option<i32>,
+    #[serde(rename = "CommunityRating")]
+    pub community_rating: Option<f64>,
+    #[serde(rename = "CriticRating")]
+    pub critic_rating: Option<f64>,
+    #[serde(rename = "UserData")]
+    pub user_data: Option<EmbyCleanupUserData>,
+    #[serde(rename = "ImageTags", default)]
+    pub image_tags: BTreeMap<String, Value>,
+    #[serde(rename = "ProviderIds", default)]
+    pub provider_ids: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmbyCleanupUserData {
+    #[serde(rename = "Rating")]
+    pub rating: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
@@ -142,6 +186,12 @@ struct EmbySetPasswordRequest<'a> {
     current_pw: &'a str,
     #[serde(rename = "NewPw")]
     new_pw: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbyCreateVirtualFolderRequest {
+    #[serde(rename = "LibraryOptions")]
+    library_options: EmbyLibraryOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
@@ -217,6 +267,48 @@ impl EmbyClient {
             .into_iter()
             .map(EmbyLibrary::from)
             .collect())
+    }
+
+    pub async fn create_virtual_folder(
+        &self,
+        name: &str,
+        collection_type: &str,
+        path: &str,
+        library_options: EmbyLibraryOptions,
+    ) -> anyhow::Result<u16> {
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        if name.trim().is_empty() {
+            bail!("library name is required for Emby virtual folder creation");
+        }
+        if collection_type.trim().is_empty() {
+            bail!("collection_type is required for Emby virtual folder creation");
+        }
+        if path.trim().is_empty() {
+            bail!("path is required for Emby virtual folder creation");
+        }
+
+        let url = format!("{}/Library/VirtualFolders", self.base_url);
+        let response = self
+            .http
+            .post(url)
+            .query(&[
+                ("api_key", self.api_key.as_str()),
+                ("name", name.trim()),
+                ("collectionType", collection_type.trim()),
+                ("paths", path.trim()),
+                ("refreshLibrary", "false"),
+            ])
+            .json(&EmbyCreateVirtualFolderRequest { library_options })
+            .send()
+            .await
+            .context("failed to call Emby /Library/VirtualFolders")?;
+        let status = response.status();
+        response
+            .error_for_status()
+            .context("Emby /Library/VirtualFolders returned an error")?;
+        Ok(status.as_u16())
     }
 
     pub async fn poster_items(
@@ -350,6 +442,49 @@ impl EmbyClient {
             items,
             total_record_count,
             truncated,
+        })
+    }
+
+    pub async fn cleanup_items(
+        &self,
+        parent_id: &str,
+        item_types: &str,
+        limit: usize,
+    ) -> anyhow::Result<EmbyCleanupItemsResult> {
+        if parent_id.trim().is_empty() {
+            bail!("parent_id is required for Emby cleanup item listing");
+        }
+        if item_types.trim().is_empty() {
+            bail!("item_types is required for Emby cleanup item listing");
+        }
+        let limit = limit.clamp(1, 100_000);
+        let mut start = 0usize;
+        let mut items = Vec::new();
+        let mut total_record_count = None;
+
+        while items.len() < limit {
+            let page_limit = (limit - items.len()).min(1000);
+            let page = self
+                .cleanup_items_page(parent_id, item_types, start, page_limit)
+                .await?;
+            if total_record_count.is_none() {
+                total_record_count = page.total_record_count;
+            }
+            if page.items.is_empty() {
+                break;
+            }
+            start += page.items.len();
+            items.extend(page.items);
+            if let Some(total) = total_record_count
+                && start >= total
+            {
+                break;
+            }
+        }
+
+        Ok(EmbyCleanupItemsResult {
+            truncated: total_record_count.is_some_and(|total| items.len() < total),
+            items,
         })
     }
 
@@ -776,6 +911,42 @@ impl EmbyClient {
             .await?)
     }
 
+    async fn cleanup_items_page(
+        &self,
+        parent_id: &str,
+        item_types: &str,
+        start_index: usize,
+        limit: usize,
+    ) -> anyhow::Result<EmbyCleanupItemsPage> {
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let url = format!("{}/Items", self.base_url);
+        Ok(self
+            .http
+            .get(url)
+            .query(&[
+                ("api_key", self.api_key.as_str()),
+                ("ParentId", parent_id.trim()),
+                ("Recursive", "true"),
+                ("IncludeItemTypes", item_types.trim()),
+                (
+                    "Fields",
+                    "Path,ProductionYear,ProviderIds,ImageTags,CommunityRating,CriticRating,UserData",
+                ),
+                ("SortBy", "SortName"),
+                ("StartIndex", &start_index.to_string()),
+                ("Limit", &limit.to_string()),
+            ])
+            .send()
+            .await
+            .context("failed to call Emby /Items for cleanup suggestions")?
+            .error_for_status()
+            .context("Emby /Items returned an error for cleanup suggestions")?
+            .json()
+            .await?)
+    }
+
     async fn items_by_ids(&self, ids: &str, fields: &str) -> anyhow::Result<EmbyItemsPage> {
         self.items_by_ids_limited(ids, fields, 100).await
     }
@@ -807,6 +978,40 @@ impl EmbyClient {
             .context("Emby /Items returned an error")?
             .json()
             .await?)
+    }
+}
+
+impl EmbyCleanupItem {
+    pub fn rating(&self) -> Option<f64> {
+        self.community_rating
+            .or(self
+                .user_data
+                .as_ref()
+                .and_then(|user_data| user_data.rating))
+            .or_else(|| self.critic_rating.map(|rating| rating / 10.0))
+            .filter(|rating| rating.is_finite() && *rating >= 0.0)
+    }
+
+    pub fn has_provider_id(&self, key: &str) -> bool {
+        self.provider_ids
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .is_some_and(|(_, value)| match value {
+                Value::String(s) => !s.trim().is_empty(),
+                Value::Null => false,
+                _ => true,
+            })
+    }
+
+    pub fn has_primary_image(&self) -> bool {
+        self.image_tags
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("Primary"))
+            .is_some_and(|(_, value)| match value {
+                Value::String(s) => !s.trim().is_empty(),
+                Value::Null => false,
+                _ => true,
+            })
     }
 }
 

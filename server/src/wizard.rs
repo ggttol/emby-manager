@@ -1,8 +1,10 @@
 use crate::{
     c115::{self, C115Client, C115OfflineRequest, C115SaveRequest},
     config_store,
+    dedup::{self, DedupGroup, DedupReviewGroup},
     emby::EmbyClient,
     error::{AppError, AppResult},
+    media_fs::{self, StrmGenerateResult},
     posters::{self, PosterDetectRequest},
     state::AppState,
     tasks::{self, TaskRun},
@@ -71,6 +73,8 @@ pub struct AddNewReport {
     pub ok: bool,
     pub target: AddNewTargetReport,
     pub transfer: AddNewTransferSummary,
+    pub strm: AddNewStrmReport,
+    pub dedup: AddNewDedupReport,
     pub scan: AddNewScanReport,
     pub poster: AddNewPosterReport,
     pub check: AddNewCheckReport,
@@ -120,6 +124,33 @@ pub struct AddNewScanReport {
     pub code: Option<u16>,
     pub delay_ms: u64,
     pub warning: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddNewStrmReport {
+    pub ok: bool,
+    pub triggered: bool,
+    pub lib: Option<String>,
+    pub matched: usize,
+    pub new_count: usize,
+    pub new_folders: BTreeMap<String, usize>,
+    pub attention: Vec<String>,
+    pub retried: bool,
+    pub warnings: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddNewDedupReport {
+    pub ok: bool,
+    pub triggered: bool,
+    pub lib: Option<String>,
+    pub dups_count: usize,
+    pub review_count: usize,
+    pub dups: Vec<DedupGroup>,
+    pub review: Vec<DedupReviewGroup>,
+    pub warnings: Vec<String>,
     pub error: Option<String>,
 }
 
@@ -347,6 +378,14 @@ async fn run_add_new_pipeline(
         items: item_reports,
     };
 
+    if cancel_if_requested(state, id).await? {
+        return Err(AppError::Conflict("__task_cancelled__".to_string()));
+    }
+    tasks::set_progress(&state.pool, id, total_items as i64, "生成目标库缺失 STRM").await?;
+    let strm = generate_target_strm(state, &transfer, plan.target_lib.as_deref()).await;
+
+    let dedup = inspect_target_dedup(state, &transfer, plan.target_lib.as_deref());
+
     if plan.delay_ms > 0 {
         tasks::set_progress(
             &state.pool,
@@ -380,7 +419,7 @@ async fn run_add_new_pipeline(
     )
     .await?;
 
-    let check = build_post_add_check(&transfer, &scan, &poster);
+    let check = build_post_add_check(&transfer, &strm, &dedup, &scan, &poster);
     tasks::set_progress(
         &state.pool,
         id,
@@ -396,6 +435,8 @@ async fn run_add_new_pipeline(
             lib: plan.target_lib,
         },
         transfer,
+        strm,
+        dedup,
         scan,
         poster,
         check,
@@ -646,8 +687,164 @@ fn poster_issue_from_signal(item: posters::PosterSignalItem) -> AddNewPosterIssu
     }
 }
 
+async fn generate_target_strm(
+    state: &AppState,
+    transfer: &AddNewTransferSummary,
+    lib: Option<&str>,
+) -> AddNewStrmReport {
+    let Some(lib) = lib.and_then(non_empty_trimmed).map(ToString::to_string) else {
+        return AddNewStrmReport {
+            ok: true,
+            triggered: false,
+            lib: None,
+            matched: 0,
+            new_count: 0,
+            new_folders: BTreeMap::new(),
+            attention: Vec::new(),
+            retried: false,
+            warnings: vec!["未指定目标库，跳过 STRM 生成".to_string()],
+            error: None,
+        };
+    };
+    if transfer.succeeded == 0 {
+        return AddNewStrmReport {
+            ok: true,
+            triggered: false,
+            lib: Some(lib),
+            matched: 0,
+            new_count: 0,
+            new_folders: BTreeMap::new(),
+            attention: Vec::new(),
+            retried: false,
+            warnings: vec!["没有成功转存/离线项目，跳过 STRM 生成".to_string()],
+            error: None,
+        };
+    }
+
+    let first = media_fs::generate_missing_strm_for_library(state, &lib, None, true);
+    let (result, retried) = match first {
+        Ok(result) if result.new_count == 0 => {
+            sleep(Duration::from_millis(500)).await;
+            (
+                media_fs::generate_missing_strm_for_library(state, &lib, None, true),
+                true,
+            )
+        }
+        other => (other, false),
+    };
+
+    match result {
+        Ok(result) => strm_report_from_result(result, retried),
+        Err(err) => AddNewStrmReport {
+            ok: false,
+            triggered: true,
+            lib: Some(lib),
+            matched: 0,
+            new_count: 0,
+            new_folders: BTreeMap::new(),
+            attention: Vec::new(),
+            retried,
+            warnings: vec!["STRM 生成失败，已保留转存/离线结果".to_string()],
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+fn strm_report_from_result(result: StrmGenerateResult, retried: bool) -> AddNewStrmReport {
+    let mut warnings = result.attention.clone();
+    if result.new_count == 0 {
+        warnings.push(if retried {
+            "STRM 生成重试后仍为 0 new".to_string()
+        } else {
+            "STRM 生成结果为 0 new".to_string()
+        });
+    }
+    AddNewStrmReport {
+        ok: true,
+        triggered: true,
+        lib: Some(result.lib),
+        matched: result.matched,
+        new_count: result.new_count,
+        new_folders: result.new_folders,
+        attention: result.attention,
+        retried,
+        warnings,
+        error: None,
+    }
+}
+
+fn inspect_target_dedup(
+    state: &AppState,
+    transfer: &AddNewTransferSummary,
+    lib: Option<&str>,
+) -> AddNewDedupReport {
+    let lib = lib.and_then(non_empty_trimmed).map(ToString::to_string);
+    if transfer.succeeded == 0 {
+        return AddNewDedupReport {
+            ok: true,
+            triggered: false,
+            lib,
+            dups_count: 0,
+            review_count: 0,
+            dups: Vec::new(),
+            review: Vec::new(),
+            warnings: vec!["没有成功转存/离线项目，跳过去重报告".to_string()],
+            error: None,
+        };
+    }
+
+    match dedup::analyze_duplicate_groups(&state.settings.strm_root) {
+        Ok(report) => {
+            let dups = filter_dedup_groups(report.dups, lib.as_deref());
+            let review = filter_review_groups(report.review, lib.as_deref());
+            AddNewDedupReport {
+                ok: true,
+                triggered: true,
+                lib,
+                dups_count: dups.len(),
+                review_count: review.len(),
+                dups,
+                review,
+                warnings: Vec::new(),
+                error: None,
+            }
+        }
+        Err(err) => AddNewDedupReport {
+            ok: false,
+            triggered: true,
+            lib,
+            dups_count: 0,
+            review_count: 0,
+            dups: Vec::new(),
+            review: Vec::new(),
+            warnings: vec!["去重报告生成失败，已保留转存/离线结果".to_string()],
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+fn filter_dedup_groups(groups: Vec<DedupGroup>, lib: Option<&str>) -> Vec<DedupGroup> {
+    groups
+        .into_iter()
+        .filter(|group| {
+            lib.is_none_or(|lib| {
+                group.keep.lib == lib && group.remove.iter().all(|row| row.lib == lib)
+            })
+        })
+        .collect()
+}
+
+fn filter_review_groups(groups: Vec<DedupReviewGroup>, lib: Option<&str>) -> Vec<DedupReviewGroup> {
+    groups
+        .into_iter()
+        .filter(|group| lib.is_none_or(|lib| group.rows.iter().all(|row| row.lib == lib)))
+        .collect()
+}
+
 fn build_post_add_check(
     transfer: &AddNewTransferSummary,
+    strm: &AddNewStrmReport,
+    dedup: &AddNewDedupReport,
     scan: &AddNewScanReport,
     poster: &AddNewPosterReport,
 ) -> AddNewCheckReport {
@@ -705,6 +902,71 @@ fn build_post_add_check(
                 .error
                 .clone()
                 .unwrap_or_else(|| "海报检测失败".to_string()),
+        });
+    }
+
+    if !strm.ok {
+        suspicious.push(AddNewCheckSuspiciousReport {
+            stage: "strm".to_string(),
+            severity: "warn".to_string(),
+            id: None,
+            label: strm.lib.clone().unwrap_or_else(|| "strm".to_string()),
+            message: strm
+                .error
+                .clone()
+                .unwrap_or_else(|| "STRM 生成失败".to_string()),
+        });
+    }
+    for warning in &strm.warnings {
+        suspicious.push(AddNewCheckSuspiciousReport {
+            stage: "strm".to_string(),
+            severity: "warn".to_string(),
+            id: None,
+            label: strm.lib.clone().unwrap_or_else(|| "strm".to_string()),
+            message: warning.clone(),
+        });
+    }
+    if !dedup.ok {
+        suspicious.push(AddNewCheckSuspiciousReport {
+            stage: "dedup".to_string(),
+            severity: "warn".to_string(),
+            id: None,
+            label: dedup.lib.clone().unwrap_or_else(|| "dedup".to_string()),
+            message: dedup
+                .error
+                .clone()
+                .unwrap_or_else(|| "去重报告生成失败".to_string()),
+        });
+    }
+    for warning in &dedup.warnings {
+        suspicious.push(AddNewCheckSuspiciousReport {
+            stage: "dedup".to_string(),
+            severity: "warn".to_string(),
+            id: None,
+            label: dedup.lib.clone().unwrap_or_else(|| "dedup".to_string()),
+            message: warning.clone(),
+        });
+    }
+    for group in &dedup.dups {
+        suspicious.push(AddNewCheckSuspiciousReport {
+            stage: "dedup".to_string(),
+            severity: "warn".to_string(),
+            id: Some(group.tmdb.clone()),
+            label: group.keep.folder.clone(),
+            message: format!("发现可自动处理重复项 {} 组", group.remove.len()),
+        });
+    }
+    for group in &dedup.review {
+        suspicious.push(AddNewCheckSuspiciousReport {
+            stage: "dedup".to_string(),
+            severity: "warn".to_string(),
+            id: Some(group.tmdb.clone()),
+            label: group
+                .rows
+                .first()
+                .map(|row| row.folder.clone())
+                .unwrap_or_else(|| group.tmdb.clone()),
+            message: group.why.clone(),
         });
     }
 

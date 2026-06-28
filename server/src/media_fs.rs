@@ -1,6 +1,6 @@
 use crate::{
     config_store,
-    emby::{EmbyClient, EmbyLibrary},
+    emby::{EmbyClient, EmbyLibrary, EmbyLibraryOptions, EmbyPathInfo},
     error::{AppError, AppResult},
     state::AppState,
     tasks::{self, TaskRun},
@@ -36,6 +36,24 @@ const TASK_CANCELLED_SENTINEL: &str = "__task_cancelled__";
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LibrariesResponse {
     pub libraries: Vec<EmbyLibrary>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateLibraryRequest {
+    pub name: String,
+    #[serde(alias = "ctype")]
+    pub collection_type: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CreateLibraryResponse {
+    pub ok: bool,
+    pub name: String,
+    pub id: Option<String>,
+    pub library: Option<EmbyLibrary>,
+    pub created_dirs: Vec<String>,
+    pub emby_status: u16,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -281,7 +299,7 @@ pub struct ManageDeleteBatchItemResult {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/v2/libraries", get(libraries))
+        .route("/api/v2/libraries", get(libraries).post(create_library))
         .route("/api/v2/libraries/items", get(library_items))
         .route("/api/v2/libraries/scan", post(scan_library))
         .route("/api/v2/libraries/strm", get(list_strm))
@@ -304,6 +322,102 @@ pub async fn libraries(State(state): State<AppState>) -> AppResult<Json<Librarie
     let client = EmbyClient::new(emby_url, api_key, state.http.clone());
     let libraries = client.libraries().await?;
     Ok(Json(LibrariesResponse { libraries }))
+}
+
+#[utoipa::path(post, path = "/api/v2/libraries", tag = "media", request_body = CreateLibraryRequest, responses((status = 200, body = CreateLibraryResponse)))]
+pub async fn create_library(
+    State(state): State<AppState>,
+    Json(req): Json<CreateLibraryRequest>,
+) -> AppResult<Json<CreateLibraryResponse>> {
+    let name = required_segment(&req.name, "name")?.to_string();
+    let collection_type = normalize_library_collection_type(&req.collection_type)?;
+    let emby_path = format!("/strm/{name}");
+    let strm_dir = safe_under(&state.settings.strm_root, &name)?;
+    let cd_dir = safe_under(&state.settings.cd_root, &name)?;
+
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    ensure_api_key_configured(&api_key)?;
+
+    let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+    let virtual_folders = client.virtual_folders().await?;
+    if virtual_folders
+        .iter()
+        .any(|folder| folder.name.trim() == name)
+    {
+        return Err(AppError::Conflict("已存在同名库".to_string()));
+    }
+
+    tokio::fs::create_dir_all(&strm_dir)
+        .await
+        .map_err(anyhow::Error::from)?;
+    tokio::fs::create_dir_all(&cd_dir)
+        .await
+        .map_err(anyhow::Error::from)?;
+    chmod_public_dir(&strm_dir);
+    chmod_public_dir(&cd_dir);
+
+    let mut warnings = Vec::new();
+    let mut library_options = virtual_folders
+        .iter()
+        .find_map(|folder| {
+            let same_type = folder
+                .collection_type
+                .as_deref()
+                .is_some_and(|value| value == collection_type);
+            let has_strm_location = folder
+                .locations
+                .iter()
+                .any(|path| path.trim_start().starts_with("/strm/"))
+                || folder.library_options.as_ref().is_some_and(|options| {
+                    options.path_infos.iter().any(|info| {
+                        info.path
+                            .as_deref()
+                            .is_some_and(|path| path.trim_start().starts_with("/strm/"))
+                    })
+                });
+            if same_type && has_strm_location {
+                folder.library_options.clone()
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            warnings.push(format!(
+                "未找到可复用的 {collection_type} /strm 库设置，使用最小 PathInfos"
+            ));
+            EmbyLibraryOptions {
+                path_infos: Vec::new(),
+                extra: Default::default(),
+            }
+        });
+    library_options.path_infos = vec![EmbyPathInfo {
+        path: Some(emby_path.clone()),
+    }];
+
+    let emby_status = client
+        .create_virtual_folder(&name, collection_type, &emby_path, library_options)
+        .await?;
+    sleep(Duration::from_secs(1)).await;
+
+    let library = client
+        .libraries()
+        .await?
+        .into_iter()
+        .find(|library| library.name == name);
+    let id = library.as_ref().and_then(|library| library.id.clone());
+    if library.is_none() {
+        warnings.push(format!("创建后未在库列表找到 (HTTP {emby_status})"));
+    }
+    Ok(Json(CreateLibraryResponse {
+        ok: library.is_some(),
+        name,
+        id,
+        library,
+        created_dirs: vec![strm_dir.display().to_string(), cd_dir.display().to_string()],
+        emby_status,
+        warnings,
+    }))
 }
 
 #[utoipa::path(get, path = "/api/v2/libraries/items", tag = "media", params(LibraryItemsQuery), responses((status = 200, body = LibraryItemsResponse)))]
@@ -628,6 +742,14 @@ fn ensure_api_key_configured(api_key: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn normalize_library_collection_type(value: &str) -> AppResult<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "movies" => Ok("movies"),
+        "tvshows" => Ok("tvshows"),
+        _ => Err(AppError::BadRequest("类型只能 tvshows/movies".to_string())),
+    }
+}
+
 fn library_item_types(library_type: &str) -> &'static str {
     if library_type.eq_ignore_ascii_case("tvshows") {
         "Series"
@@ -708,7 +830,8 @@ fn spawn_manage_preview(
             ],
             next_steps: vec![
                 "核对 planned_paths 是否符合预期".to_string(),
-                "确认后使用 /api/v2/manage/delete/execute 或 /api/v2/manage/move/execute".to_string(),
+                "确认后使用 /api/v2/manage/delete/execute 或 /api/v2/manage/move/execute"
+                    .to_string(),
             ],
             message: "dry-run preview only; did not touch filesystem or Emby".to_string(),
         };

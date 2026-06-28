@@ -1,8 +1,19 @@
-use emby_manager::zhuigeng::{
-    ZhuigengConfig, zhuigeng_gaps_summary_with_config, zhuigeng_scan_airing_with_config,
-    zhuigeng_status_with_config,
+use emby_manager::{
+    scheduler,
+    settings::Settings,
+    state::AppState,
+    zhuigeng::{
+        ZhuigengConfig, ZhuigengScanAiringResponse, ZhuigengScanAiringRow, execute_scan_airing_row,
+        zhuigeng_gaps_summary_with_config, zhuigeng_scan_airing_with_config,
+        zhuigeng_status_with_config,
+    },
 };
-use std::sync::{Arc, Mutex};
+use sqlx::postgres::PgPoolOptions;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+use tempfile::tempdir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -191,9 +202,13 @@ async fn scan_airing_and_gaps_summary_use_tmdb_behind_rows() {
     assert!(scan.ok);
     assert_eq!(scan.total, 1);
     assert_eq!(scan.results[0].name, "缺一集");
+    assert_eq!(scan.results[0].lib, "追更库");
+    assert_eq!(scan.results[0].keyword, "缺一集");
+    assert_eq!(scan.results[0].status, "planned");
+    assert_eq!(scan.results[0].new_count, 0);
     assert_eq!(scan.results[0].behind, 1);
     assert_eq!(scan.copy_text, "求 缺一集 [tmdb:300] — S01 E2");
-    assert!(scan.note.contains("不触发文件扫描"));
+    assert!(scan.note.contains("执行计划"));
     timeout(Duration::from_secs(1), emby_handle)
         .await
         .unwrap()
@@ -223,6 +238,98 @@ async fn scan_airing_and_gaps_summary_use_tmdb_behind_rows() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn scan_airing_filters_ended_series_from_execution_plan() {
+    let libraries = r#"[{"ItemId":"lib-airing","Name":"追更库","CollectionType":"tvshows","Locations":["/strm/追更库"]}]"#;
+    let series = r#"{"Items":[
+        {"Id":"series-a","Name":"在更剧","Path":"/strm/追更库/在更剧/show.strm","ProviderIds":{"Tmdb":"301"}},
+        {"Id":"series-b","Name":"完结剧","Path":"/strm/追更库/完结剧/show.strm","ProviderIds":{"Tmdb":"302"}}
+    ]}"#;
+    let episodes = r#"{"Items":[]}"#;
+    let tmdb_airing = r#"{"status":"Returning Series","last_episode_to_air":null,"next_episode_to_air":{"season_number":1,"episode_number":2}}"#;
+    let tmdb_ended = r#"{"status":"Ended","last_episode_to_air":{"season_number":1,"episode_number":1},"next_episode_to_air":null}"#;
+    let (emby_base, _, emby_handle) =
+        spawn_fake_sequence(vec![libraries, series, episodes, episodes]).await;
+    let (tmdb_base, _, tmdb_handle) = spawn_fake_sequence(vec![tmdb_airing, tmdb_ended]).await;
+
+    let scan = zhuigeng_scan_airing_with_config(
+        fake_config(&emby_base, &tmdb_base),
+        reqwest::Client::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(scan.total, 1);
+    assert_eq!(scan.results[0].name, "在更剧");
+    assert!(scan.results.iter().all(|row| row.name != "完结剧"));
+    timeout(Duration::from_secs(1), emby_handle)
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(1), tmdb_handle)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn scan_airing_row_executes_strm_generation_with_series_keyword_and_degrades_errors() {
+    let tmp = tempdir().unwrap();
+    let cd_root = tmp.path().join("cd");
+    let strm_root = tmp.path().join("strm");
+    std::fs::create_dir_all(cd_root.join("追更库/缺一集/Season 1")).unwrap();
+    std::fs::create_dir_all(strm_root.join("追更库")).unwrap();
+    std::fs::write(cd_root.join("追更库/缺一集/Season 1/E02.mkv"), "video").unwrap();
+
+    let state = test_state(cd_root, strm_root.clone());
+    let mut row = scan_row("追更库", "缺一集");
+    execute_scan_airing_row(&state, &mut row);
+
+    assert!(row.ok, "{row:?}");
+    assert_eq!(row.status, "generated");
+    assert_eq!(row.keyword, "缺一集");
+    assert_eq!(row.matched, 1);
+    assert_eq!(row.new_count, 1);
+    assert!(strm_root.join("追更库/缺一集/Season 1/E02.strm").is_file());
+
+    let mut missing = scan_row("不存在", "缺一集");
+    execute_scan_airing_row(&state, &mut missing);
+    assert!(!missing.ok);
+    assert_eq!(missing.status, "error");
+    assert!(
+        missing
+            .error
+            .as_deref()
+            .is_some_and(|err| err.contains("115 文件夹不存在")),
+        "{missing:?}"
+    );
+}
+
+#[test]
+fn scheduler_scan_airing_detail_reports_real_execution_not_dry_run_preview() {
+    let detail = scheduler::zhuigeng_scan_airing_schedule_detail(ZhuigengScanAiringResponse {
+        ok: true,
+        total: 1,
+        ok_count: 1,
+        error_count: 0,
+        new_count: 2,
+        results: vec![scan_row("追更库", "缺一集")],
+        copy_text: "求 缺一集".to_string(),
+        note: "已按 TMDb continuing 剧集串行用剧名扫描对应库并生成缺失 STRM".to_string(),
+    });
+
+    assert_eq!(detail["action"], "zhuigeng_scan_airing");
+    assert_eq!(detail["new_count"], 2);
+    assert!(
+        detail["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("剧名串行扫描")),
+        "{detail}"
+    );
+    assert_ne!(detail["action"], "refresh_airing_libraries");
+    assert!(detail.get("dry_run").is_none(), "{detail}");
 }
 
 #[tokio::test]
@@ -269,6 +376,49 @@ async fn tmdb_timeout_is_reported_on_the_series_row() {
 
 fn fake_config(emby_base: &str, tmdb_base: &str) -> ZhuigengConfig {
     ZhuigengConfig::new(emby_base, "emby-key", tmdb_base, "tmdb-key")
+}
+
+fn scan_row(lib: &str, name: &str) -> ZhuigengScanAiringRow {
+    ZhuigengScanAiringRow {
+        lib: lib.to_string(),
+        series: Some("series-a".to_string()),
+        name: name.to_string(),
+        id: Some("series-a".to_string()),
+        tmdb: "300".to_string(),
+        tmdb_status: "Returning Series".to_string(),
+        keyword: name.to_string(),
+        status: "planned".to_string(),
+        behind: 1,
+        hint: Some("落后 TMDb 1 集".to_string()),
+        ok: true,
+        matched: 0,
+        new_count: 0,
+        attention: Vec::new(),
+        error: None,
+        err: None,
+    }
+}
+
+fn test_state(cd_root: PathBuf, strm_root: PathBuf) -> AppState {
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://emby_manager:emby_manager@127.0.0.1/emby_manager_test")
+        .unwrap();
+    AppState::new(
+        pool,
+        Settings {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            database_url: "postgres://emby_manager:emby_manager@127.0.0.1/emby_manager_test"
+                .to_string(),
+            web_dist: PathBuf::from("/tmp"),
+            legacy_dir: PathBuf::from("/tmp"),
+            bootstrap_password: "admin".to_string(),
+            cd_root,
+            strm_root,
+            docker_bin: PathBuf::from("/usr/bin/docker"),
+            task_concurrency: 1,
+        },
+    )
 }
 
 async fn spawn_fake_sequence(

@@ -1,4 +1,4 @@
-import { Database, FileSearch, FolderSync, RefreshCw, ScanLine } from 'lucide-react';
+import { Database, FileSearch, FolderSync, Plus, RefreshCw, ScanLine } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
@@ -14,6 +14,9 @@ type StrmGenerateResult = components['schemas']['StrmGenerateResult'];
 type StrmListResponse = components['schemas']['StrmListResponse'];
 type StrmOverview = components['schemas']['StrmOverview'];
 type TaskRun = components['schemas']['TaskRun'];
+type CreateLibraryRequest = components['schemas']['CreateLibraryRequest'];
+type CreateLibraryResponse = components['schemas']['CreateLibraryResponse'];
+type CreateLibraryType = 'movies' | 'tvshows';
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -88,6 +91,8 @@ export function ScanPanel() {
   const [selectedLib, setSelectedLib] = useState('');
   const [itemId, setItemId] = useState('');
   const [keyword, setKeyword] = useState('');
+  const [newLibraryName, setNewLibraryName] = useState('');
+  const [newLibraryType, setNewLibraryType] = useState<CreateLibraryType>('movies');
   const [recursive, setRecursive] = useState(true);
   const [full, setFull] = useState(false);
   const [fullauto, setFullauto] = useState(false);
@@ -95,9 +100,11 @@ export function ScanPanel() {
   const [strm, setStrm] = useState<StrmListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [overviewLoading, setOverviewLoading] = useState(false);
+  const [creatingLibrary, setCreatingLibrary] = useState(false);
   const [starting, setStarting] = useState<'lib' | 'all' | 'item' | 'strm' | null>(null);
   const [confirmCleanupScan, setConfirmCleanupScan] = useState(false);
   const [latestScan, setLatestScan] = useState<{ task: TaskRun; result: ScanLibraryResult } | null>(null);
+  const [libraryWarnings, setLibraryWarnings] = useState<string[]>([]);
   const [error, setError] = useState('');
   const toast = useToast();
 
@@ -111,15 +118,16 @@ export function ScanPanel() {
     [libraries]
   );
 
-  const loadLibraries = async () => {
+  const loadLibraries = async (preferredLib?: string) => {
     setLoading(true);
     setError('');
     try {
       const data = await api<LibrariesResponse>('/api/v2/libraries');
       setLibraries(data.libraries);
       const first = [...data.libraries].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))[0];
-      const nextLib = selectedLib && data.libraries.some((library) => library.name === selectedLib)
-        ? selectedLib
+      const targetLib = (preferredLib ?? selectedLib).trim();
+      const nextLib = targetLib && data.libraries.some((library) => library.name === targetLib)
+        ? targetLib
         : first?.name || '';
       setSelectedLib(nextLib);
       await loadStrm(nextLib, false);
@@ -203,6 +211,42 @@ export function ScanPanel() {
   const submitOverview = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     loadStrm(selectedLib);
+  };
+
+  const submitCreateLibrary = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = newLibraryName.trim();
+    if (!name) {
+      toast.push('先填写媒体库名称', 'warn');
+      return;
+    }
+    setCreatingLibrary(true);
+    setError('');
+    setLibraryWarnings([]);
+    try {
+      const data = await api<CreateLibraryResponse>('/api/v2/libraries', {
+        method: 'POST',
+        body: JSON.stringify({ name, collection_type: newLibraryType } satisfies CreateLibraryRequest)
+      });
+      if (data.ok === false) {
+        throw new Error('Emby 媒体库创建失败');
+      }
+      const createdName = data.library?.name || data.name || name;
+      const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+      setLibraryWarnings(warnings);
+      await loadLibraries(createdName);
+      setNewLibraryName('');
+      toast.push(
+        warnings.length ? `已创建媒体库：${createdName}，有 ${warnings.length} 条警告` : `已创建媒体库：${createdName}`,
+        warnings.length ? 'warn' : 'ok'
+      );
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`媒体库创建失败：${message}`, 'error');
+    } finally {
+      setCreatingLibrary(false);
+    }
   };
 
   const createScanTask = async (mode: 'lib' | 'all' | 'item' | 'strm') => {
@@ -294,7 +338,7 @@ export function ScanPanel() {
           <strong>扫描工作台</strong>
           <span>可触发 Emby Refresh，也可生成缺失 strm；清孤儿会真实删除 STRM 文件，执行前需确认。</span>
         </div>
-        <button className="btn ghost" onClick={loadLibraries} disabled={loading}>
+        <button className="btn ghost" onClick={() => loadLibraries()} disabled={loading}>
           <RefreshCw size={16} />
           {loading ? '加载中' : '刷新库'}
         </button>
@@ -303,6 +347,43 @@ export function ScanPanel() {
       <div className="notice warn scanNotice">
         默认生成缺失 STRM 只新增 .strm、不覆盖已有文件；勾选清理孤儿后会真实删除已判定为孤儿的 STRM，提交前会再次确认。
       </div>
+
+      <form className="scanGrid createLibraryForm" onSubmit={submitCreateLibrary}>
+        <label>
+          <span>新建库名</span>
+          <input
+            className="input"
+            aria-label="新建媒体库名称"
+            value={newLibraryName}
+            onChange={(event) => setNewLibraryName(event.target.value)}
+            placeholder="例如：电影 4K"
+            disabled={creatingLibrary}
+          />
+        </label>
+        <label>
+          <span>库类型</span>
+          <select
+            className="input"
+            aria-label="新建媒体库类型"
+            value={newLibraryType}
+            onChange={(event) => setNewLibraryType(event.target.value as CreateLibraryType)}
+            disabled={creatingLibrary}
+          >
+            <option value="movies">电影</option>
+            <option value="tvshows">剧集</option>
+          </select>
+        </label>
+        <button className="btn" disabled={creatingLibrary || !newLibraryName.trim()}>
+          <Plus size={16} />
+          {creatingLibrary ? '创建中' : '创建媒体库'}
+        </button>
+      </form>
+
+      {libraryWarnings.length > 0 && (
+        <div className="notice warn whitespaceNotice">
+          {libraryWarnings.map((warning) => <div key={warning}>{warning}</div>)}
+        </div>
+      )}
 
       <form className="scanGrid" onSubmit={submitOverview}>
         <label>

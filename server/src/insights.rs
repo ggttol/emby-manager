@@ -1,4 +1,6 @@
 use crate::{
+    config_store,
+    emby::{EmbyCleanupItem, EmbyClient, EmbyLibrary},
     error::{AppError, AppResult},
     state::AppState,
     tasks::{self, TaskRun},
@@ -19,13 +21,18 @@ use std::{
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
 const STRM_SUMMARY_MAX_DEPTH: usize = 8;
 const STRM_SUMMARY_ENTRY_LIMIT: usize = 50_000;
 const STRM_SUMMARY_SAMPLE_LIMIT: usize = 20;
 const EMPTY_DIR_CLEANUP_LIMIT_DEFAULT: usize = 500;
 const EMPTY_DIR_CLEANUP_LIMIT_MAX: usize = 10_000;
 const EMPTY_DIR_CLEANUP_SAMPLE_LIMIT: usize = 20;
+const CLEANUP_SUGGEST_TOP_DEFAULT: usize = 20;
+const CLEANUP_SUGGEST_TOP_MAX: usize = 200;
+const CLEANUP_SUGGEST_ITEM_LIMIT: usize = 3000;
 const SUBTITLE_EXTENSIONS: &[&str] = &["ass", "idx", "smi", "srt", "ssa", "sub", "sup", "vtt"];
+const CLEANUP_DIMENSIONS: &[&str] = &["rating", "age", "idle", "size", "meta"];
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct InsightMeta {
@@ -71,6 +78,34 @@ pub struct CleanupSummaryResponse {
     pub logs: LogInsight,
     pub todos: Vec<InsightTodo>,
     pub warnings: Vec<String>,
+    pub cleanup_candidates: Vec<CleanupCandidate>,
+}
+
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct CleanupSuggestRequest {
+    pub lib: Option<String>,
+    pub top: Option<usize>,
+    pub min_score: Option<f64>,
+    pub dimensions: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CleanupCandidate {
+    pub item_id: String,
+    pub name: String,
+    pub lib: String,
+    pub path: Option<String>,
+    pub score: f64,
+    pub reasons: Vec<String>,
+    pub dimensions: BTreeMap<String, CleanupDimensionScore>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CleanupDimensionScore {
+    pub score: f64,
+    pub reason: String,
+    pub value: Option<String>,
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -284,10 +319,12 @@ pub async fn gaps_summary(State(state): State<AppState>) -> AppResult<Json<GapsS
     }))
 }
 
-#[utoipa::path(post, path = "/api/v2/cleanup/suggest", tag = "insights", responses((status = 200, body = CleanupSummaryResponse)))]
+#[utoipa::path(post, path = "/api/v2/cleanup/suggest", tag = "insights", request_body = CleanupSuggestRequest, responses((status = 200, body = CleanupSummaryResponse)))]
 pub async fn cleanup_summary(
     State(state): State<AppState>,
+    body: Option<Json<CleanupSuggestRequest>>,
 ) -> AppResult<Json<CleanupSummaryResponse>> {
+    let req = body.map(|Json(req)| req).unwrap_or_default();
     let task_history = task_history_summary(&state.pool).await?;
     let catalog = catalog_insight(&state.pool).await?;
     let autostrm = autostrm_snapshot(&state.pool).await?;
@@ -299,6 +336,7 @@ pub async fn cleanup_summary(
     if task_history.stale_running > 0 {
         warnings.push("存在长时间未更新的 running 任务，可能是旧进程残留".to_string());
     }
+    let cleanup_candidates = cleanup_candidates(&state, &req, &mut warnings).await?;
     let todos = cleanup_todos(&task_history, &catalog, &strm, &autostrm, &schedules, &logs);
 
     Ok(Json(CleanupSummaryResponse {
@@ -320,7 +358,7 @@ pub async fn cleanup_summary(
             ],
             vec![
                 "不删除、不移动、不重命名任何文件",
-                "不连接 Emby/115，不能替代最终清理评分与人工确认",
+                "评分建议只读读取 Emby 元数据，不连接 115，不会执行删除",
                 "strm 统计只看文件名和元数据，不读取文件内容",
             ],
         ),
@@ -332,6 +370,7 @@ pub async fn cleanup_summary(
         logs,
         todos,
         warnings,
+        cleanup_candidates,
     }))
 }
 
@@ -432,6 +471,300 @@ fn insight_meta(
         coverage: coverage.into_iter().map(str::to_string).collect(),
         limitations: limitations.into_iter().map(str::to_string).collect(),
     }
+}
+
+async fn cleanup_candidates(
+    state: &AppState,
+    req: &CleanupSuggestRequest,
+    warnings: &mut Vec<String>,
+) -> AppResult<Vec<CleanupCandidate>> {
+    if !cleanup_request_has_scoring(req) {
+        return Ok(Vec::new());
+    }
+
+    let dimensions = cleanup_dimensions(req)?;
+    let top = req
+        .top
+        .unwrap_or(CLEANUP_SUGGEST_TOP_DEFAULT)
+        .clamp(1, CLEANUP_SUGGEST_TOP_MAX);
+    let min_score = req.min_score.unwrap_or(0.0).max(0.0);
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    if api_key.trim().is_empty() {
+        warnings.push("api_key 未配置，无法读取 Emby 元数据生成清理评分建议".to_string());
+        return Ok(Vec::new());
+    }
+
+    let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+    let libraries = client.libraries().await?;
+    let selected = select_cleanup_libraries(&libraries, req.lib.as_deref())?;
+    let mut candidates = Vec::new();
+
+    if dimensions.iter().any(|dimension| dimension == "size") {
+        warnings.push(
+            "size 维度未读取 CloudDrive/媒体文件内容；仅当未来有安全本地文件元数据时才参与评分"
+                .to_string(),
+        );
+    }
+    if dimensions.iter().any(|dimension| dimension == "idle") {
+        warnings
+            .push("idle 维度需要播放历史/最近访问数据；当前仅返回降级提示，不参与评分".to_string());
+    }
+
+    for library in selected {
+        let Some(parent_id) = library.id.as_deref() else {
+            warnings.push(format!("Emby 库「{}」缺少 ItemId，已跳过", library.name));
+            continue;
+        };
+        let page = client
+            .cleanup_items(
+                parent_id,
+                cleanup_item_types(library),
+                CLEANUP_SUGGEST_ITEM_LIMIT,
+            )
+            .await?;
+        if page.truncated {
+            warnings.push(format!(
+                "Emby 库「{}」条目超过 {}，评分结果已截断",
+                library.name, CLEANUP_SUGGEST_ITEM_LIMIT
+            ));
+        }
+        for item in page.items {
+            if let Some(candidate) = score_cleanup_item(&library.name, item, &dimensions, min_score)
+            {
+                candidates.push(candidate);
+            }
+        }
+    }
+
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    candidates.truncate(top);
+    Ok(candidates)
+}
+
+fn cleanup_request_has_scoring(req: &CleanupSuggestRequest) -> bool {
+    req.lib
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || req.top.is_some()
+        || req.min_score.is_some()
+        || req
+            .dimensions
+            .as_ref()
+            .is_some_and(|items| !items.is_empty())
+}
+
+fn cleanup_dimensions(req: &CleanupSuggestRequest) -> AppResult<Vec<String>> {
+    let raw = req.dimensions.clone().unwrap_or_else(|| {
+        CLEANUP_DIMENSIONS
+            .iter()
+            .map(|dimension| (*dimension).to_string())
+            .collect()
+    });
+    let mut dimensions = Vec::new();
+    for dimension in raw {
+        let normalized = dimension.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        if !CLEANUP_DIMENSIONS.contains(&normalized.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "未知清理评分维度: {dimension}"
+            )));
+        }
+        if !dimensions.iter().any(|existing| existing == &normalized) {
+            dimensions.push(normalized);
+        }
+    }
+    if dimensions.is_empty() {
+        return Err(AppError::BadRequest("清理评分维度不能为空".to_string()));
+    }
+    Ok(dimensions)
+}
+
+fn select_cleanup_libraries<'a>(
+    libraries: &'a [EmbyLibrary],
+    requested: Option<&str>,
+) -> AppResult<Vec<&'a EmbyLibrary>> {
+    let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(libraries.iter().collect());
+    };
+    let selected: Vec<_> = libraries
+        .iter()
+        .filter(|library| {
+            library.name.eq_ignore_ascii_case(requested)
+                || library.id.as_deref().is_some_and(|id| id == requested)
+        })
+        .collect();
+    if selected.is_empty() {
+        return Err(AppError::NotFound(format!(
+            "Emby library not found: {requested}"
+        )));
+    }
+    Ok(selected)
+}
+
+fn cleanup_item_types(library: &EmbyLibrary) -> &'static str {
+    match library.library_type.to_ascii_lowercase().as_str() {
+        "movies" | "movie" => "Movie",
+        "tvshows" | "series" | "shows" => "Series",
+        _ => "Movie,Series",
+    }
+}
+
+fn score_cleanup_item(
+    lib: &str,
+    item: EmbyCleanupItem,
+    dimensions: &[String],
+    min_score: f64,
+) -> Option<CleanupCandidate> {
+    let mut score = 0.0;
+    let mut reasons = Vec::new();
+    let mut details = BTreeMap::new();
+
+    for dimension in dimensions {
+        let detail = match dimension.as_str() {
+            "rating" => score_rating(&item),
+            "meta" => score_meta(&item),
+            "age" => score_age(&item),
+            "size" => CleanupDimensionScore {
+                score: 0.0,
+                reason: "size 维度已降级，未读取本地媒体文件大小".to_string(),
+                value: item.path.clone(),
+                warning: Some("no_safe_local_size_metadata".to_string()),
+            },
+            "idle" => CleanupDimensionScore {
+                score: 0.0,
+                reason: "idle 维度已降级，当前没有最近播放/访问数据".to_string(),
+                value: None,
+                warning: Some("idle_source_unavailable".to_string()),
+            },
+            _ => continue,
+        };
+        if detail.score > 0.0 {
+            reasons.push(detail.reason.clone());
+        }
+        score += detail.score;
+        details.insert(dimension.clone(), detail);
+    }
+
+    let score = round_score(score.min(100.0));
+    if score < min_score {
+        return None;
+    }
+
+    Some(CleanupCandidate {
+        item_id: item.id?,
+        name: item.name.unwrap_or_else(|| "(unnamed)".to_string()),
+        lib: lib.to_string(),
+        path: item.path,
+        score,
+        reasons,
+        dimensions: details,
+    })
+}
+
+fn score_rating(item: &EmbyCleanupItem) -> CleanupDimensionScore {
+    match item.rating() {
+        Some(rating) if rating <= 5.0 => CleanupDimensionScore {
+            score: round_score((6.0 - rating).max(0.0) * 8.0),
+            reason: format!("评分较低 ({rating:.1})"),
+            value: Some(format!("{rating:.1}")),
+            warning: None,
+        },
+        Some(rating) if rating <= 6.5 => CleanupDimensionScore {
+            score: round_score((6.8 - rating).max(0.0) * 4.0),
+            reason: format!("评分偏低 ({rating:.1})"),
+            value: Some(format!("{rating:.1}")),
+            warning: None,
+        },
+        Some(rating) => CleanupDimensionScore {
+            score: 0.0,
+            reason: "评分正常".to_string(),
+            value: Some(format!("{rating:.1}")),
+            warning: None,
+        },
+        None => CleanupDimensionScore {
+            score: 0.0,
+            reason: "缺少评分数据".to_string(),
+            value: None,
+            warning: Some("rating_unavailable".to_string()),
+        },
+    }
+}
+
+fn score_meta(item: &EmbyCleanupItem) -> CleanupDimensionScore {
+    let missing_provider = !item.has_provider_id("Tmdb")
+        && !item.has_provider_id("Imdb")
+        && !item.has_provider_id("Tvdb");
+    let missing_image = !item.has_primary_image();
+    let mut score = 0.0;
+    let mut parts = Vec::new();
+    if missing_provider {
+        score += 18.0;
+        parts.push("缺少 TMDb/IMDb/TVDb 标识");
+    }
+    if missing_image {
+        score += 8.0;
+        parts.push("缺少主图");
+    }
+
+    CleanupDimensionScore {
+        score,
+        reason: if parts.is_empty() {
+            "元数据较完整".to_string()
+        } else {
+            parts.join("；")
+        },
+        value: None,
+        warning: None,
+    }
+}
+
+fn score_age(item: &EmbyCleanupItem) -> CleanupDimensionScore {
+    let Some(year) = item.production_year else {
+        return CleanupDimensionScore {
+            score: 0.0,
+            reason: "缺少年份数据".to_string(),
+            value: None,
+            warning: Some("production_year_unavailable".to_string()),
+        };
+    };
+    let current_year = Utc::now()
+        .format("%Y")
+        .to_string()
+        .parse::<i32>()
+        .unwrap_or(2026);
+    let age = (current_year - year).max(0);
+    let score = if age >= 25 {
+        18.0
+    } else if age >= 15 {
+        12.0
+    } else if age >= 8 {
+        6.0
+    } else {
+        0.0
+    };
+    CleanupDimensionScore {
+        score,
+        reason: if score > 0.0 {
+            format!("年份较早 ({year})")
+        } else {
+            "年份较新".to_string()
+        },
+        value: Some(year.to_string()),
+        warning: None,
+    }
+}
+
+fn round_score(score: f64) -> f64 {
+    (score * 10.0).round() / 10.0
 }
 
 async fn task_history_summary(pool: &PgPool) -> AppResult<TaskHistorySummary> {

@@ -1,7 +1,9 @@
 use crate::{
     config_store,
     error::{AppError, AppResult},
+    media_fs,
     state::AppState,
+    tasks,
 };
 use axum::{
     Json, Router,
@@ -13,10 +15,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sqlx::PgPool;
 use std::{collections::BTreeMap, time::Duration};
+use uuid::Uuid;
 
 const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
 const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 10;
 const MAX_REQUEST_TIMEOUT_SECS: u64 = 60;
+pub const ZHUIGENG_SCAN_AIRING_CANCELLED: &str = "__zhuigeng_scan_airing_cancelled__";
 
 #[derive(Debug, Clone)]
 pub struct ZhuigengConfig {
@@ -71,6 +75,9 @@ pub struct TmdbEpisodeSummary {
 pub struct ZhuigengScanAiringResponse {
     pub ok: bool,
     pub total: usize,
+    pub ok_count: usize,
+    pub error_count: usize,
+    pub new_count: usize,
     pub results: Vec<ZhuigengScanAiringRow>,
     pub copy_text: String,
     pub note: String,
@@ -79,13 +86,20 @@ pub struct ZhuigengScanAiringResponse {
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct ZhuigengScanAiringRow {
     pub lib: String,
+    pub series: Option<String>,
     pub name: String,
     pub id: Option<String>,
     pub tmdb: String,
+    pub tmdb_status: String,
+    pub keyword: String,
     pub status: String,
     pub behind: usize,
     pub hint: Option<String>,
     pub ok: bool,
+    pub matched: usize,
+    pub new_count: usize,
+    pub attention: Vec<String>,
+    pub error: Option<String>,
     pub err: Option<String>,
 }
 
@@ -213,10 +227,7 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<ZhuigengSta
 pub async fn scan_airing(
     State(state): State<AppState>,
 ) -> AppResult<Json<ZhuigengScanAiringResponse>> {
-    let config = zhuigeng_config_from_state(&state).await?;
-    Ok(Json(
-        zhuigeng_scan_airing_with_config(config, state.http.clone()).await?,
-    ))
+    Ok(Json(zhuigeng_scan_airing_for_state(&state, None).await?))
 }
 
 #[utoipa::path(post, path = "/api/v2/zhuigeng/gaps-summary", tag = "zhuigeng", responses((status = 200, body = ZhuigengGapsSummaryResponse)))]
@@ -332,23 +343,131 @@ pub async fn zhuigeng_scan_airing_with_config(
         .filter(|item| item.continuing)
         .map(|item| ZhuigengScanAiringRow {
             lib: item.lib.clone(),
+            series: item.id.clone(),
             name: item.name.clone(),
             id: item.id.clone(),
             tmdb: item.tmdb.clone(),
-            status: item.tmdb_status.clone(),
+            tmdb_status: item.tmdb_status.clone(),
+            keyword: item.name.clone(),
+            status: "planned".to_string(),
             behind: item.behind,
             hint: item.behind_hint.clone(),
             ok: item.err.is_none(),
+            matched: 0,
+            new_count: 0,
+            attention: Vec::new(),
+            error: item.err.clone(),
             err: item.err.clone(),
         })
         .collect::<Vec<_>>();
+    let ok_count = results.iter().filter(|row| row.ok).count();
+    let error_count = results.len().saturating_sub(ok_count);
     Ok(ZhuigengScanAiringResponse {
         ok: true,
         total: results.len(),
+        ok_count,
+        error_count,
+        new_count: 0,
         results,
         copy_text: status.copy_text,
-        note: "最小 TMDb 语义版：仅汇总在更剧状态和落后提示，不触发文件扫描".to_string(),
+        note: "已生成 continuing 追更执行计划；缺少 AppState 时不触发 STRM 文件扫描".to_string(),
     })
+}
+
+pub async fn zhuigeng_scan_airing_for_state(
+    state: &AppState,
+    task_id: Option<Uuid>,
+) -> AppResult<ZhuigengScanAiringResponse> {
+    let config = zhuigeng_config_from_state(state).await?;
+    if let Some(task_id) = task_id {
+        tasks::set_progress(&state.pool, task_id, 0, "读取 TMDb 追更状态").await?;
+    }
+    let mut response = zhuigeng_scan_airing_with_config(config, state.http.clone()).await?;
+    let total = response.results.len().max(1) as i64;
+    if let Some(task_id) = task_id {
+        tasks::set_total(&state.pool, task_id, total).await?;
+    }
+
+    for index in 0..response.results.len() {
+        check_zhuigeng_task_cancelled(state, task_id).await?;
+        let label = format!(
+            "扫描追更 {}/{}",
+            response.results[index].lib, response.results[index].keyword
+        );
+        if let Some(task_id) = task_id {
+            tasks::set_progress(&state.pool, task_id, index as i64, &label).await?;
+        }
+
+        {
+            let _permit = state
+                .clouddrive_slot
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| {
+                    AppError::Conflict("CloudDrive 扫描槽已关闭，无法执行追更扫描".to_string())
+                })?;
+            execute_scan_airing_row(state, &mut response.results[index]);
+        }
+
+        if let Some(task_id) = task_id {
+            tasks::set_progress(
+                &state.pool,
+                task_id,
+                (index + 1) as i64,
+                &format!("追更扫描 {}/{}", index + 1, response.results.len()),
+            )
+            .await?;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    response.ok_count = response.results.iter().filter(|row| row.ok).count();
+    response.error_count = response.results.len().saturating_sub(response.ok_count);
+    response.new_count = response.results.iter().map(|row| row.new_count).sum();
+    response.ok = true;
+    response.note = "已按 TMDb continuing 剧集串行用剧名扫描对应库并生成缺失 STRM".to_string();
+    Ok(response)
+}
+
+pub fn execute_scan_airing_row(state: &AppState, row: &mut ZhuigengScanAiringRow) {
+    match media_fs::generate_missing_strm_for_library(state, &row.lib, Some(&row.keyword), true) {
+        Ok(result) => {
+            row.matched = result.matched;
+            row.new_count = result.new_count;
+            row.attention = result.attention;
+            row.status = if result.new_count > 0 {
+                "generated".to_string()
+            } else if result.matched == 0 {
+                "not_found".to_string()
+            } else {
+                "done".to_string()
+            };
+            row.ok = true;
+            row.error = None;
+            row.err = None;
+        }
+        Err(err) => {
+            let message = err.to_string();
+            row.status = "error".to_string();
+            row.ok = false;
+            row.error = Some(message.clone());
+            row.err = Some(message);
+        }
+    }
+}
+
+async fn check_zhuigeng_task_cancelled(state: &AppState, task_id: Option<Uuid>) -> AppResult<()> {
+    let Some(task_id) = task_id else {
+        return Ok(());
+    };
+    if tasks::cancel_requested(&state.pool, task_id).await {
+        tasks::finish_cancelled(&state.pool, task_id).await?;
+        return Err(AppError::Conflict(
+            ZHUIGENG_SCAN_AIRING_CANCELLED.to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub async fn zhuigeng_gaps_summary_with_config(

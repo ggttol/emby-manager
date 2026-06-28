@@ -624,7 +624,12 @@ describe('App shell', () => {
 
   it('loads scan workspace and creates library/item refresh tasks with csrf', async () => {
     const strmLibs: Array<string | null> = [];
+    const libraryPayloads: unknown[] = [];
     const scanPayloads: unknown[] = [];
+    let libraries = [
+      { id: 'movie-lib', name: '电影', type: 'movies', paths: ['/strm/电影'] },
+      { id: 'show-lib', name: '电视剧', type: 'tvshows', paths: ['/strm/电视剧'] }
+    ];
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/system/summary') {
         return jsonResponse(systemSummary);
@@ -639,12 +644,29 @@ describe('App shell', () => {
         return jsonResponse(autostrmStatus);
       }
       if (url.pathname === '/api/v2/libraries') {
-        return jsonResponse({
-          libraries: [
-            { id: 'movie-lib', name: '电影', type: 'movies', paths: ['/strm/电影'] },
-            { id: 'show-lib', name: '电视剧', type: 'tvshows', paths: ['/strm/电视剧'] }
-          ]
-        });
+        if (init?.method === 'POST') {
+          const headers = init?.headers as Headers;
+          expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+          const payload = JSON.parse(String(init?.body));
+          libraryPayloads.push(payload);
+          const created = {
+            id: 'anime-lib',
+            name: String(payload.name),
+            type: String(payload.collection_type),
+            paths: ['/strm/动画']
+          };
+          libraries = [...libraries, created];
+          return jsonResponse({
+            ok: true,
+            name: created.name,
+            id: created.id,
+            library: created,
+            created_dirs: ['/volume1/strm/动画'],
+            emby_status: { status: 'created' },
+            warnings: ['目录需要稍后确认']
+          });
+        }
+        return jsonResponse({ libraries });
       }
       if (url.pathname === '/api/v2/libraries/strm') {
         strmLibs.push(url.searchParams.get('lib'));
@@ -704,6 +726,14 @@ describe('App shell', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '扫描' }));
     expect(await screen.findByText('扫描工作台')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('新建媒体库名称'), { target: { value: '动画' } });
+    fireEvent.change(screen.getByLabelText('新建媒体库类型'), { target: { value: 'tvshows' } });
+    fireEvent.click(screen.getByRole('button', { name: '创建媒体库' }));
+    await waitFor(() => expect(libraryPayloads[0]).toEqual({ name: '动画', collection_type: 'tvshows' }));
+    expect(await screen.findByText('目录需要稍后确认')).toBeInTheDocument();
+    await waitFor(() => expect((screen.getByLabelText('扫描目标库') as HTMLSelectElement).value).toBe('动画'));
+    await waitFor(() => expect(strmLibs).toContain('动画'));
+
     fireEvent.change(screen.getByLabelText('扫描目标库'), { target: { value: '电影' } });
     expect((await screen.findAllByText('Movie/Movie.strm')).length).toBeGreaterThan(0);
     await waitFor(() => expect(strmLibs).toContain('电影'));

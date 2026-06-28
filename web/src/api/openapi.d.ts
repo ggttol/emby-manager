@@ -429,7 +429,7 @@ export interface paths {
         };
         get: operations["libraries"];
         put?: never;
-        post?: never;
+        post: operations["create_library"];
         delete?: never;
         options?: never;
         head?: never;
@@ -954,6 +954,17 @@ export interface components {
             severity: string;
             stage: string;
         };
+        AddNewDedupReport: {
+            dups: components["schemas"]["DedupGroup"][];
+            dups_count: number;
+            error?: string | null;
+            lib?: string | null;
+            ok: boolean;
+            review: components["schemas"]["DedupReviewGroup"][];
+            review_count: number;
+            triggered: boolean;
+            warnings: string[];
+        };
         AddNewItem: {
             file_ids?: string[] | null;
             kind?: string | null;
@@ -987,9 +998,11 @@ export interface components {
         };
         AddNewReport: {
             check: components["schemas"]["AddNewCheckReport"];
+            dedup: components["schemas"]["AddNewDedupReport"];
             ok: boolean;
             poster: components["schemas"]["AddNewPosterReport"];
             scan: components["schemas"]["AddNewScanReport"];
+            strm: components["schemas"]["AddNewStrmReport"];
             target: components["schemas"]["AddNewTargetReport"];
             transfer: components["schemas"]["AddNewTransferSummary"];
         };
@@ -1013,6 +1026,20 @@ export interface components {
             ok: boolean;
             triggered: boolean;
             warning?: string | null;
+        };
+        AddNewStrmReport: {
+            attention: string[];
+            error?: string | null;
+            lib?: string | null;
+            matched: number;
+            new_count: number;
+            new_folders: {
+                [key: string]: number;
+            };
+            ok: boolean;
+            retried: boolean;
+            triggered: boolean;
+            warnings: string[];
         };
         AddNewTarget: {
             cid?: string | null;
@@ -1352,9 +1379,36 @@ export interface components {
             invalidated_sessions: number;
             ok: boolean;
         };
+        CleanupCandidate: {
+            dimensions: {
+                [key: string]: components["schemas"]["CleanupDimensionScore"];
+            };
+            item_id: string;
+            lib: string;
+            name: string;
+            path?: string | null;
+            reasons: string[];
+            /** Format: double */
+            score: number;
+        };
+        CleanupDimensionScore: {
+            reason: string;
+            /** Format: double */
+            score: number;
+            value?: string | null;
+            warning?: string | null;
+        };
+        CleanupSuggestRequest: {
+            dimensions?: string[] | null;
+            lib?: string | null;
+            /** Format: double */
+            min_score?: number | null;
+            top?: number | null;
+        };
         CleanupSummaryResponse: {
             autostrm: components["schemas"]["AutostrmSnapshot"];
             catalog: components["schemas"]["CatalogInsight"];
+            cleanup_candidates: components["schemas"]["CleanupCandidate"][];
             complete_business_port: boolean;
             logs: components["schemas"]["LogInsight"];
             meta: components["schemas"]["InsightMeta"];
@@ -1397,6 +1451,20 @@ export interface components {
             settings: {
                 [key: string]: unknown;
             };
+        };
+        CreateLibraryRequest: {
+            collection_type: string;
+            name: string;
+        };
+        CreateLibraryResponse: {
+            created_dirs: string[];
+            /** Format: int32 */
+            emby_status: number;
+            id?: string | null;
+            library?: null | components["schemas"]["EmbyLibrary"];
+            name: string;
+            ok: boolean;
+            warnings: string[];
         };
         CreateUserRequest: {
             name: string;
@@ -2264,21 +2332,31 @@ export interface components {
         };
         ZhuigengScanAiringResponse: {
             copy_text: string;
+            error_count: number;
+            new_count: number;
             note: string;
             ok: boolean;
+            ok_count: number;
             results: components["schemas"]["ZhuigengScanAiringRow"][];
             total: number;
         };
         ZhuigengScanAiringRow: {
+            attention: string[];
             behind: number;
             err?: string | null;
+            error?: string | null;
             hint?: string | null;
             id?: string | null;
+            keyword: string;
             lib: string;
+            matched: number;
             name: string;
+            new_count: number;
             ok: boolean;
+            series?: string | null;
             status: string;
             tmdb: string;
+            tmdb_status: string;
         };
         ZhuigengStatusResponse: {
             continuing: number;
@@ -2650,7 +2728,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CleanupSuggestRequest"];
+            };
+        };
         responses: {
             200: {
                 headers: {
@@ -2891,6 +2973,29 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LibrariesResponse"];
+                };
+            };
+        };
+    };
+    create_library: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateLibraryRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateLibraryResponse"];
                 };
             };
         };
