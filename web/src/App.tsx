@@ -22,6 +22,7 @@ import {
 } from './api/client';
 import { TaskCenter } from './components/TaskCenter';
 import { ToastProvider, useToast } from './components/Toast';
+import { CatalogPanel } from './components/CatalogPanel';
 import { UsersPanel } from './components/UsersPanel';
 
 type Tab = {
@@ -154,6 +155,14 @@ function TabPanel({ tab }: { tab: Tab }) {
     return (
       <section className="panel">
         <UsersPanel />
+      </section>
+    );
+  }
+
+  if (tab.id === 'catalog') {
+    return (
+      <section className="panel">
+        <CatalogPanel />
       </section>
     );
   }

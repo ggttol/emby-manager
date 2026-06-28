@@ -234,6 +234,191 @@ describe('App shell', () => {
     expect(await screen.findByText('已保存 Alice 的用户策略')).toBeInTheDocument();
   });
 
+  it('searches catalog and creates 115 save/offline tasks with csrf', async () => {
+    const planPayloads: unknown[] = [];
+    let savePayload: unknown = null;
+    let offlinePayload: unknown = null;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/catalog/stats') {
+        return jsonResponse({ available: true, total: 260000, packages: 1200 });
+      }
+      if (url.pathname === '/api/v2/config') {
+        return jsonResponse({ settings: { c115_cid_map: { 电影: '12345' } } });
+      }
+      if (url.pathname === '/api/v2/catalog/search') {
+        expect(url.searchParams.get('q')).toBe('movie');
+        expect(url.searchParams.get('limit')).toBe('80');
+        return jsonResponse({
+          total: 2,
+          truncated: false,
+          items: [
+            {
+              name: 'The Movie',
+              sheet: '电影',
+              link: 'https://115.com/s/abc?password=xy12',
+              is_pkg: false,
+              link_type: 'share115',
+              transfer: true,
+              share: 'abc',
+              rc: 'xy12'
+            },
+            {
+              name: 'The Magnet',
+              sheet: '电影',
+              link: 'magnet:?xt=urn:btih:123',
+              is_pkg: false,
+              link_type: 'magnet',
+              transfer: false,
+              share: null,
+              rc: null
+            }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/catalog/transfer-plan') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        const payload = JSON.parse(String(init?.body));
+        planPayloads.push(payload);
+        expect(payload.lib).toBe('电影');
+        if (payload.item.name === 'The Movie') {
+          return jsonResponse({
+            ok: true,
+            action: 'save_share',
+            link_type: 'share115',
+            transfer: true,
+            is_pkg: false,
+            label: 'The Movie',
+            target: { lib: '电影', cid: null },
+            save: {
+              endpoint: '/api/v2/c115/save',
+              method: 'POST',
+              share: 'abc',
+              receive_code: 'xy12',
+              payload: {
+                url: 'https://115.com/s/abc?password=xy12',
+                pwd: 'xy12',
+                lib: '电影',
+                cid: null,
+                label: 'The Movie'
+              }
+            },
+            offline: null,
+            unsupported: null
+          });
+        }
+        return jsonResponse({
+          ok: true,
+          action: 'offline_download',
+          link_type: 'magnet',
+          transfer: false,
+          is_pkg: false,
+          label: 'The Magnet',
+          target: { lib: '电影', cid: null },
+          save: null,
+          offline: {
+            endpoint: '/api/v2/c115/offline',
+            method: 'POST',
+            protocol: 'magnet',
+            payload: {
+              url: 'magnet:?xt=urn:btih:123',
+              lib: '电影',
+              cid: null,
+              label: 'The Magnet'
+            }
+          },
+          unsupported: null
+        });
+      }
+      if (url.pathname === '/api/v2/c115/save') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        savePayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: '44444444-4444-4444-8444-444444444444',
+          kind: 'c115_save',
+          label: 'The Movie',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
+      if (url.pathname === '/api/v2/c115/offline') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        offlinePayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: '55555555-5555-4555-8555-555555555555',
+          kind: 'c115_offline',
+          label: 'The Magnet',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:01Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:01Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '找资源' }));
+    expect(await screen.findByText('库内 260,000 条 · 整包 1,200')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('资源关键词'), { target: { value: 'movie' } });
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }));
+
+    expect(await screen.findByText('The Movie')).toBeInTheDocument();
+    expect(screen.getByText('The Magnet')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '转存' }));
+    fireEvent.click(screen.getAllByRole('button', { name: '转存' }).at(-1)!);
+
+    await waitFor(() => expect(savePayload).toEqual({
+      url: 'https://115.com/s/abc?password=xy12',
+      pwd: 'xy12',
+      lib: '电影',
+      cid: null,
+      label: 'The Movie'
+    }));
+    expect(await screen.findByText('任务已创建：The Movie')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '离线' }));
+    fireEvent.click(screen.getAllByRole('button', { name: '离线' }).at(-1)!);
+
+    await waitFor(() => expect(offlinePayload).toEqual({
+      url: 'magnet:?xt=urn:btih:123',
+      lib: '电影',
+      cid: null,
+      label: 'The Magnet'
+    }));
+    expect(planPayloads).toHaveLength(2);
+    expect(planPayloads).toEqual([
+      expect.objectContaining({ label: 'The Movie', lib: '电影' }),
+      expect.objectContaining({ label: 'The Magnet', lib: '电影' })
+    ]);
+  });
+
   it('shows login panel and enters the shell after login', async () => {
     mockApi((url) => {
       if (url.pathname === '/api/v2/auth/me') {
