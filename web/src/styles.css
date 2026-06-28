@@ -1751,6 +1751,7 @@ main {
 .issueList,
 .sampleList,
 .extensionList,
+.coverageList,
 .libraryBars {
   display: grid;
   gap: 8px;
@@ -1759,6 +1760,7 @@ main {
 .todoItem,
 .issueList article,
 .sampleList article,
+.coverageList article,
 .libraryBars article {
   min-width: 0;
   padding: 10px;
@@ -1777,6 +1779,7 @@ main {
 .todoItem strong,
 .issueList strong,
 .sampleList strong,
+.coverageList strong,
 .libraryBars strong {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -1982,6 +1985,23 @@ main {
 
 .sampleList small {
   grid-column: 2;
+}
+
+.coverageList article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 10px;
+}
+
+.coverageList span {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.coverageList small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .metaColumns {

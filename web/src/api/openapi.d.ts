@@ -2004,16 +2004,23 @@ export interface components {
             directories: number;
             entry_limit: number;
             files: number;
+            library_coverage: components["schemas"]["SubtitleLibraryCoverage"][];
             max_depth: number;
+            missing_subtitle_samples: string[];
             other_files: number;
             samples: components["schemas"]["StrmSample"][];
             /** Format: int64 */
             strm_bytes: number;
             strm_files: number;
+            strm_with_subtitles: number;
+            strm_without_subtitles: number;
             /** Format: int64 */
             subtitle_bytes: number;
+            /** Format: double */
+            subtitle_coverage_percent: number;
             subtitle_extensions: components["schemas"]["ExtensionCount"][];
             subtitle_files: number;
+            subtitle_languages: components["schemas"]["SubtitleLanguageCount"][];
             truncated: boolean;
             warnings: string[];
         };
@@ -2054,6 +2061,18 @@ export interface components {
         StrmSignalSample: {
             kind: string;
             rel_path: string;
+        };
+        SubtitleLanguageCount: {
+            count: number;
+            language: string;
+        };
+        SubtitleLibraryCoverage: {
+            /** Format: double */
+            coverage_percent: number;
+            library: string;
+            missing_subtitles: number;
+            strm_files: number;
+            with_subtitles: number;
         };
         SystemSummary: {
             cd_root: string;

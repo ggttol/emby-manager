@@ -169,6 +169,7 @@ async fn strm_overview_counts_subtitles_and_samples_without_reading_payloads() {
     std::fs::write(season.join("E01.strm"), "http://example/E01.mkv").unwrap();
     std::fs::write(season.join("E01.zh.srt"), "字幕").unwrap();
     std::fs::write(season.join("E01.ass"), "[Script Info]").unwrap();
+    std::fs::write(season.join("E02.strm"), "http://example/E02.mkv").unwrap();
     std::fs::write(season.join("poster.jpg"), "noise").unwrap();
 
     let state = state_with_roots(
@@ -209,10 +210,23 @@ async fn strm_overview_counts_subtitles_and_samples_without_reading_payloads() {
         .overview
         .expect("overview=true should produce stats");
     assert_eq!(overview.directories, 1);
-    assert_eq!(overview.files, 4);
-    assert_eq!(overview.strm_files, 1);
+    assert_eq!(overview.files, 5);
+    assert_eq!(overview.strm_files, 2);
     assert_eq!(overview.subtitle_files, 2);
     assert_eq!(overview.other_files, 1);
+    assert_eq!(overview.strm_with_subtitles, 1);
+    assert_eq!(overview.strm_without_subtitles, 1);
+    assert_eq!(overview.subtitle_coverage_percent, 50.0);
+    assert_eq!(
+        overview.missing_subtitle_samples,
+        vec!["Season 1/E02.strm".to_string()]
+    );
+    assert_eq!(overview.library_coverage.len(), 1);
+    assert_eq!(overview.library_coverage[0].library, "Shows");
+    assert_eq!(overview.library_coverage[0].strm_files, 2);
+    assert_eq!(overview.library_coverage[0].with_subtitles, 1);
+    assert_eq!(overview.library_coverage[0].missing_subtitles, 1);
+    assert_eq!(overview.library_coverage[0].coverage_percent, 50.0);
     assert!(!overview.truncated);
     assert!(overview.warnings.is_empty(), "{:?}", overview.warnings);
     assert!(
@@ -226,6 +240,18 @@ async fn strm_overview_counts_subtitles_and_samples_without_reading_payloads() {
             .subtitle_extensions
             .iter()
             .any(|ext| ext.extension == "srt" && ext.count == 1)
+    );
+    assert!(
+        overview
+            .subtitle_languages
+            .iter()
+            .any(|lang| lang.language == "zh" && lang.count == 1)
+    );
+    assert!(
+        overview
+            .subtitle_languages
+            .iter()
+            .any(|lang| lang.language == "unknown" && lang.count == 1)
     );
     assert!(
         overview

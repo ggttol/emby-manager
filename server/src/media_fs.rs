@@ -12,7 +12,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::mpsc,
     thread,
@@ -102,10 +102,31 @@ pub struct StrmOverview {
     pub other_files: usize,
     pub strm_bytes: u64,
     pub subtitle_bytes: u64,
+    pub strm_with_subtitles: usize,
+    pub strm_without_subtitles: usize,
+    pub subtitle_coverage_percent: f64,
     pub subtitle_extensions: Vec<ExtensionCount>,
+    pub subtitle_languages: Vec<SubtitleLanguageCount>,
+    pub library_coverage: Vec<SubtitleLibraryCoverage>,
+    pub missing_subtitle_samples: Vec<String>,
     pub samples: Vec<StrmSample>,
     pub truncated: bool,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SubtitleLanguageCount {
+    pub language: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SubtitleLibraryCoverage {
+    pub library: String,
+    pub strm_files: usize,
+    pub with_subtitles: usize,
+    pub missing_subtitles: usize,
+    pub coverage_percent: f64,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -1914,7 +1935,13 @@ fn build_strm_overview(base: &Path, max_depth: usize, sample_limit: usize) -> St
         other_files: 0,
         strm_bytes: 0,
         subtitle_bytes: 0,
+        strm_with_subtitles: 0,
+        strm_without_subtitles: 0,
+        subtitle_coverage_percent: 0.0,
         subtitle_extensions: Vec::new(),
+        subtitle_languages: Vec::new(),
+        library_coverage: Vec::new(),
+        missing_subtitle_samples: Vec::new(),
         samples: Vec::new(),
         truncated: false,
         warnings: Vec::new(),
@@ -1933,8 +1960,12 @@ fn build_strm_overview(base: &Path, max_depth: usize, sample_limit: usize) -> St
     }
 
     let mut subtitle_counts = BTreeMap::<String, usize>::new();
+    let mut subtitle_language_counts = BTreeMap::<String, usize>::new();
+    let mut subtitle_keys = BTreeSet::<String>::new();
+    let mut strm_entries = Vec::<StrmCoverageEntry>::new();
     let mut read_errors = 0usize;
     let mut seen_entries = 0usize;
+    let single_library = base.file_name().and_then(|name| name.to_str());
 
     for entry in WalkDir::new(base)
         .min_depth(1)
@@ -1979,6 +2010,11 @@ fn build_strm_overview(base: &Path, max_depth: usize, sample_limit: usize) -> St
         if extension.as_deref() == Some("strm") {
             overview.strm_files += 1;
             overview.strm_bytes = overview.strm_bytes.saturating_add(size);
+            strm_entries.push(StrmCoverageEntry {
+                key: rel_key_without_extension(rel),
+                library: library_for_rel(rel, single_library),
+                rel_path: rel_path.clone(),
+            });
             push_sample(
                 &mut overview.samples,
                 sample_limit,
@@ -1995,6 +2031,10 @@ fn build_strm_overview(base: &Path, max_depth: usize, sample_limit: usize) -> St
             overview.subtitle_files += 1;
             overview.subtitle_bytes = overview.subtitle_bytes.saturating_add(size);
             *subtitle_counts.entry(extension.clone()).or_default() += 1;
+            subtitle_keys.insert(subtitle_video_key(rel));
+            *subtitle_language_counts
+                .entry(infer_subtitle_language(rel))
+                .or_default() += 1;
             push_sample(
                 &mut overview.samples,
                 sample_limit,
@@ -2017,7 +2057,139 @@ fn build_strm_overview(base: &Path, max_depth: usize, sample_limit: usize) -> St
         .into_iter()
         .map(|(extension, count)| ExtensionCount { extension, count })
         .collect();
+    overview.subtitle_languages = subtitle_language_counts
+        .into_iter()
+        .map(|(language, count)| SubtitleLanguageCount { language, count })
+        .collect();
+    finish_subtitle_coverage(&mut overview, strm_entries, &subtitle_keys, sample_limit);
     overview
+}
+
+struct StrmCoverageEntry {
+    key: String,
+    library: String,
+    rel_path: String,
+}
+
+#[derive(Default)]
+struct LibraryCoverageAccumulator {
+    strm_files: usize,
+    with_subtitles: usize,
+}
+
+fn finish_subtitle_coverage(
+    overview: &mut StrmOverview,
+    strm_entries: Vec<StrmCoverageEntry>,
+    subtitle_keys: &BTreeSet<String>,
+    sample_limit: usize,
+) {
+    let mut libraries = BTreeMap::<String, LibraryCoverageAccumulator>::new();
+    for entry in strm_entries {
+        let has_subtitle = subtitle_keys.contains(&entry.key);
+        if has_subtitle {
+            overview.strm_with_subtitles += 1;
+        } else {
+            overview.strm_without_subtitles += 1;
+            if overview.missing_subtitle_samples.len() < sample_limit {
+                overview
+                    .missing_subtitle_samples
+                    .push(entry.rel_path.clone());
+            }
+        }
+        let library = libraries.entry(entry.library).or_default();
+        library.strm_files += 1;
+        if has_subtitle {
+            library.with_subtitles += 1;
+        }
+    }
+    overview.subtitle_coverage_percent =
+        coverage_percent(overview.strm_with_subtitles, overview.strm_files);
+    overview.library_coverage = libraries
+        .into_iter()
+        .map(|(library, stats)| {
+            let missing_subtitles = stats.strm_files.saturating_sub(stats.with_subtitles);
+            SubtitleLibraryCoverage {
+                library,
+                strm_files: stats.strm_files,
+                with_subtitles: stats.with_subtitles,
+                missing_subtitles,
+                coverage_percent: coverage_percent(stats.with_subtitles, stats.strm_files),
+            }
+        })
+        .collect();
+}
+
+fn coverage_percent(with_subtitles: usize, total: usize) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+    ((with_subtitles as f64 / total as f64) * 1000.0).round() / 10.0
+}
+
+fn rel_key_without_extension(rel: &Path) -> String {
+    rel.with_extension("").to_string_lossy().replace('\\', "/")
+}
+
+fn subtitle_video_key(rel: &Path) -> String {
+    let mut without_extension = rel.with_extension("");
+    let Some(stem) = without_extension.file_name().and_then(|name| name.to_str()) else {
+        return rel_key_without_extension(rel);
+    };
+    let mut parts: Vec<&str> = stem.split('.').collect();
+    while parts.len() > 1
+        && parts
+            .last()
+            .is_some_and(|part| subtitle_tag_language(part).is_some() || is_subtitle_modifier(part))
+    {
+        parts.pop();
+    }
+    without_extension.set_file_name(parts.join("."));
+    without_extension.to_string_lossy().replace('\\', "/")
+}
+
+fn library_for_rel(rel: &Path, single_library: Option<&str>) -> String {
+    if let Some(library) = single_library.filter(|value| !value.is_empty()) {
+        return library.to_string();
+    }
+    rel.components()
+        .next()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "(root)".to_string())
+}
+
+fn infer_subtitle_language(rel: &Path) -> String {
+    let Some(stem) = rel.file_stem().and_then(|name| name.to_str()) else {
+        return "unknown".to_string();
+    };
+    for part in stem.split('.').rev() {
+        if let Some(language) = subtitle_tag_language(part) {
+            return language.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+fn subtitle_tag_language(part: &str) -> Option<&'static str> {
+    let normalized = part.trim().to_ascii_lowercase().replace(['_', '-'], "");
+    match normalized.as_str() {
+        "zh" | "zho" | "chi" | "chs" | "cht" | "sc" | "tc" | "cn" | "zhcn" | "zhtw" | "big5"
+        | "gb" => Some("zh"),
+        "en" | "eng" | "english" => Some("en"),
+        "ja" | "jp" | "jpn" | "japanese" => Some("ja"),
+        "ko" | "kor" | "kr" | "korean" => Some("ko"),
+        "fr" | "fre" | "fra" | "french" => Some("fr"),
+        "de" | "ger" | "deu" | "german" => Some("de"),
+        "es" | "spa" | "spanish" => Some("es"),
+        _ => None,
+    }
+}
+
+fn is_subtitle_modifier(part: &str) -> bool {
+    matches!(
+        part.trim().to_ascii_lowercase().as_str(),
+        "default" | "forced" | "sdh" | "hi" | "cc"
+    )
 }
 
 fn push_sample(

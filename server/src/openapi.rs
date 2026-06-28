@@ -40,7 +40,7 @@ use crate::{
         ManageDeleteBatchRequest, ManageDeleteBatchResult, ManageDeleteExecuteResult,
         ManageDeleteRequest, ManageMoveExecuteResult, ManageMoveRequest, ManagePreviewResult,
         ScanLibraryItemResult, ScanLibraryRequest, ScanLibraryResult, StrmEntry,
-        StrmGenerateResult, StrmListResponse,
+        StrmGenerateResult, StrmListResponse, SubtitleLanguageCount, SubtitleLibraryCoverage,
     },
     posters::{
         PosterApplyRequest, PosterApplyResponse, PosterDetectRequest, PosterDetectResponse,
@@ -209,6 +209,8 @@ use utoipa::OpenApi;
         ManagePreviewResult,
         StrmEntry,
         StrmListResponse,
+        SubtitleLanguageCount,
+        SubtitleLibraryCoverage,
         PosterDetectRequest,
         PosterDetectResponse,
         PosterSignalItem,

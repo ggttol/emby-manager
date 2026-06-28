@@ -647,6 +647,7 @@ export function SubtitlesPanel() {
       <div className="statGrid">
         <StatCard icon={<FileText />} label=".strm" value={count(overview?.strm_files)} hint={bytes(overview?.strm_bytes)} />
         <StatCard icon={<Subtitles />} label="字幕文件" value={count(overview?.subtitle_files)} tone={overview?.subtitle_files ? 'ok' : 'warn'} hint={bytes(overview?.subtitle_bytes)} />
+        <StatCard icon={<CheckCircle2 />} label="覆盖率" value={percent(overview?.subtitle_coverage_percent)} tone={overview?.strm_without_subtitles ? 'warn' : 'ok'} hint={`${count(overview?.strm_with_subtitles)} 有字幕 / ${count(overview?.strm_without_subtitles)} 缺字幕`} />
         <StatCard icon={<HardDrive />} label="其他文件" value={count(overview?.other_files)} hint={`${count(overview?.directories)} 目录`} />
         <StatCard icon={<AlertTriangle />} label="截断" value={overview?.truncated ? '是' : '否'} tone={overview?.truncated ? 'warn' : 'ok'} hint={`上限 ${count(overview?.entry_limit)}`} />
       </div>
@@ -658,28 +659,67 @@ export function SubtitlesPanel() {
 
 function SubtitleDetails({ overview }: { overview: StrmOverview | null }) {
   if (!overview) return <div className="empty inlineEmpty">等待字幕统计数据</div>;
+  const subtitleExtensions = overview.subtitle_extensions || [];
+  const subtitleLanguages = overview.subtitle_languages || [];
+  const libraryCoverage = overview.library_coverage || [];
+  const missingSubtitleSamples = overview.missing_subtitle_samples || [];
+  const samples = overview.samples || [];
   return (
     <div className="readonlySplit">
       <section className="readonlyBlock">
         <h2>字幕扩展</h2>
         <div className="extensionList">
-          {overview.subtitle_extensions.map((item) => (
+          {subtitleExtensions.map((item) => (
             <span key={item.extension}><strong>.{item.extension}</strong>{count(item.count)}</span>
           ))}
-          {overview.subtitle_extensions.length === 0 && <div className="empty inlineEmpty">没有发现外挂字幕扩展</div>}
+          {subtitleExtensions.length === 0 && <div className="empty inlineEmpty">没有发现外挂字幕扩展</div>}
+        </div>
+      </section>
+      <section className="readonlyBlock">
+        <h2>语言</h2>
+        <div className="extensionList">
+          {subtitleLanguages.map((item) => (
+            <span key={item.language}><strong>{item.language}</strong>{count(item.count)}</span>
+          ))}
+          {subtitleLanguages.length === 0 && <div className="empty inlineEmpty">没有语言标签</div>}
+        </div>
+      </section>
+      <section className="readonlyBlock">
+        <h2>按库覆盖</h2>
+        <div className="coverageList">
+          {libraryCoverage.map((item) => (
+            <article key={item.library}>
+              <strong>{item.library}</strong>
+              <span>{percent(item.coverage_percent)}</span>
+              <small>{count(item.with_subtitles)} / {count(item.strm_files)} 有字幕，缺 {count(item.missing_subtitles)}</small>
+            </article>
+          ))}
+          {libraryCoverage.length === 0 && <div className="empty inlineEmpty">没有 .strm 可统计</div>}
         </div>
       </section>
       <section className="readonlyBlock">
         <h2>样例</h2>
         <div className="sampleList">
-          {overview.samples.map((sample) => (
+          {samples.map((sample) => (
             <article key={`${sample.kind}-${sample.rel_path}`}>
               <span className="badge">{sample.kind}</span>
               <strong>{sample.rel_path}</strong>
               <small>.{sample.extension || 'unknown'} · {bytes(sample.size)}</small>
             </article>
           ))}
-          {overview.samples.length === 0 && <div className="empty inlineEmpty">没有样例</div>}
+          {samples.length === 0 && <div className="empty inlineEmpty">没有样例</div>}
+        </div>
+      </section>
+      <section className="readonlyBlock">
+        <h2>缺字幕样例</h2>
+        <div className="sampleList">
+          {missingSubtitleSamples.map((sample) => (
+            <article key={sample}>
+              <span className="badge warn">missing</span>
+              <strong>{sample}</strong>
+            </article>
+          ))}
+          {missingSubtitleSamples.length === 0 && <div className="empty inlineEmpty">没有缺字幕样例</div>}
         </div>
       </section>
     </div>

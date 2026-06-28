@@ -1,4 +1,6 @@
 use crate::{
+    config_store,
+    emby::EmbyClient,
     error::{AppError, AppResult},
     media_fs::safe_under,
     state::AppState,
@@ -17,6 +19,7 @@ use uuid::Uuid;
 
 const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
+const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
 
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct UndoListQuery {
@@ -144,7 +147,7 @@ async fn execute_entry(state: &AppState, entry: &UndoEntry) -> AppResult<UndoExe
     match entry.op.as_str() {
         "move" => execute_move_undo(state, entry).await,
         "delete" | "smart_archive" | "replace" => Ok(manual_restore_response(entry)),
-        "rebind" => Ok(rebind_response(entry)),
+        "rebind" => execute_rebind_undo(state, entry).await,
         _ => Ok(UndoExecuteResponse {
             ok: false,
             id: entry.id,
@@ -212,30 +215,124 @@ fn move_requires_execution_response(entry: &UndoEntry) -> UndoExecuteResponse {
 }
 
 fn rebind_response(entry: &UndoEntry) -> UndoExecuteResponse {
-    if payload_string(&entry.payload, &["old_tmdb"]).is_none() {
-        return unsupported_response(
-            entry,
-            "rebind undo payload 缺少 old_tmdb,无法安全恢复海报绑定",
-            Some("请手动检查当前海报/TMDB 绑定状态".to_string()),
-        );
-    }
-    pending_response(
-        entry,
-        "rebind undo 已记录 old_tmdb,但 Rust poster apply 尚未接入; 未执行写操作",
-    )
-}
-
-fn pending_response(entry: &UndoEntry, msg: &str) -> UndoExecuteResponse {
+    let payload = match parse_rebind_payload(entry) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
     UndoExecuteResponse {
         ok: false,
         id: entry.id,
         op: entry.op.clone(),
-        action: UndoExecuteAction::PendingPort,
-        msg: msg.to_string(),
-        lib: payload_string(&entry.payload, &["lib", "from", "to"]),
-        folder: payload_string(&entry.payload, &["folder"]),
-        hint: Some("Rust 预览版未执行任何写操作,旧版 Python 仍可作为回滚路径".to_string()),
+        action: UndoExecuteAction::ManualRestore,
+        msg: format!(
+            "rebind undo 可恢复旧 TMDb {}; 调用执行接口会写回 Emby 远端搜索绑定",
+            payload.old_tmdb
+        ),
+        lib: None,
+        folder: payload.name,
+        hint: Some(format!(
+            "调用 /api/v2/manage/undo/execute 会对 Emby item {} 应用旧 TMDb {}",
+            payload.item_id, payload.old_tmdb
+        )),
     }
+}
+
+async fn execute_rebind_undo(
+    state: &AppState,
+    entry: &UndoEntry,
+) -> AppResult<UndoExecuteResponse> {
+    let payload = match parse_rebind_payload(entry) {
+        Ok(payload) => payload,
+        Err(response) => return Ok(response),
+    };
+    let client = rebind_emby_client(state).await?;
+    let status = match client
+        .apply_remote_search(&payload.item_id, &payload.old_tmdb)
+        .await
+    {
+        Ok(status) => status,
+        Err(err) => {
+            return Ok(unsupported_response(
+                entry,
+                &format!("rebind undo 恢复旧 TMDb 失败,未标记 undone: {err}"),
+                Some("请确认 Emby 可访问、api_key 有效,再重试或手动恢复 TMDb 绑定".to_string()),
+            ));
+        }
+    };
+
+    let updated =
+        sqlx::query("UPDATE undo_entries SET undone = TRUE WHERE id = $1 AND undone = FALSE")
+            .bind(entry.id)
+            .execute(&state.pool)
+            .await?;
+    if updated.rows_affected() == 0 {
+        return Ok(already_undone_response(entry));
+    }
+
+    Ok(UndoExecuteResponse {
+        ok: true,
+        id: entry.id,
+        op: entry.op.clone(),
+        action: UndoExecuteAction::Executed,
+        msg: format!(
+            "已恢复 Emby item {} 的旧 TMDb {} (apply status {})",
+            payload.item_id, payload.old_tmdb, status
+        ),
+        lib: None,
+        folder: payload.name,
+        hint: Some("如海报未立即刷新,请在 Emby 中刷新该条目的元数据/图片".to_string()),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct RebindUndoPayload {
+    item_id: String,
+    old_tmdb: String,
+    name: Option<String>,
+}
+
+fn parse_rebind_payload(entry: &UndoEntry) -> Result<RebindUndoPayload, UndoExecuteResponse> {
+    let item_id = payload_string(&entry.payload, &["item_id", "id"]);
+    let old_tmdb = payload_string(&entry.payload, &["old_tmdb"]);
+    let missing: Vec<&str> = [
+        ("item_id/id", item_id.as_ref()),
+        ("old_tmdb", old_tmdb.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.is_none().then_some(key))
+    .collect();
+    if !missing.is_empty() {
+        return Err(unsupported_response(
+            entry,
+            &format!(
+                "rebind undo payload 缺少 {},无法安全恢复海报绑定",
+                missing.join("/")
+            ),
+            Some("请手动检查当前海报/TMDB 绑定状态".to_string()),
+        ));
+    }
+    Ok(RebindUndoPayload {
+        item_id: item_id.expect("validated item_id"),
+        old_tmdb: old_tmdb.expect("validated old_tmdb"),
+        name: payload_string(&entry.payload, &["name", "folder"]),
+    })
+}
+
+async fn rebind_emby_client(state: &AppState) -> AppResult<EmbyClient> {
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    ensure_rebind_api_key_configured(&api_key)?;
+    Ok(EmbyClient::new(emby_url, api_key, state.http.clone()))
+}
+
+fn ensure_rebind_api_key_configured(api_key: &str) -> AppResult<()> {
+    if api_key.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "api_key is not configured; set it via /api/v2/config before undoing poster rebind"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 async fn execute_move_undo(state: &AppState, entry: &UndoEntry) -> AppResult<UndoExecuteResponse> {

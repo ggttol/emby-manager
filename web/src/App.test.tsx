@@ -591,7 +591,13 @@ describe('App shell', () => {
             other_files: 15,
             strm_bytes: 2048,
             subtitle_bytes: 1024,
+            strm_with_subtitles: 90,
+            strm_without_subtitles: 30,
+            subtitle_coverage_percent: 75,
             subtitle_extensions: [{ extension: 'srt', count: 7 }, { extension: 'ass', count: 2 }],
+            subtitle_languages: [{ language: 'zh', count: 6 }, { language: 'en', count: 3 }],
+            library_coverage: [{ library: '电影', strm_files: 120, with_subtitles: 90, missing_subtitles: 30, coverage_percent: 75 }],
+            missing_subtitle_samples: ['电影/B.strm'],
             samples: [{ rel_path: '电影/A.srt', kind: 'subtitle', extension: 'srt', size: 512 }],
             truncated: false,
             warnings: []
@@ -606,6 +612,9 @@ describe('App shell', () => {
     fireEvent.click(await screen.findByRole('button', { name: '字幕' }));
     expect(await screen.findByText('外挂字幕概览')).toBeInTheDocument();
     expect(screen.getByText('.srt')).toBeInTheDocument();
+    expect(screen.getAllByText('75.0%').length).toBeGreaterThan(0);
+    expect(screen.getByText('zh')).toBeInTheDocument();
+    expect(screen.getByText('电影/B.strm')).toBeInTheDocument();
     expect(screen.getByText('电影/A.srt')).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('字幕库名'), { target: { value: '电影' } });
