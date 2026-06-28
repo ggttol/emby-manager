@@ -1311,6 +1311,162 @@ main {
   overflow-wrap: anywhere;
 }
 
+.logsPanel {
+  display: grid;
+  gap: 14px;
+}
+
+.logsToolbar,
+.logsTabs,
+.logsFilters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logsToolbar {
+  justify-content: space-between;
+}
+
+.logsTabs {
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.logsTabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted-strong);
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.logsTabs button.active {
+  border-color: #b8ddd5;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.logsFilters {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(150px, 190px) auto;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.logsFilters label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.logsFilters p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.logsTableWrap {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: 8px;
+}
+
+.logsTable,
+.undoTable {
+  min-width: 920px;
+}
+
+.logMessage,
+.undoTarget {
+  display: block;
+  max-width: 360px;
+  overflow-wrap: anywhere;
+}
+
+.logDetail summary {
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.logDetail pre,
+.undoHint {
+  max-width: 420px;
+  max-height: 180px;
+  margin: 8px 0 0;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid #cbd4c6;
+  border-radius: 7px;
+  background: #10130f;
+  color: #dcead8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.mutedText,
+.undoTable small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.undoResult {
+  display: grid;
+  gap: 12px;
+}
+
+.undoResult p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.undoResult dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.undoResult dl div {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.undoResult dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.undoResult dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 720;
+}
+
 .dangerText {
   color: var(--danger) !important;
 }
@@ -1581,6 +1737,10 @@ main {
   .scheduleActions,
   .scheduleItemMain,
   .scheduleMeta,
+  .logsToolbar,
+  .logsFilters,
+  .logsTabs,
+  .undoResult dl,
   .modalActions {
     align-items: stretch;
     flex-direction: column;

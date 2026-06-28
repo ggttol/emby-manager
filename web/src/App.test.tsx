@@ -773,6 +773,105 @@ describe('App shell', () => {
     await waitFor(() => expect(deleteCalls).toBe(1));
   });
 
+  it('loads logs, filters levels, and shows undo recovery guidance', async () => {
+    const logLevels: string[] = [];
+    let undoPayload: unknown = null;
+    const undoId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/logs') {
+        const level = url.searchParams.get('level') || 'all';
+        logLevels.push(level);
+        if (level === 'warn') {
+          return jsonResponse({
+            total: 1,
+            logs: [
+              {
+                id: 3,
+                level: 'warn',
+                message: 'CloudDrive 读取过快',
+                detail: { path: '/volume1/CloudNAS/CloudDrive/movie.mkv' },
+                created_at: '2026-06-28T00:02:00Z'
+              }
+            ]
+          });
+        }
+        return jsonResponse({
+          total: 2,
+          logs: [
+            {
+              id: 2,
+              level: 'error',
+              message: 'Emby 删除失败',
+              detail: { path: '/strm/电影/deleted.mkv' },
+              created_at: '2026-06-28T00:01:00Z'
+            },
+            {
+              id: 1,
+              level: 'info',
+              message: '定时启动',
+              detail: { kind: 'scan_all' },
+              created_at: '2026-06-28T00:00:00Z'
+            }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/manage/undo' && (!init?.method || init.method === 'GET')) {
+        return jsonResponse({
+          total: 1,
+          items: [
+            {
+              id: undoId,
+              legacy_id: 'u-1',
+              op: 'delete',
+              payload: { lib: '电影', folder: '片源 A' },
+              undone: false,
+              created_at: '2026-06-28T00:03:00Z'
+            }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/manage/undo/execute') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        undoPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: false,
+          id: undoId,
+          op: 'delete',
+          action: 'manual_restore',
+          msg: '「删除」已把 115 文件夹送入回收站,请先去 115 web 还原它,再用扫描补 strm',
+          lib: '电影',
+          folder: '片源 A',
+          hint: '115 web -> 回收站 -> 找「片源 A」-> 还原 -> 回到工具扫描对应库'
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '日志' }));
+    expect(await screen.findByText('Emby 删除失败')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('日志过滤'), { target: { value: '删除' } });
+    expect(screen.queryByText('定时启动')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('日志过滤'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('日志级别'), { target: { value: 'warn' } });
+    await waitFor(() => expect(logLevels).toContain('warn'));
+    expect(await screen.findByText('CloudDrive 读取过快')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Undo 记录' }));
+    expect(await screen.findByText('片源 A')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看恢复指引' }));
+
+    await waitFor(() => expect(undoPayload).toEqual({ id: undoId }));
+    expect(await screen.findByText('人工恢复')).toBeInTheDocument();
+    expect(screen.getByText(/请先去 115 web 还原它/)).toBeInTheDocument();
+  });
+
   it('shows login panel and enters the shell after login', async () => {
     mockApi((url) => {
       if (url.pathname === '/api/v2/auth/me') {
