@@ -12,7 +12,12 @@ use chrono::{DateTime, Datelike, Duration, NaiveTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
+use std::time::Duration as StdDuration;
+use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
+
+const SCHEDULER_POLL_SECONDS: u64 = 30;
+const SCHEDULER_ADVISORY_LOCK_ID: i64 = 8097_8098_42;
 
 #[derive(Debug, Serialize, FromRow, utoipa::ToSchema)]
 pub struct ScheduleJob {
@@ -72,6 +77,98 @@ pub fn router() -> Router<AppState> {
         .route("/api/v2/schedules/{id}/run", post(run_schedule))
 }
 
+pub fn spawn_scheduler_loop(state: AppState) {
+    tokio::spawn(async move {
+        tracing::info!(
+            poll_seconds = SCHEDULER_POLL_SECONDS,
+            "scheduler loop started"
+        );
+        let mut interval = tokio::time::interval(StdDuration::from_secs(SCHEDULER_POLL_SECONDS));
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            match tick_due_schedules(&state, Utc::now()).await {
+                Ok(started) if started > 0 => {
+                    tracing::info!(started, "scheduler started due jobs");
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, "scheduler tick failed");
+                }
+            }
+        }
+    });
+}
+
+pub async fn reconcile_interrupted(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    sqlx::query(
+        "UPDATE schedule_jobs sj
+         SET last_status = 'interrupted',
+             last_error = COALESCE(last_error, '服务重启后中断'),
+             last_ended_at = now(),
+             updated_at = now()
+         WHERE last_status IN ('running', 'watch_timeout')
+           AND (
+             last_task_id IS NULL
+             OR NOT EXISTS (
+                SELECT 1 FROM task_runs tr
+                WHERE tr.id = sj.last_task_id
+                  AND tr.status IN ('pending', 'running')
+             )
+           )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn tick_due_schedules(state: &AppState, now: DateTime<Utc>) -> AppResult<usize> {
+    let mut tx = state.pool.begin().await?;
+    let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(SCHEDULER_ADVISORY_LOCK_ID)
+        .fetch_one(&mut *tx)
+        .await?;
+    if !locked {
+        return Ok(0);
+    }
+
+    let jobs: Vec<ScheduleJob> = sqlx::query_as(
+        "SELECT * FROM schedule_jobs
+         WHERE enabled = TRUE
+         ORDER BY created_at ASC",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let due_ids = jobs
+        .into_iter()
+        .filter_map(|job| match is_due(&job.schedule, job.last_run_at, now) {
+            Ok(true) => Some(job.id),
+            Ok(false) => None,
+            Err(err) => {
+                tracing::warn!(schedule_id = %job.id, error = %err, "invalid schedule skipped");
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut started = 0usize;
+    for schedule_id in due_ids {
+        match start_schedule_preview_task(state.clone(), schedule_id, "schedule").await {
+            Ok(_) => started += 1,
+            Err(AppError::Conflict(err)) => {
+                tracing::info!(%schedule_id, error = %err, "due schedule skipped");
+            }
+            Err(err) => {
+                tracing::warn!(%schedule_id, error = %err, "due schedule failed to start");
+                mark_schedule_start_error(&state.pool, schedule_id, now, &err.to_string()).await?;
+            }
+        }
+    }
+    tx.commit().await?;
+    Ok(started)
+}
+
 #[utoipa::path(get, path = "/api/v2/schedules", tag = "schedules", responses((status = 200, body = [ScheduleJob])))]
 pub async fn list_schedules(State(state): State<AppState>) -> AppResult<Json<Vec<ScheduleJob>>> {
     let rows =
@@ -88,9 +185,11 @@ pub async fn create_schedule(
 ) -> AppResult<Json<ScheduleJob>> {
     validate_kind(&req.kind)?;
     validate_schedule(&req.schedule)?;
+    let now = Utc::now();
+    let last_run_at = is_due(&req.schedule, None, now)?.then_some(now);
     let row = sqlx::query_as::<_, ScheduleJob>(
-        "INSERT INTO schedule_jobs(id, name, kind, params, schedule, enabled)
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+        "INSERT INTO schedule_jobs(id, name, kind, params, schedule, enabled, last_run_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
     )
     .bind(Uuid::new_v4())
     .bind(req.name)
@@ -98,6 +197,7 @@ pub async fn create_schedule(
     .bind(req.params.unwrap_or_else(|| serde_json::json!({})))
     .bind(req.schedule)
     .bind(req.enabled.unwrap_or(true))
+    .bind(last_run_at)
     .fetch_one(&state.pool)
     .await?;
     Ok(Json(row))
@@ -111,9 +211,21 @@ pub async fn update_schedule(
 ) -> AppResult<Json<ScheduleJob>> {
     validate_kind(&req.kind)?;
     validate_schedule(&req.schedule)?;
+    let existing: ScheduleJob = sqlx::query_as("SELECT * FROM schedule_jobs WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("schedule 不存在".to_string()))?;
+    let schedule_changed = existing.schedule != req.schedule;
+    let last_run_at = if schedule_changed {
+        let now = Utc::now();
+        is_due(&req.schedule, None, now)?.then_some(now)
+    } else {
+        existing.last_run_at
+    };
     let row = sqlx::query_as::<_, ScheduleJob>(
         "UPDATE schedule_jobs
-         SET name = $2, kind = $3, params = $4, schedule = $5, enabled = $6, updated_at = now()
+         SET name = $2, kind = $3, params = $4, schedule = $5, enabled = $6, last_run_at = $7, updated_at = now()
          WHERE id = $1 RETURNING *",
     )
     .bind(id)
@@ -122,9 +234,9 @@ pub async fn update_schedule(
     .bind(req.params.unwrap_or_else(|| serde_json::json!({})))
     .bind(req.schedule)
     .bind(req.enabled.unwrap_or(true))
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("schedule 不存在".to_string()))?;
+    .bind(last_run_at)
+    .fetch_one(&state.pool)
+    .await?;
     Ok(Json(row))
 }
 
@@ -316,6 +428,26 @@ async fn update_schedule_finished(
     Ok(())
 }
 
+async fn mark_schedule_start_error(
+    pool: &sqlx::PgPool,
+    schedule_id: Uuid,
+    now: DateTime<Utc>,
+    error: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE schedule_jobs
+         SET last_run_at = $2, last_ended_at = now(), last_status = 'error',
+             last_error = $3, updated_at = now()
+         WHERE id = $1",
+    )
+    .bind(schedule_id)
+    .bind(now)
+    .bind(error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub fn validate_kind(kind: &str) -> AppResult<()> {
     if SUPPORTED_SCHEDULE_KINDS.contains(&kind) {
         Ok(())
@@ -354,6 +486,51 @@ pub fn validate_schedule(schedule: &Value) -> AppResult<()> {
         }
     }
     Ok(())
+}
+
+pub fn is_due(
+    schedule: &Value,
+    last_run_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> AppResult<bool> {
+    validate_schedule(schedule)?;
+    let hour = schedule["hour"].as_u64().unwrap() as u32;
+    let minute = schedule["minute"].as_u64().unwrap() as u32;
+    let target_time = NaiveTime::from_hms_opt(hour, minute, 0).unwrap();
+    let target = now.date_naive().and_time(target_time).and_utc();
+    if now < target {
+        return Ok(false);
+    }
+    match schedule["mode"].as_str().unwrap() {
+        "daily" => {}
+        "weekly" => {
+            let weekday = schedule["weekday"].as_i64().unwrap_or(0) as u32;
+            if now.weekday().num_days_from_monday() != weekday {
+                return Ok(false);
+            }
+        }
+        "monthly" => {
+            let configured = schedule["day"].as_u64().unwrap_or(1) as u32;
+            let last = last_day_of_month(now.year(), now.month());
+            if now.day() != configured.min(last) {
+                return Ok(false);
+            }
+        }
+        _ => return Ok(false),
+    }
+    if last_run_at.is_some_and(|last| same_schedule_period(schedule, last, now)) {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn same_schedule_period(schedule: &Value, last: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    match schedule["mode"].as_str().unwrap_or("") {
+        "daily" => last.date_naive() == now.date_naive(),
+        "weekly" => last.iso_week() == now.iso_week(),
+        "monthly" => last.year() == now.year() && last.month() == now.month(),
+        _ => false,
+    }
 }
 
 pub fn next_run(schedule: &Value, now: DateTime<Utc>) -> AppResult<DateTime<Utc>> {
@@ -412,5 +589,58 @@ mod tests {
     fn schedule_kind_must_be_known() {
         assert!(validate_kind("scan_all").is_ok());
         assert!(validate_kind("unknown").is_err());
+    }
+
+    #[test]
+    fn due_runs_after_target_once_per_daily_period() {
+        let sch = serde_json::json!({"mode":"daily","hour":3,"minute":0});
+        let now = DateTime::parse_from_rfc3339("2026-05-28T03:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        assert!(is_due(&sch, None, now).unwrap());
+        assert!(
+            !is_due(
+                &sch,
+                Some(
+                    DateTime::parse_from_rfc3339("2026-05-28T03:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc)
+                ),
+                now
+            )
+            .unwrap()
+        );
+        assert!(
+            is_due(
+                &sch,
+                Some(
+                    DateTime::parse_from_rfc3339("2026-05-27T03:00:00Z")
+                        .unwrap()
+                        .with_timezone(&Utc)
+                ),
+                now
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn due_respects_weekly_and_monthly_periods() {
+        let weekly = serde_json::json!({"mode":"weekly","hour":3,"minute":0,"weekday":3});
+        let thursday = DateTime::parse_from_rfc3339("2026-05-28T03:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let friday = DateTime::parse_from_rfc3339("2026-05-29T03:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(is_due(&weekly, None, thursday).unwrap());
+        assert!(!is_due(&weekly, None, friday).unwrap());
+
+        let monthly = serde_json::json!({"mode":"monthly","hour":3,"minute":0,"day":31});
+        let feb_end = DateTime::parse_from_rfc3339("2026-02-28T03:10:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(is_due(&monthly, None, feb_end).unwrap());
     }
 }

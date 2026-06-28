@@ -1,4 +1,5 @@
 use axum::extract::{Path, State};
+use chrono::{Duration as ChronoDuration, Utc};
 use emby_manager::{
     db,
     error::AppError,
@@ -12,8 +13,11 @@ use std::{env, path::PathBuf, time::Duration};
 use tokio::time::sleep;
 use uuid::Uuid;
 
+static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn run_schedule_creates_preview_task_and_finishes_done() {
+    let _guard = DB_LOCK.lock().await;
     let Some(state) = test_state().await else {
         eprintln!(
             "skipping scheduler preview DB test; set EMBY_MANAGER_SCHEDULER_TEST_DATABASE_URL"
@@ -52,6 +56,7 @@ async fn run_schedule_creates_preview_task_and_finishes_done() {
 
 #[tokio::test]
 async fn run_schedule_rejects_disabled_job_without_creating_task() {
+    let _guard = DB_LOCK.lock().await;
     let Some(state) = test_state().await else {
         eprintln!(
             "skipping scheduler preview DB test; set EMBY_MANAGER_SCHEDULER_TEST_DATABASE_URL"
@@ -69,6 +74,7 @@ async fn run_schedule_rejects_disabled_job_without_creating_task() {
 
 #[tokio::test]
 async fn run_schedule_rejects_unknown_kind_without_creating_task() {
+    let _guard = DB_LOCK.lock().await;
     let Some(state) = test_state().await else {
         eprintln!(
             "skipping scheduler preview DB test; set EMBY_MANAGER_SCHEDULER_TEST_DATABASE_URL"
@@ -82,6 +88,48 @@ async fn run_schedule_rejects_unknown_kind_without_creating_task() {
         .expect_err("unknown schedule kind should be rejected");
     assert!(matches!(err, AppError::BadRequest(_)));
     assert_eq!(task_count_for_schedule(&state, job.id).await, 0);
+}
+
+#[tokio::test]
+async fn scheduler_tick_starts_due_preview_task_once() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(state) = test_state().await else {
+        eprintln!(
+            "skipping scheduler preview DB test; set EMBY_MANAGER_SCHEDULER_TEST_DATABASE_URL"
+        );
+        return;
+    };
+    let now = Utc::now();
+    let job = sqlx::query_as::<_, ScheduleJob>(
+        "INSERT INTO schedule_jobs(id, name, kind, params, schedule, enabled, last_run_at)
+         VALUES ($1, $2, 'scan_all', $3, $4, true, $5)
+         RETURNING *",
+    )
+    .bind(Uuid::new_v4())
+    .bind(format!("due_{}", Uuid::new_v4().simple()))
+    .bind(json!({"scope": "tick"}))
+    .bind(json!({"mode": "daily", "hour": 0, "minute": 0}))
+    .bind(now - ChronoDuration::days(1))
+    .fetch_one(&state.pool)
+    .await
+    .expect("insert due schedule");
+
+    let started = scheduler::tick_due_schedules(&state, now)
+        .await
+        .expect("tick due schedules");
+
+    assert_eq!(started, 1);
+    let schedule = load_schedule(&state, job.id).await;
+    let task_id = schedule.last_task_id.expect("last task id");
+    let task = wait_for_task_status(&state, task_id, "done").await;
+    assert_eq!(task["source"], "schedule");
+    assert_eq!(task["params"]["schedule_id"], json!(job.id));
+    assert_eq!(task["result"]["dry_run"], true);
+
+    let started_again = scheduler::tick_due_schedules(&state, now)
+        .await
+        .expect("second tick due schedules");
+    assert_eq!(started_again, 0);
 }
 
 async fn insert_schedule(state: &AppState, name: &str, kind: &str, enabled: bool) -> ScheduleJob {
@@ -143,6 +191,10 @@ async fn test_state() -> Option<AppState> {
     db::migrate(&pool)
         .await
         .expect("run scheduler test migrations");
+    sqlx::query("TRUNCATE task_runs, schedule_jobs RESTART IDENTITY CASCADE")
+        .execute(&pool)
+        .await
+        .expect("reset scheduler test tables");
     Some(AppState::new(pool, test_settings(database_url)))
 }
 

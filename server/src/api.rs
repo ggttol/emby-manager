@@ -35,9 +35,12 @@ pub struct PlaceholderResponse {
 }
 
 pub fn router(pool: PgPool, settings: Settings) -> Router {
-    let web_dist = settings.web_dist.clone();
+    router_with_state(AppState::new(pool, settings))
+}
+
+pub fn router_with_state(state: AppState) -> Router {
+    let web_dist = state.settings.web_dist.clone();
     let index = web_dist.join("index.html");
-    let state = AppState::new(pool, settings);
     let auth_state = state.clone();
 
     let api = Router::new()

@@ -1,6 +1,6 @@
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use emby_manager::{db, migrate, openapi::ApiDoc, settings::Settings};
+use emby_manager::{db, migrate, openapi::ApiDoc, settings::Settings, state::AppState};
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use utoipa::OpenApi;
@@ -68,8 +68,11 @@ async fn serve() -> anyhow::Result<()> {
     db::migrate(&pool).await?;
     emby_manager::auth::ensure_default_admin(&pool, &settings).await?;
     emby_manager::tasks::reconcile_interrupted(&pool).await?;
+    emby_manager::scheduler::reconcile_interrupted(&pool).await?;
 
-    let app = emby_manager::api::router(pool, settings.clone());
+    let state = AppState::new(pool, settings.clone());
+    emby_manager::scheduler::spawn_scheduler_loop(state.clone());
+    let app = emby_manager::api::router_with_state(state);
     let addr: SocketAddr = format!("{}:{}", settings.host, settings.port)
         .parse()
         .context("invalid bind host/port")?;
