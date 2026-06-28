@@ -68,6 +68,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/autostrm/webhook": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["webhook"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/c115/auto-cid": {
         parameters: {
             query?: never;
@@ -735,6 +751,15 @@ export interface components {
             unmatched: components["schemas"]["AutostrmUnmatchedStats"];
             warnings: string[];
         };
+        AutostrmTaskResult: {
+            errors: string[];
+            new_strm: number;
+            ok: boolean;
+            processed: number;
+            refreshed: number;
+            skipped_seen: number;
+            unmatched: number;
+        };
         AutostrmUnmatchedStats: {
             /** Format: date-time */
             first_created_at?: string | null;
@@ -746,6 +771,20 @@ export interface components {
             total: number;
             /** Format: int64 */
             without_emby_id: number;
+        };
+        AutostrmWebhookEvent: {
+            lib: string;
+            source_file: string;
+            top: string;
+        };
+        AutostrmWebhookResponse: {
+            disabled: boolean;
+            ignored: number;
+            ok: boolean;
+            queued: number;
+            /** Format: uuid */
+            tid?: string | null;
+            unmapped: number;
         };
         C115AutoCidRequest: {
             max_depth?: number | null;
@@ -1722,6 +1761,31 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AutostrmStatusResponse"];
+                };
+            };
+        };
+    };
+    webhook: {
+        parameters: {
+            query?: {
+                key?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": unknown;
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AutostrmWebhookResponse"];
                 };
             };
         };

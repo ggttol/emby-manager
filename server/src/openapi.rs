@@ -1,6 +1,7 @@
 use crate::{
     api::{HealthResponse, PlaceholderResponse},
     auth::{LoginRequest, LoginResponse, MeResponse},
+    autostrm::{AutostrmTaskResult, AutostrmWebhookEvent, AutostrmWebhookResponse},
     c115::{
         C115AutoCidRequest, C115AutoCidResponse, C115CidMatch, C115DirEntry, C115OfflineRequest,
         C115OfflineResponse, C115ParseResponse, C115SaveRequest, C115SaveResponse,
@@ -55,6 +56,7 @@ use utoipa::OpenApi;
         crate::auth::login,
         crate::auth::logout,
         crate::auth::me,
+        crate::autostrm::webhook,
         crate::config_store::get_config,
         crate::config_store::put_config,
         crate::tasks::list_tasks,
@@ -105,6 +107,9 @@ use utoipa::OpenApi;
         LoginRequest,
         LoginResponse,
         MeResponse,
+        AutostrmWebhookEvent,
+        AutostrmWebhookResponse,
+        AutostrmTaskResult,
         ConfigResponse,
         ConfigUpdateRequest,
         TaskRun,

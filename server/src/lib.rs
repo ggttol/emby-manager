@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod autostrm;
 pub mod c115;
 pub mod catalog;
 pub mod config_store;

@@ -1,5 +1,5 @@
 use crate::{
-    auth, c115, catalog, config_store, error::AppResult, gaps, insights, logs, media_fs,
+    auth, autostrm, c115, catalog, config_store, error::AppResult, gaps, insights, logs, media_fs,
     openapi::ApiDoc, posters, scheduler, settings::Settings, state::AppState, system, tasks, undo,
     users,
 };
@@ -53,6 +53,7 @@ pub fn router_with_state(state: AppState) -> Router {
         .merge(scheduler::router())
         .merge(catalog::router())
         .merge(system::router())
+        .merge(autostrm::router())
         .merge(c115::router())
         .merge(media_fs::router())
         .merge(undo::router())

@@ -392,6 +392,7 @@ fn is_public_request(method: &Method, path: &str) -> bool {
             | (&Method::GET, "/api/v2/openapi.json")
             | (&Method::POST, "/api/v2/auth/login")
             | (&Method::GET, "/api/v2/auth/me")
+            | (&Method::POST, "/api/v2/autostrm/webhook")
     )
 }
 
