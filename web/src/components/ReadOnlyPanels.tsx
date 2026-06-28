@@ -715,7 +715,7 @@ export function AutostrmPanel() {
       <div className="readonlyToolbar">
         <div>
           <strong>Autostrm 状态</strong>
-          <span>只读展示 seen/unmatched 表，不接收 webhook，不触发自动匹配。</span>
+          <span>展示 seen/unmatched 表；自动处理由 webhook 入口触发。</span>
         </div>
         <button className="btn ghost" onClick={load} disabled={loading}>
           <RefreshCw size={16} />
@@ -727,7 +727,7 @@ export function AutostrmPanel() {
         <StatCard icon={<Webhook />} label="seen" value={count(status?.seen?.total)} hint={`${count(status?.seen?.libraries)} 个库 · ${dateText(status?.seen?.last_seen_at)}`} />
         <StatCard icon={<AlertTriangle />} label="unmatched" value={count(status?.unmatched?.total)} tone={status?.unmatched?.total ? 'warn' : 'ok'} hint={`${count(status?.unmatched?.without_emby_id)} 缺 Emby ID`} />
         <StatCard icon={<ListChecks />} label="库分布" value={count(status?.libraries?.length)} hint="最多 20 个库" />
-        <StatCard icon={<CheckCircle2 />} label="业务 port" value={status?.complete_business_port ? '完整' : '只读'} tone={status?.complete_business_port ? 'ok' : 'warn'} hint="webhook worker 尚未接入" />
+        <StatCard icon={<CheckCircle2 />} label="业务 port" value={status?.complete_business_port ? '完整' : '只读'} tone={status?.complete_business_port ? 'ok' : 'warn'} hint="状态只读，webhook 写入" />
       </div>
       <WarningList warnings={status?.warnings || []} />
       <section className="readonlyBlock">

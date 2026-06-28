@@ -55,9 +55,32 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
         "CollectionType": "movies",
         "Locations": ["/strm/电影"]
     }]"#;
+    let poster_items = r#"{
+        "Items": [
+            {
+                "Id": "movie-missing-poster",
+                "Name": "Share Movie",
+                "Type": "Movie",
+                "Path": "/strm/电影/Share Movie [tmdbid-100]/Share Movie.strm",
+                "ProviderIds": {"Tmdb": "100"},
+                "ImageTags": {}
+            },
+            {
+                "Id": "movie-wrong-tmdb",
+                "Name": "Wrong Movie",
+                "Type": "Movie",
+                "Path": "/strm/电影/Wrong Movie [tmdbid-200]/movie.strm",
+                "ProviderIds": {"Tmdb": "201"},
+                "ImageTags": {"Primary": "poster-tag"}
+            }
+        ],
+        "TotalRecordCount": 2
+    }"#;
     let (emby_base, emby_requests, emby_handle) = spawn_fake_json_server(vec![
         fake_json(libraries),
         fake_response("204 No Content", ""),
+        fake_json(libraries),
+        fake_json(poster_items),
     ])
     .await;
 
@@ -144,9 +167,37 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
     assert_eq!(task["result"]["scan"]["lib"], "电影");
     assert_eq!(task["result"]["scan"]["item_id"], "lib-movie");
     assert_eq!(task["result"]["scan"]["code"], 204);
-    assert_eq!(task["result"]["poster"]["status"], "placeholder");
-    assert_eq!(task["result"]["poster"]["triggered"], false);
-    assert_eq!(task["result"]["check"]["status"], "placeholder");
+    assert_ne!(task["result"]["poster"]["status"], "placeholder");
+    assert_eq!(task["result"]["poster"]["status"], "issues");
+    assert_eq!(task["result"]["poster"]["triggered"], true);
+    assert_eq!(task["result"]["poster"]["scanned_libraries"], 1);
+    assert_eq!(task["result"]["poster"]["scanned_items"], 2);
+    assert_eq!(task["result"]["poster"]["issue_count"], 2);
+    assert_eq!(task["result"]["poster"]["missing_primary_count"], 1);
+    assert_eq!(task["result"]["poster"]["mismatch_count"], 1);
+    assert_eq!(
+        task["result"]["poster"]["items"].as_array().unwrap().len(),
+        2
+    );
+    assert_ne!(task["result"]["check"]["status"], "placeholder");
+    assert_eq!(task["result"]["check"]["status"], "errors");
+    assert_eq!(task["result"]["check"]["item_success_count"], 1);
+    assert_eq!(task["result"]["check"]["item_error_count"], 2);
+    assert_eq!(task["result"]["check"]["stage_error_count"], 0);
+    assert_eq!(task["result"]["check"]["suspicious_count"], 2);
+    assert_eq!(
+        task["result"]["check"]["errors"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(task["result"]["check"]["items"][1]["status"], "error");
+    assert!(
+        task["result"]["check"]["suspicious"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "movie-wrong-tmdb"),
+        "{task}"
+    );
 
     timeout(Duration::from_secs(1), c115_handle)
         .await
@@ -190,7 +241,7 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
     );
 
     let emby_requests = emby_requests.lock().unwrap();
-    assert_eq!(emby_requests.len(), 2);
+    assert_eq!(emby_requests.len(), 4);
     assert!(
         emby_requests[0].starts_with("GET /Library/VirtualFolders?api_key=secret-key"),
         "{}",
@@ -205,6 +256,26 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
         emby_requests[1].contains("api_key=secret-key"),
         "{}",
         emby_requests[1]
+    );
+    assert!(
+        emby_requests[2].starts_with("GET /Library/VirtualFolders?api_key=secret-key"),
+        "{}",
+        emby_requests[2]
+    );
+    assert!(
+        emby_requests[3].starts_with("GET /Items?"),
+        "{}",
+        emby_requests[3]
+    );
+    assert!(
+        emby_requests[3].contains("ParentId=lib-movie"),
+        "{}",
+        emby_requests[3]
+    );
+    assert!(
+        emby_requests[3].contains("IncludeItemTypes=Movie"),
+        "{}",
+        emby_requests[3]
     );
 }
 

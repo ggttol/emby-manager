@@ -160,10 +160,21 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{autostrm}");
-    assert_eq!(autostrm["complete_business_port"], false);
+    assert_eq!(autostrm["complete_business_port"], true);
     assert_eq!(autostrm["seen"]["total"], 1);
     assert_eq!(autostrm["unmatched"]["without_emby_id"], 1);
     assert_eq!(autostrm["libraries"][0]["lib"], "Shows");
+    assert!(
+        autostrm["meta"]["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item
+                .as_str()
+                .unwrap_or_default()
+                .contains("/api/v2/autostrm/webhook")),
+        "{autostrm}"
+    );
 }
 
 fn seed_strm_tree(base: &Path) -> PathBuf {

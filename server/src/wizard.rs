@@ -3,6 +3,7 @@ use crate::{
     config_store,
     emby::EmbyClient,
     error::{AppError, AppResult},
+    posters::{self, PosterDetectRequest},
     state::AppState,
     tasks::{self, TaskRun},
 };
@@ -20,6 +21,7 @@ const C115_SITE_BASE_URL_KEY: &str = "c115_site_base_url";
 const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
 const DEFAULT_STAGE_DELAY_MS: u64 = 500;
 const MAX_STAGE_DELAY_MS: u64 = 30_000;
+const DEFAULT_POSTER_SCAN_LIMIT: usize = 200;
 
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AddNewRequest {
@@ -70,8 +72,8 @@ pub struct AddNewReport {
     pub target: AddNewTargetReport,
     pub transfer: AddNewTransferSummary,
     pub scan: AddNewScanReport,
-    pub poster: AddNewPlaceholderReport,
-    pub check: AddNewPlaceholderReport,
+    pub poster: AddNewPosterReport,
+    pub check: AddNewCheckReport,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -122,10 +124,72 @@ pub struct AddNewScanReport {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct AddNewPlaceholderReport {
+pub struct AddNewPosterReport {
     pub ok: bool,
     pub triggered: bool,
     pub status: String,
+    pub scanned_libraries: usize,
+    pub scanned_items: usize,
+    pub issue_count: usize,
+    pub missing_primary_count: usize,
+    pub mismatch_count: usize,
+    pub truncated: bool,
+    pub warnings: Vec<String>,
+    pub items: Vec<AddNewPosterIssueReport>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct AddNewPosterIssueReport {
+    pub id: String,
+    pub name: String,
+    pub lib: String,
+    #[serde(rename = "type")]
+    pub item_type: String,
+    pub has_poster: bool,
+    pub score: u16,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddNewCheckReport {
+    pub ok: bool,
+    pub status: String,
+    pub item_success_count: usize,
+    pub item_error_count: usize,
+    pub stage_error_count: usize,
+    pub suspicious_count: usize,
+    pub items: Vec<AddNewCheckItemReport>,
+    pub errors: Vec<AddNewCheckErrorReport>,
+    pub suspicious: Vec<AddNewCheckSuspiciousReport>,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddNewCheckItemReport {
+    pub index: usize,
+    pub ok: bool,
+    pub action: AddNewTransferAction,
+    pub label: Option<String>,
+    pub url: String,
+    pub status: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddNewCheckErrorReport {
+    pub stage: String,
+    pub index: Option<usize>,
+    pub label: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddNewCheckSuspiciousReport {
+    pub stage: String,
+    pub severity: String,
+    pub id: Option<String>,
+    pub label: String,
     pub message: String,
 }
 
@@ -187,6 +251,10 @@ fn spawn_add_new(state: AppState, id: Uuid, plan: AddNewPlan) {
                     format!("完成，{failed} 项转存/离线失败")
                 } else if !report.scan.ok {
                     "完成，扫描触发失败".to_string()
+                } else if !report.poster.ok {
+                    "完成，海报检测失败".to_string()
+                } else if report.check.suspicious_count > 0 {
+                    format!("完成，发现 {} 个可疑项", report.check.suspicious_count)
                 } else {
                     "完成".to_string()
                 };
@@ -271,6 +339,14 @@ async fn run_add_new_pipeline(
         .await?;
     }
 
+    let transfer = AddNewTransferSummary {
+        ok: failed == 0,
+        total: total_items,
+        succeeded,
+        failed,
+        items: item_reports,
+    };
+
     if plan.delay_ms > 0 {
         tasks::set_progress(
             &state.pool,
@@ -295,33 +371,26 @@ async fn run_add_new_pipeline(
     )
     .await?;
 
-    let poster = placeholder("poster", "poster stage placeholder");
+    let poster = inspect_posters(&emby_client, plan.target_lib.as_deref()).await;
     tasks::set_progress(
         &state.pool,
         id,
         (total_items + 2) as i64,
-        "海报阶段占位完成",
+        "海报检测阶段完成",
     )
     .await?;
 
-    let check = placeholder("check", "post-add check stage placeholder");
+    let check = build_post_add_check(&transfer, &scan, &poster);
     tasks::set_progress(
         &state.pool,
         id,
         (total_items + 3) as i64,
-        "检查阶段占位完成",
+        "加新结果检查完成",
     )
     .await?;
 
-    let transfer = AddNewTransferSummary {
-        ok: failed == 0,
-        total: total_items,
-        succeeded,
-        failed,
-        items: item_reports,
-    };
     Ok(AddNewReport {
-        ok: transfer.ok && scan.ok,
+        ok: transfer.ok && scan.ok && poster.ok && check.ok,
         target: AddNewTargetReport {
             cid: plan.target_cid,
             lib: plan.target_lib,
@@ -508,12 +577,199 @@ fn scan_error(
     }
 }
 
-fn placeholder(stage: &str, message: &str) -> AddNewPlaceholderReport {
-    AddNewPlaceholderReport {
-        ok: true,
-        triggered: false,
-        status: "placeholder".to_string(),
-        message: format!("{stage}: {message}"),
+async fn inspect_posters(client: &EmbyClient, lib: Option<&str>) -> AddNewPosterReport {
+    let lib = lib.and_then(non_empty_trimmed).map(ToString::to_string);
+    match posters::detect_mismatched_posters(
+        client,
+        PosterDetectRequest {
+            lib,
+            limit: Some(DEFAULT_POSTER_SCAN_LIMIT),
+            include_missing_primary: Some(true),
+        },
+    )
+    .await
+    {
+        Ok(report) => {
+            let issue_count = report.total;
+            let status = if issue_count > 0 {
+                "issues"
+            } else if report.truncated {
+                "ok_truncated"
+            } else {
+                "ok"
+            };
+            AddNewPosterReport {
+                ok: true,
+                triggered: true,
+                status: status.to_string(),
+                scanned_libraries: report.scanned_libraries,
+                scanned_items: report.scanned_items,
+                issue_count,
+                missing_primary_count: report.missing_primary_total,
+                mismatch_count: report.mismatch_total,
+                truncated: report.truncated,
+                warnings: report.warnings,
+                items: report
+                    .items
+                    .into_iter()
+                    .map(poster_issue_from_signal)
+                    .collect(),
+                error: None,
+            }
+        }
+        Err(err) => AddNewPosterReport {
+            ok: false,
+            triggered: false,
+            status: "error".to_string(),
+            scanned_libraries: 0,
+            scanned_items: 0,
+            issue_count: 0,
+            missing_primary_count: 0,
+            mismatch_count: 0,
+            truncated: false,
+            warnings: Vec::new(),
+            items: Vec::new(),
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+fn poster_issue_from_signal(item: posters::PosterSignalItem) -> AddNewPosterIssueReport {
+    AddNewPosterIssueReport {
+        id: item.id,
+        name: item.name,
+        lib: item.lib,
+        item_type: item.item_type,
+        has_poster: item.has_poster,
+        score: item.score,
+        reasons: item.reasons,
+    }
+}
+
+fn build_post_add_check(
+    transfer: &AddNewTransferSummary,
+    scan: &AddNewScanReport,
+    poster: &AddNewPosterReport,
+) -> AddNewCheckReport {
+    let mut items = Vec::with_capacity(transfer.items.len());
+    let mut errors = Vec::new();
+    let mut suspicious = Vec::new();
+
+    for item in &transfer.items {
+        let message = if item.ok {
+            "转存/离线请求成功".to_string()
+        } else {
+            item.error
+                .clone()
+                .unwrap_or_else(|| "转存/离线请求失败".to_string())
+        };
+        if !item.ok {
+            errors.push(AddNewCheckErrorReport {
+                stage: "transfer".to_string(),
+                index: Some(item.index),
+                label: item.label.clone(),
+                message: message.clone(),
+            });
+        }
+        items.push(AddNewCheckItemReport {
+            index: item.index,
+            ok: item.ok,
+            action: item.action,
+            label: item.label.clone(),
+            url: item.url.clone(),
+            status: if item.ok { "ok" } else { "error" }.to_string(),
+            message,
+        });
+    }
+
+    let mut stage_error_count = 0usize;
+    if !scan.ok {
+        stage_error_count += 1;
+        errors.push(AddNewCheckErrorReport {
+            stage: "scan".to_string(),
+            index: None,
+            label: scan.lib.clone(),
+            message: scan
+                .error
+                .clone()
+                .unwrap_or_else(|| "Emby 刷新未成功触发".to_string()),
+        });
+    }
+    if !poster.ok {
+        stage_error_count += 1;
+        errors.push(AddNewCheckErrorReport {
+            stage: "poster".to_string(),
+            index: None,
+            label: None,
+            message: poster
+                .error
+                .clone()
+                .unwrap_or_else(|| "海报检测失败".to_string()),
+        });
+    }
+
+    if let Some(warning) = scan.warning.as_deref() {
+        suspicious.push(AddNewCheckSuspiciousReport {
+            stage: "scan".to_string(),
+            severity: "warn".to_string(),
+            id: scan.item_id.clone(),
+            label: scan.lib.clone().unwrap_or_else(|| scan.mode.clone()),
+            message: warning.to_string(),
+        });
+    }
+    for warning in &poster.warnings {
+        suspicious.push(AddNewCheckSuspiciousReport {
+            stage: "poster".to_string(),
+            severity: "warn".to_string(),
+            id: None,
+            label: "poster-detect".to_string(),
+            message: warning.clone(),
+        });
+    }
+    for item in &poster.items {
+        suspicious.push(AddNewCheckSuspiciousReport {
+            stage: "poster".to_string(),
+            severity: if item.score >= 100 { "danger" } else { "warn" }.to_string(),
+            id: Some(item.id.clone()),
+            label: if item.name.trim().is_empty() {
+                item.id.clone()
+            } else {
+                item.name.clone()
+            },
+            message: if item.reasons.is_empty() {
+                "海报检测发现可疑项".to_string()
+            } else {
+                item.reasons.join("; ")
+            },
+        });
+    }
+
+    let item_success_count = transfer.succeeded;
+    let item_error_count = transfer.failed;
+    let error_count = item_error_count + stage_error_count;
+    let suspicious_count = suspicious.len();
+    let status = if error_count > 0 {
+        "errors"
+    } else if suspicious_count > 0 {
+        "suspicious"
+    } else {
+        "ok"
+    };
+    let message = format!(
+        "检查完成: {item_success_count} 项成功, {item_error_count} 项失败, {stage_error_count} 个阶段错误, {suspicious_count} 个可疑项"
+    );
+
+    AddNewCheckReport {
+        ok: error_count == 0 && suspicious_count == 0,
+        status: status.to_string(),
+        item_success_count,
+        item_error_count,
+        stage_error_count,
+        suspicious_count,
+        items,
+        errors,
+        suspicious,
+        message,
     }
 }
 

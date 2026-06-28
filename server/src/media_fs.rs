@@ -673,7 +673,7 @@ fn spawn_manage_preview(
             return;
         }
         let result = ManagePreviewResult {
-            ok: false,
+            ok: true,
             preview: true,
             dry_run: true,
             operation: operation.to_string(),
@@ -682,14 +682,14 @@ fn spawn_manage_preview(
                 .map(|path| path.display().to_string())
                 .collect(),
             warnings: vec![
-                "Rust preview did not touch filesystem or Emby".to_string(),
-                "真实删除/移动尚未在 Rust manage API 中启用".to_string(),
+                "dry-run preview only; did not touch filesystem or Emby".to_string(),
+                "真实执行已接入，请确认后调用对应 execute 端点".to_string(),
             ],
             next_steps: vec![
                 "核对 planned_paths 是否符合预期".to_string(),
-                "等待后续写入版实现接入 undo log 与 Emby 刷新".to_string(),
+                "确认后使用 /api/v2/manage/delete/execute 或 /api/v2/manage/move/execute".to_string(),
             ],
-            message: "Rust preview did not touch filesystem or Emby".to_string(),
+            message: "dry-run preview only; did not touch filesystem or Emby".to_string(),
         };
         let _ = tasks::finish_done_with_message(
             &state.pool,

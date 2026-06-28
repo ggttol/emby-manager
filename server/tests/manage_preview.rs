@@ -40,7 +40,7 @@ async fn delete_preview_creates_task_and_finishes_done() {
 
     let task = wait_for_task_status(&state, task.id, "done").await;
     assert_eq!(task["source"], "manual");
-    assert_eq!(task["result"]["ok"], false);
+    assert_eq!(task["result"]["ok"], true);
     assert_eq!(task["result"]["preview"], true);
     assert_eq!(task["result"]["dry_run"], true);
     assert_eq!(task["result"]["operation"], "delete");
@@ -54,7 +54,13 @@ async fn delete_preview_creates_task_and_finishes_done() {
         task["result"]["message"]
             .as_str()
             .unwrap_or_default()
-            .contains("did not touch filesystem or Emby")
+            .contains("dry-run preview only")
+    );
+    assert!(
+        task["result"]["next_steps"][1]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/api/v2/manage/delete/execute")
     );
 }
 
@@ -84,7 +90,7 @@ async fn move_preview_creates_task_and_finishes_done() {
     assert_eq!(task.params["to_folder"], json!(req.to_folder));
 
     let task = wait_for_task_status(&state, task.id, "done").await;
-    assert_eq!(task["result"]["ok"], false);
+    assert_eq!(task["result"]["ok"], true);
     assert_eq!(task["result"]["preview"], true);
     assert_eq!(task["result"]["dry_run"], true);
     assert_eq!(task["result"]["operation"], "move");
@@ -92,6 +98,12 @@ async fn move_preview_creates_task_and_finishes_done() {
     assert_eq!(planned.len(), 2);
     assert!(planned[0].as_str().unwrap().ends_with("Movies/A/Movie"));
     assert!(planned[1].as_str().unwrap().ends_with("Archive/Done/Movie"));
+    assert!(
+        task["result"]["next_steps"][1]
+            .as_str()
+            .unwrap_or_default()
+            .contains("/api/v2/manage/move/execute")
+    );
 }
 
 #[tokio::test]

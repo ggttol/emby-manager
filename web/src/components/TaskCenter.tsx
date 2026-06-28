@@ -1,4 +1,4 @@
-import { Bell, ChevronDown, ChevronUp, Copy, RefreshCw, XCircle } from 'lucide-react';
+import { Bell, ChevronDown, ChevronUp, Copy, RefreshCw, Search, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
@@ -95,6 +95,26 @@ function hasJsonPayload(value: unknown) {
   return true;
 }
 
+function searchText(value: unknown) {
+  return resultPreview(value).toLocaleLowerCase('zh-CN');
+}
+
+function taskMatchesQuery(task: TaskRun, tokens: string[]) {
+  if (tokens.length === 0) return true;
+  const haystack = [
+    task.id,
+    task.kind,
+    task.label,
+    task.status,
+    task.status_text,
+    task.source,
+    task.error,
+    searchText(task.params),
+    searchText(task.result)
+  ].filter(Boolean).join('\n').toLocaleLowerCase('zh-CN');
+  return tokens.every((token) => haystack.includes(token));
+}
+
 function isCompletedTransition(previous?: TaskRun, next?: TaskRun) {
   if (!previous || !next) return false;
   return active.has(previous.status) && terminal.has(next.status);
@@ -108,6 +128,7 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [filter, setFilter] = useState<TaskFilter>('all');
+  const [query, setQuery] = useState('');
   const knownTasksRef = useRef<Map<string, TaskRun>>(new Map());
   const emittedIdsRef = useRef<Set<string>>(new Set());
   const toast = useToast();
@@ -173,12 +194,15 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
     issue: tasks.filter((task) => ['error', 'cancelled', 'interrupted'].includes(task.status)).length
   }), [tasks]);
 
-  const visibleTasks = useMemo(() => tasks.filter((task) => {
-    if (filter === 'active') return active.has(task.status);
-    if (filter === 'done') return task.status === 'done';
-    if (filter === 'issue') return ['error', 'cancelled', 'interrupted'].includes(task.status);
-    return true;
-  }), [filter, tasks]);
+  const visibleTasks = useMemo(() => {
+    const tokens = query.trim().toLocaleLowerCase('zh-CN').split(/\s+/).filter(Boolean);
+    return tasks.filter((task) => {
+      if (filter === 'active' && !active.has(task.status)) return false;
+      if (filter === 'done' && task.status !== 'done') return false;
+      if (filter === 'issue' && !['error', 'cancelled', 'interrupted'].includes(task.status)) return false;
+      return taskMatchesQuery(task, tokens);
+    });
+  }, [filter, query, tasks]);
 
   const cancel = async (task: TaskRun) => {
     setCancellingId(task.id);
@@ -209,6 +233,22 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
     } catch (e) {
       toast.push(`复制失败：${errorMessage(e)}`, 'error');
     }
+  };
+
+  const expandVisible = () => {
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      visibleTasks.forEach((task) => next.add(task.id));
+      return next;
+    });
+  };
+
+  const collapseVisible = () => {
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      visibleTasks.forEach((task) => next.delete(task.id));
+      return next;
+    });
   };
 
   return (
@@ -242,6 +282,34 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
                 {label}<span>{count}</span>
               </button>
             ))}
+          </div>
+          <div className="taskSearchBar">
+            <Search size={15} />
+            <input
+              className="input"
+              aria-label="任务搜索"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索名称、类型、ID、参数或错误"
+            />
+            {query && (
+              <button className="iconBtn" onClick={() => setQuery('')} aria-label="清空任务搜索">
+                <XCircle size={15} />
+              </button>
+            )}
+          </div>
+          <div className="taskBulkActions">
+            <span>显示 {visibleTasks.length} / {tasks.length}</span>
+            <div>
+              <button className="btn ghost compact" onClick={expandVisible} disabled={visibleTasks.length === 0}>
+                <ChevronDown size={14} />
+                展开可见
+              </button>
+              <button className="btn ghost compact" onClick={collapseVisible} disabled={visibleTasks.length === 0}>
+                <ChevronUp size={14} />
+                收起可见
+              </button>
+            </div>
           </div>
           {loadError && <div className="taskError">加载失败：{loadError}</div>}
           <div className="taskList">

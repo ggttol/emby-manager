@@ -248,7 +248,6 @@ function FallbackPanel({ tab }: { tab: Tab }) {
   const [error, setError] = useState<string>('');
   const [loading, setLoading] = useState(false);
   const [strmLib, setStrmLib] = useState('电影');
-  const toast = useToast();
 
   const load = async () => {
     setLoading(true);
@@ -269,15 +268,6 @@ function FallbackPanel({ tab }: { tab: Tab }) {
     load();
   }, [tab.id]);
 
-  const demoTask = async () => {
-    try {
-      await api('/api/v2/tasks/demo', { method: 'POST', body: JSON.stringify({ seconds: 5, label: `${tab.label} 演示任务` }) });
-      toast.push('演示任务已启动，打开任务中心查看', 'ok');
-    } catch (e) {
-      toast.push(`启动演示任务失败：${errorMessage(e)}`, 'error');
-    }
-  };
-
   const loadStrm = async () => {
     setLoading(true);
     setError('');
@@ -296,7 +286,6 @@ function FallbackPanel({ tab }: { tab: Tab }) {
     <section className="panel">
       <div className="panelActions">
         <button className="btn" onClick={load} disabled={loading}>{loading ? '加载中' : '刷新'}</button>
-        <button className="btn ghost" onClick={demoTask}>启动演示任务</button>
       </div>
       {(tab.id === 'scan' || tab.id === 'subtitles') && (
         <div className="inlineTool">
@@ -317,13 +306,13 @@ function FallbackPanel({ tab }: { tab: Tab }) {
 function FeatureMap({ id }: { id: string }) {
   const cards = [
     { icon: <LayoutDashboard />, title: 'UI 壳', text: '16 个 tab 已拆成 React 路由入口。' },
-    { icon: <Activity />, title: '任务中心', text: '轮询 /api/v2/tasks，支持取消和全局进度。' },
+    { icon: <Activity />, title: '任务中心', text: '轮询 /api/v2/tasks，支持取消、搜索和全局进度。' },
     { icon: <Database />, title: 'Postgres', text: '配置、任务、调度、undo、catalog 共用数据库。' },
-    { icon: <FolderSearch />, title: '业务 Port', text: `${id} 模块保留现有语义，后续逐项替换占位端点。` }
+    { icon: <FolderSearch />, title: '业务 Port', text: `${id} 模块按旧版语义迁移，写操作走任务中心跟踪。` }
   ];
   if (id === 'catalog') cards.push({ icon: <Search />, title: 'Catalog', text: '搜索接口已接 Postgres catalog_items。' });
-  if (id === 'schedules') cards.push({ icon: <ListChecks />, title: 'Scheduler', text: 'CRUD 和立即运行占位任务已接入。' });
-  if (id === 'settings') cards.push({ icon: <Settings />, title: 'Config', text: '敏感字段脱敏，PUT 写入 app_settings。' });
+  if (id === 'schedules') cards.push({ icon: <ListChecks />, title: 'Scheduler', text: 'CRUD、立即运行和重叠保护已接入。' });
+  if (id === 'settings') cards.push({ icon: <Settings />, title: 'Config', text: '敏感字段脱敏，支持导入导出和密码修改。' });
   if (id === 'users') cards.push({ icon: <UserRound />, title: 'Auth', text: '登录/session/legacy PBKDF2 rehash 已在后端实现。' });
   return (
     <div className="featureGrid">

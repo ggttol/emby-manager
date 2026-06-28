@@ -756,22 +756,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/tasks/demo": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post: operations["demo_task"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v2/tasks/{id}": {
         parameters: {
             query?: never;
@@ -920,6 +904,40 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AddNewCheckErrorReport: {
+            index?: number | null;
+            label?: string | null;
+            message: string;
+            stage: string;
+        };
+        AddNewCheckItemReport: {
+            action: components["schemas"]["AddNewTransferAction"];
+            index: number;
+            label?: string | null;
+            message: string;
+            ok: boolean;
+            status: string;
+            url: string;
+        };
+        AddNewCheckReport: {
+            errors: components["schemas"]["AddNewCheckErrorReport"][];
+            item_error_count: number;
+            item_success_count: number;
+            items: components["schemas"]["AddNewCheckItemReport"][];
+            message: string;
+            ok: boolean;
+            stage_error_count: number;
+            status: string;
+            suspicious: components["schemas"]["AddNewCheckSuspiciousReport"][];
+            suspicious_count: number;
+        };
+        AddNewCheckSuspiciousReport: {
+            id?: string | null;
+            label: string;
+            message: string;
+            severity: string;
+            stage: string;
+        };
         AddNewItem: {
             file_ids?: string[] | null;
             kind?: string | null;
@@ -927,16 +945,34 @@ export interface components {
             pwd?: string | null;
             url: string;
         };
-        AddNewPlaceholderReport: {
-            message: string;
+        AddNewPosterIssueReport: {
+            has_poster: boolean;
+            id: string;
+            lib: string;
+            name: string;
+            reasons: string[];
+            /** Format: int32 */
+            score: number;
+            type: string;
+        };
+        AddNewPosterReport: {
+            error?: string | null;
+            issue_count: number;
+            items: components["schemas"]["AddNewPosterIssueReport"][];
+            mismatch_count: number;
+            missing_primary_count: number;
             ok: boolean;
+            scanned_items: number;
+            scanned_libraries: number;
             status: string;
             triggered: boolean;
+            truncated: boolean;
+            warnings: string[];
         };
         AddNewReport: {
-            check: components["schemas"]["AddNewPlaceholderReport"];
+            check: components["schemas"]["AddNewCheckReport"];
             ok: boolean;
-            poster: components["schemas"]["AddNewPlaceholderReport"];
+            poster: components["schemas"]["AddNewPosterReport"];
             scan: components["schemas"]["AddNewScanReport"];
             target: components["schemas"]["AddNewTargetReport"];
             transfer: components["schemas"]["AddNewTransferSummary"];
@@ -1422,11 +1458,6 @@ export interface components {
         };
         DeleteScheduleResponse: {
             ok: boolean;
-        };
-        DemoTaskRequest: {
-            label?: string | null;
-            /** Format: int64 */
-            seconds?: number | null;
         };
         DiskSummary: {
             /** Format: int64 */
@@ -3302,29 +3333,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskListResponse"];
-                };
-            };
-        };
-    };
-    demo_task: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["DemoTaskRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TaskRun"];
                 };
             };
         };

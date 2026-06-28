@@ -223,7 +223,7 @@ const strmReadonly = {
 
 const autostrmStatus = {
   ok: true,
-  complete_business_port: false,
+  complete_business_port: true,
   meta: readonlyMeta,
   seen: { total: 20, libraries: 2, last_seen_at: '2026-06-28T00:01:00Z' },
   unmatched: {
@@ -235,7 +235,7 @@ const autostrmStatus = {
   },
   libraries: [{ lib: '电影', seen: 12, unmatched: 3 }],
   todos: [{ severity: 'high', area: 'autostrm', message: '需要处理 unmatched', count: 3, source: 'autostrm_unmatched' }],
-  warnings: ['webhook worker 尚未接入']
+  warnings: ['autostrm 状态表暂无数据，可能尚未导入旧数据或尚未收到 webhook']
 };
 
 const cleanupSummary = {
@@ -468,6 +468,18 @@ describe('App shell', () => {
     expect(await screen.findByText('扫描电影库')).toBeInTheDocument();
     expect(screen.getAllByText('运行中').length).toBeGreaterThan(0);
     expect(screen.getByText('manual')).toBeInTheDocument();
+    const drawer = getTaskCenterDrawer();
+    fireEvent.change(within(drawer).getByLabelText('任务搜索'), { target: { value: 'Catalog' } });
+    expect(within(drawer).getByText('Catalog 导入')).toBeInTheDocument();
+    expect(within(drawer).queryByText('扫描电影库')).not.toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole('button', { name: '清空任务搜索' }));
+    expect(await within(drawer).findByText('扫描电影库')).toBeInTheDocument();
+
+    fireEvent.click(within(drawer).getByRole('button', { name: '展开可见' }));
+    expect(screen.getByText('22222222-2222-4222-8222-222222222222')).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole('button', { name: '收起可见' }));
+    expect(screen.queryByText('22222222-2222-4222-8222-222222222222')).not.toBeInTheDocument();
+
     fireEvent.click(screen.getByRole('button', { name: '展开任务详情：扫描电影库' }));
     expect(screen.getByText('11111111-1111-4111-8111-111111111111')).toBeInTheDocument();
     expect(screen.getAllByText((_, element) => element?.textContent?.includes('"library": "Movies"') ?? false).length).toBeGreaterThan(0);
@@ -2343,7 +2355,7 @@ describe('API client auth handling', () => {
       })
     );
 
-    await api('/api/v2/tasks/demo', { method: 'POST', body: JSON.stringify({ seconds: 1 }) });
+    await api('/api/v2/auth/logout', { method: 'POST', body: JSON.stringify({}) });
 
     const init = fetchSpy.mock.calls[0]?.[1];
     const headers = init?.headers as Headers;

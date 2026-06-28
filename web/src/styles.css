@@ -583,6 +583,43 @@ main {
   font-size: 11px;
 }
 
+.taskSearchBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 14px 0;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+.taskSearchBar .input {
+  min-height: 32px;
+  padding: 5px 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.taskBulkActions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.taskBulkActions > div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .taskError {
   margin: 12px 14px 0;
   padding: 9px 11px;

@@ -397,21 +397,20 @@ pub async fn autostrm_status(
     let snapshot = autostrm_snapshot(&state.pool).await?;
     let mut warnings = Vec::new();
     if snapshot.seen.total == 0 && snapshot.unmatched.total == 0 {
-        warnings
-            .push("autostrm 状态表暂无数据，可能尚未导入或 webhook worker 尚未接入".to_string());
+        warnings.push("autostrm 状态表暂无数据，可能尚未导入旧数据或尚未收到 webhook".to_string());
     }
     let todos = autostrm_todos(&snapshot);
 
     Ok(Json(AutostrmStatusResponse {
         ok: true,
-        complete_business_port: false,
+        complete_business_port: true,
         meta: insight_meta(
             vec!["autostrm_seen", "autostrm_unmatched"],
             vec![
                 "只读状态统计",
                 "覆盖 seen/unmatched 数量、库分布、最近更新时间",
             ],
-            vec!["不接收 webhook，不触发匹配，不写入 seen/unmatched 表"],
+            vec!["状态接口只读；写入由 /api/v2/autostrm/webhook 触发"],
         ),
         seen: snapshot.seen,
         unmatched: snapshot.unmatched,

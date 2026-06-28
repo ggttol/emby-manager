@@ -11,7 +11,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
-use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 pub const ACTIVE_STATUSES: &[&str] = &["pending", "running"];
@@ -52,16 +51,9 @@ pub struct TaskListQuery {
     pub limit: Option<i64>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
-pub struct DemoTaskRequest {
-    pub seconds: Option<u64>,
-    pub label: Option<String>,
-}
-
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/tasks", get(list_tasks))
-        .route("/api/v2/tasks/demo", post(demo_task))
         .route("/api/v2/tasks/{id}", get(get_task))
         .route("/api/v2/tasks/{id}/cancel", post(cancel_task))
 }
@@ -269,55 +261,4 @@ pub async fn cancel_task(
     .await?
     .rows_affected();
     Ok(Json(TaskCancelResponse { ok: updated > 0 }))
-}
-
-#[utoipa::path(post, path = "/api/v2/tasks/demo", tag = "tasks", request_body = DemoTaskRequest, responses((status = 200, body = TaskRun)))]
-pub async fn demo_task(
-    State(state): State<AppState>,
-    Json(req): Json<DemoTaskRequest>,
-) -> AppResult<Json<TaskRun>> {
-    let seconds = req.seconds.unwrap_or(5).clamp(1, 120);
-    let label = req.label.unwrap_or_else(|| "演示任务".to_string());
-    let task = insert_task(&state.pool, "demo", &label, seconds as i64).await?;
-    spawn_demo(state, task.id, seconds);
-    Ok(Json(task))
-}
-
-fn spawn_demo(state: AppState, id: Uuid, seconds: u64) {
-    tokio::spawn(async move {
-        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
-            return;
-        };
-        let _ = sqlx::query("UPDATE task_runs SET status = 'running', started_at = now(), status_text = '', updated_at = now() WHERE id = $1")
-            .bind(id)
-            .execute(&state.pool)
-            .await;
-        for i in 0..seconds {
-            sleep(Duration::from_secs(1)).await;
-            let cancel_requested: bool =
-                sqlx::query_scalar("SELECT cancel_requested FROM task_runs WHERE id = $1")
-                    .bind(id)
-                    .fetch_one(&state.pool)
-                    .await
-                    .unwrap_or(false);
-            if cancel_requested {
-                let _ = sqlx::query("UPDATE task_runs SET status = 'cancelled', status_text = '已取消', ended_at = now(), updated_at = now() WHERE id = $1")
-                    .bind(id)
-                    .execute(&state.pool)
-                    .await;
-                return;
-            }
-            let _ = sqlx::query("UPDATE task_runs SET progress = $2, status_text = $3, updated_at = now() WHERE id = $1")
-                .bind(id)
-                .bind((i + 1) as i64)
-                .bind(format!("处理中 {}/{}", i + 1, seconds))
-                .execute(&state.pool)
-                .await;
-        }
-        let _ = sqlx::query("UPDATE task_runs SET status = 'done', status_text = '完成', result = $2, ended_at = now(), updated_at = now() WHERE id = $1")
-            .bind(id)
-            .bind(serde_json::json!({"ok": true}))
-            .execute(&state.pool)
-            .await;
-    });
 }
