@@ -140,11 +140,13 @@ fn openapi_registers_manage_preview_paths_and_schemas() {
     assert!(paths.contains_key("/api/v2/manage/delete"));
     assert!(paths.contains_key("/api/v2/manage/delete/execute"));
     assert!(paths.contains_key("/api/v2/manage/move"));
+    assert!(paths.contains_key("/api/v2/manage/move/execute"));
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();
     assert!(schemas.contains_key("ManageDeleteRequest"));
     assert!(schemas.contains_key("ManageDeleteExecuteResult"));
     assert!(schemas.contains_key("ManageMoveRequest"));
+    assert!(schemas.contains_key("ManageMoveExecuteResult"));
     assert!(schemas.contains_key("ManagePreviewResult"));
 }
 

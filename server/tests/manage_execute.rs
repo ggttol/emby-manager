@@ -1,7 +1,7 @@
 use axum::{Json, extract::State};
 use emby_manager::{
     db,
-    media_fs::{self, ManageDeleteRequest},
+    media_fs::{self, ManageDeleteRequest, ManageMoveRequest},
     settings::Settings,
     state::AppState,
 };
@@ -148,6 +148,107 @@ async fn delete_execute_skips_deleted_notification_when_no_paths_were_removed() 
     assert_eq!(undo_payload["deleted_from"], json!([]));
 }
 
+#[tokio::test]
+async fn move_execute_moves_media_rebuilds_strm_refreshes_target_and_writes_undo() {
+    let Some((_tmp, state)) = test_state().await else {
+        eprintln!("skipping manage execute DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
+        return;
+    };
+    let (base_url, requests) = spawn_fake_emby(vec![
+        FakeResponse::json(
+            r#"[
+                {"ItemId":"archive-lib","Name":"Archive","CollectionType":"movies","Locations":["/strm/Archive"]}
+            ]"#,
+        ),
+        FakeResponse::no_content(),
+        FakeResponse::json(r#"{"Items":[]}"#),
+        FakeResponse::no_content(),
+        FakeResponse::no_content(),
+    ])
+    .await;
+    configure_emby(&state, &base_url).await;
+    let src_cd = state.settings.cd_root.join("Movies/A/Movie");
+    let dst_cd = state.settings.cd_root.join("Archive/Done/Movie");
+    let old_strm = state.settings.strm_root.join("Movies/A/Movie");
+    let new_strm = state.settings.strm_root.join("Archive/Done/Movie");
+    std::fs::create_dir_all(src_cd.join("Season 1")).unwrap();
+    std::fs::create_dir_all(&old_strm).unwrap();
+    std::fs::write(src_cd.join("Season 1/E01.mkv"), "media").unwrap();
+    std::fs::write(old_strm.join("old.strm"), "old").unwrap();
+
+    let task = media_fs::execute_move(
+        State(state.clone()),
+        Json(ManageMoveRequest {
+            from_lib: "Movies".to_string(),
+            from_folder: "A/Movie".to_string(),
+            to_lib: "Archive".to_string(),
+            to_folder: Some("Done/Movie".to_string()),
+            item_id: Some("item-move".to_string()),
+            reason: Some(format!("move-execute-{}", Uuid::new_v4())),
+        }),
+    )
+    .await
+    .expect("move execute should create a task")
+    .0;
+
+    assert_eq!(task.kind, "manage_move_execute");
+    let task = wait_for_task_status(&state, task.id, "done").await;
+    assert_eq!(task["result"]["ok"], true);
+    assert_eq!(task["result"]["preview"], false);
+    assert_eq!(task["result"]["dry_run"], false);
+    assert_eq!(task["result"]["from_lib"], "Movies");
+    assert_eq!(task["result"]["to_lib"], "Archive");
+    assert_eq!(task["result"]["to_folder"], "Done/Movie");
+    assert_eq!(task["result"]["strm_written"], 1);
+    assert_eq!(task["result"]["emby_gone"], true);
+    assert_eq!(task["result"]["notified"], true);
+    assert_eq!(task["result"]["refresh_code"], 204);
+    assert!(!src_cd.exists(), "source cd folder should be moved");
+    assert!(dst_cd.join("Season 1/E01.mkv").exists());
+    assert!(!old_strm.exists(), "old strm folder should be removed");
+    assert_eq!(
+        std::fs::read_to_string(new_strm.join("Season 1/E01.strm")).unwrap(),
+        "/media/Archive/Done/Movie/Season 1/E01.mkv"
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    assert!(
+        requests[0].starts_with("GET /Library/VirtualFolders?"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[1].starts_with("DELETE /Items/item-move?"),
+        "{}",
+        requests[1]
+    );
+    assert!(requests[2].starts_with("GET /Items?"), "{}", requests[2]);
+    assert!(
+        requests[3].starts_with("POST /Library/Media/Updated?"),
+        "{}",
+        requests[3]
+    );
+    let notify_body = request_body(&requests[3]);
+    assert!(notify_body.contains(r#""Path":"/strm/Movies/A/Movie""#));
+    assert!(notify_body.contains(r#""UpdateType":"Deleted""#));
+    assert!(
+        requests[4].starts_with("POST /Items/archive-lib/Refresh?"),
+        "{}",
+        requests[4]
+    );
+    drop(requests);
+
+    let undo_payload =
+        undo_payload_for_op(&state, task["result"]["undo_id"].as_str().unwrap(), "move").await;
+    assert_eq!(undo_payload["from"], "Movies");
+    assert_eq!(undo_payload["to"], "Archive");
+    assert_eq!(undo_payload["folder"], "A/Movie");
+    assert_eq!(undo_payload["to_folder"], "Done/Movie");
+    assert_eq!(undo_payload["emby_id"], "item-move");
+    assert_eq!(undo_payload["strm_count"], 1);
+}
+
 async fn configure_emby(state: &AppState, base_url: &str) {
     for (key, value) in [
         ("emby_url", json!(base_url)),
@@ -185,8 +286,13 @@ async fn wait_for_task_status(state: &AppState, id: Uuid, status: &str) -> Value
 }
 
 async fn undo_payload_for(state: &AppState, id: &str) -> Value {
-    sqlx::query_scalar("SELECT payload FROM undo_entries WHERE id = $1 AND op = 'delete'")
+    undo_payload_for_op(state, id, "delete").await
+}
+
+async fn undo_payload_for_op(state: &AppState, id: &str, op: &str) -> Value {
+    sqlx::query_scalar("SELECT payload FROM undo_entries WHERE id = $1 AND op = $2")
         .bind(Uuid::parse_str(id).unwrap())
+        .bind(op)
         .fetch_one(&state.pool)
         .await
         .expect("load undo payload")

@@ -189,6 +189,25 @@ pub struct ManageDeleteExecuteResult {
     pub undo_id: Uuid,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ManageMoveExecuteResult {
+    pub ok: bool,
+    pub preview: bool,
+    pub dry_run: bool,
+    pub operation: String,
+    pub from_lib: String,
+    pub from_folder: String,
+    pub to_lib: String,
+    pub to_folder: String,
+    pub moved: bool,
+    pub old_strm_removed: bool,
+    pub strm_written: usize,
+    pub emby_gone: bool,
+    pub notified: bool,
+    pub refresh_code: Option<u16>,
+    pub undo_id: Uuid,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/libraries", get(libraries))
@@ -196,7 +215,8 @@ pub fn router() -> Router<AppState> {
         .route("/api/v2/libraries/strm", get(list_strm))
         .route("/api/v2/manage/delete", post(manage_delete))
         .route("/api/v2/manage/delete/execute", post(execute_delete))
-        .route("/api/v2/manage/move", post(preview_move))
+        .route("/api/v2/manage/move", post(manage_move))
+        .route("/api/v2/manage/move/execute", post(execute_move))
 }
 
 #[utoipa::path(get, path = "/api/v2/libraries", tag = "media", responses((status = 200, body = LibrariesResponse)))]
@@ -384,6 +404,49 @@ pub async fn preview_move(
     Ok(Json(task))
 }
 
+pub async fn manage_move(
+    State(state): State<AppState>,
+    Query(query): Query<ManageExecuteQuery>,
+    Json(req): Json<ManageMoveRequest>,
+) -> AppResult<Json<TaskRun>> {
+    if query.execute.unwrap_or(false) {
+        execute_move(State(state), Json(req)).await
+    } else {
+        preview_move(State(state), Json(req)).await
+    }
+}
+
+#[utoipa::path(post, path = "/api/v2/manage/move/execute", tag = "media", request_body = ManageMoveRequest, responses((status = 200, body = TaskRun)))]
+pub async fn execute_move(
+    State(state): State<AppState>,
+    Json(req): Json<ManageMoveRequest>,
+) -> AppResult<Json<TaskRun>> {
+    let plan = plan_move_execute(&state, &req)?;
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    ensure_api_key_configured(&api_key)?;
+
+    let params = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
+    let label = format!(
+        "移动: {}/{} -> {}/{}",
+        req.from_lib.trim(),
+        req.from_folder.trim(),
+        req.to_lib.trim(),
+        plan.to_folder
+    );
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "manage_move_execute",
+        &label,
+        5,
+        "manual",
+        params,
+    )
+    .await?;
+    spawn_move_execute(state, task.id, emby_url, api_key, req, plan);
+    Ok(Json(task))
+}
+
 fn ensure_api_key_configured(api_key: &str) -> AppResult<()> {
     if api_key.trim().is_empty() {
         return Err(AppError::BadRequest(
@@ -549,6 +612,42 @@ async fn run_delete_execute(
     })
 }
 
+fn spawn_move_execute(
+    state: AppState,
+    id: Uuid,
+    emby_url: String,
+    api_key: String,
+    req: ManageMoveRequest,
+    plan: MoveExecutePlan,
+) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, id, "任务并发槽不可用", None).await;
+            return;
+        };
+        if tasks::cancel_requested(&state.pool, id).await {
+            let _ = tasks::finish_cancelled(&state.pool, id).await;
+            return;
+        }
+        let _ = tasks::mark_running(&state.pool, id, "准备移动").await;
+        let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+        match run_move_execute(&state, id, &client, req, plan).await {
+            Ok(result) => {
+                let _ = tasks::finish_done(
+                    &state.pool,
+                    id,
+                    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+                )
+                .await;
+            }
+            Err(err) if err.to_string() == TASK_CANCELLED_SENTINEL => {}
+            Err(err) => {
+                let _ = tasks::finish_error(&state.pool, id, &err.to_string(), None).await;
+            }
+        }
+    });
+}
+
 async fn verify_emby_delete(client: &EmbyClient, item_id: &str) -> bool {
     match client.item_exists(item_id).await {
         Ok(false) => true,
@@ -562,6 +661,86 @@ async fn verify_emby_delete(client: &EmbyClient, item_id: &str) -> bool {
         }
         Err(_) => true,
     }
+}
+
+async fn run_move_execute(
+    state: &AppState,
+    id: Uuid,
+    client: &EmbyClient,
+    req: ManageMoveRequest,
+    plan: MoveExecutePlan,
+) -> AppResult<ManageMoveExecuteResult> {
+    tasks::set_total(&state.pool, id, 5).await?;
+    if tasks::cancel_requested(&state.pool, id).await {
+        tasks::finish_cancelled(&state.pool, id).await?;
+        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+    }
+
+    let target_library_id = resolve_library_item_id(client, &plan.to_lib).await?;
+    tasks::set_progress(&state.pool, id, 1, "目标库已确认").await?;
+    if tasks::cancel_requested(&state.pool, id).await {
+        tasks::finish_cancelled(&state.pool, id).await?;
+        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+    }
+
+    move_cd_folder(&plan).await?;
+    tasks::set_progress(&state.pool, id, 2, "媒体目录已移动").await?;
+
+    let old_strm_removed = remove_path_if_exists(&plan.from_strm_target).await?;
+    let strm_written = rebuild_strm_for_moved_folder(&plan)?;
+    tasks::set_progress(&state.pool, id, 3, "STRM 已重建").await?;
+
+    let mut emby_gone = true;
+    if let Some(item_id) = req.item_id.as_deref().and_then(non_empty_trimmed) {
+        match client.delete_item(item_id).await {
+            Ok(_) => emby_gone = verify_emby_delete(client, item_id).await,
+            Err(_) => emby_gone = false,
+        }
+    }
+    let notified = client
+        .notify_media_deleted(&plan.from_emby_path)
+        .await
+        .is_ok();
+    tasks::set_progress(&state.pool, id, 4, "旧路径通知已处理").await?;
+
+    let refresh_code = client
+        .refresh_item(&target_library_id, true, false)
+        .await
+        .ok();
+    let undo_id = Uuid::new_v4();
+    let to_folder = plan.to_folder.clone();
+    let payload = serde_json::json!({
+        "from": req.from_lib.trim(),
+        "to": req.to_lib.trim(),
+        "folder": req.from_folder.trim(),
+        "to_folder": to_folder,
+        "emby_id": req.item_id.as_deref().and_then(non_empty_trimmed),
+        "strm_count": strm_written,
+    });
+    sqlx::query("INSERT INTO undo_entries(id, op, payload) VALUES ($1, 'move', $2)")
+        .bind(undo_id)
+        .bind(payload)
+        .execute(&state.pool)
+        .await?;
+    tasks::set_progress(&state.pool, id, 5, "目标库刷新并写入 undo").await?;
+
+    Ok(ManageMoveExecuteResult {
+        ok: true,
+        preview: false,
+        dry_run: false,
+        operation: "move".to_string(),
+        from_lib: plan.from_lib,
+        from_folder: req.from_folder.trim().to_string(),
+        to_lib: plan.to_lib,
+        to_folder,
+        moved: true,
+        old_strm_removed,
+        strm_written,
+        emby_gone,
+        notified,
+        refresh_code,
+        undo_id,
+    })
 }
 
 async fn delete_planned_paths(plan: &DeleteExecutePlan) -> AppResult<Vec<String>> {
@@ -585,6 +764,96 @@ async fn delete_planned_paths(plan: &DeleteExecutePlan) -> AppResult<Vec<String>
         deleted_from.push(label.to_string());
     }
     Ok(deleted_from)
+}
+
+async fn resolve_library_item_id(client: &EmbyClient, name: &str) -> AppResult<String> {
+    let library = client
+        .libraries()
+        .await?
+        .into_iter()
+        .find(|item| item.name == name || item.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| AppError::NotFound(format!("Emby library not found: {name}")))?;
+    library
+        .id
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Emby library {name} has no ItemId; cannot refresh target after move"
+            ))
+        })
+}
+
+async fn move_cd_folder(plan: &MoveExecutePlan) -> AppResult<()> {
+    if !plan.from_cd_target.is_dir() {
+        return Err(AppError::NotFound(format!(
+            "源 115 文件夹不存在: {}",
+            plan.from_cd_target.display()
+        )));
+    }
+    if plan.to_cd_target.exists() {
+        return Err(AppError::Conflict(format!(
+            "目标已存在同名文件夹: {}",
+            plan.to_cd_target.display()
+        )));
+    }
+    if let Some(parent) = plan.to_cd_target.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(anyhow::Error::from)?;
+    }
+    tokio::fs::rename(&plan.from_cd_target, &plan.to_cd_target)
+        .await
+        .map_err(anyhow::Error::from)?;
+    Ok(())
+}
+
+async fn remove_path_if_exists(path: &Path) -> AppResult<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let metadata = tokio::fs::symlink_metadata(path)
+        .await
+        .map_err(anyhow::Error::from)?;
+    if metadata.is_dir() {
+        tokio::fs::remove_dir_all(path)
+            .await
+            .map_err(anyhow::Error::from)?;
+    } else {
+        tokio::fs::remove_file(path)
+            .await
+            .map_err(anyhow::Error::from)?;
+    }
+    Ok(true)
+}
+
+fn rebuild_strm_for_moved_folder(plan: &MoveExecutePlan) -> AppResult<usize> {
+    std::fs::create_dir_all(&plan.to_strm_lib).map_err(|err| AppError::Anyhow(err.into()))?;
+    chmod_public_dir(&plan.to_strm_lib);
+    let mut written = 0usize;
+    for entry in WalkDir::new(&plan.to_cd_target)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() || !is_video_file(entry.path()) {
+            continue;
+        }
+        let Ok(root_rel) = entry
+            .path()
+            .parent()
+            .unwrap_or(&plan.to_cd_target)
+            .strip_prefix(&plan.to_cd_lib)
+        else {
+            continue;
+        };
+        let Some(filename) = entry.path().file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if write_strm(&plan.to_strm_lib, &plan.to_lib, root_rel, filename)? {
+            written += 1;
+        }
+    }
+    Ok(written)
 }
 
 fn plan_delete(state: &AppState, req: &ManageDeleteRequest) -> AppResult<Vec<PathBuf>> {
@@ -641,6 +910,60 @@ fn plan_move(state: &AppState, req: &ManageMoveRequest) -> AppResult<Vec<PathBuf
         safe_under(&to_lib, name)?
     };
     Ok(vec![from, to])
+}
+
+#[derive(Debug, Clone)]
+struct MoveExecutePlan {
+    from_lib: String,
+    to_lib: String,
+    to_folder: String,
+    from_cd_target: PathBuf,
+    to_cd_lib: PathBuf,
+    to_cd_target: PathBuf,
+    from_strm_target: PathBuf,
+    to_strm_lib: PathBuf,
+    from_emby_path: String,
+}
+
+fn plan_move_execute(state: &AppState, req: &ManageMoveRequest) -> AppResult<MoveExecutePlan> {
+    let from_lib = required_segment(&req.from_lib, "from_lib")?;
+    let from_folder = required_segment(&req.from_folder, "from_folder")?;
+    let to_lib = required_segment(&req.to_lib, "to_lib")?;
+    let to_folder = move_target_folder(req)?;
+
+    let from_cd_lib = safe_under(&state.settings.cd_root, from_lib)?;
+    let to_cd_lib = safe_under(&state.settings.cd_root, to_lib)?;
+    let from_strm_lib = safe_under(&state.settings.strm_root, from_lib)?;
+    let to_strm_lib = safe_under(&state.settings.strm_root, to_lib)?;
+
+    let from_cd_target = safe_under(&from_cd_lib, from_folder)?;
+    let to_cd_target = safe_under(&to_cd_lib, &to_folder)?;
+    let from_strm_target = safe_under(&from_strm_lib, from_folder)?;
+    let _to_strm_target = safe_under(&to_strm_lib, &to_folder)?;
+
+    Ok(MoveExecutePlan {
+        from_lib: from_lib.to_string(),
+        to_lib: to_lib.to_string(),
+        to_folder,
+        from_cd_target,
+        to_cd_lib,
+        to_cd_target,
+        from_strm_target,
+        to_strm_lib,
+        from_emby_path: format!("/strm/{from_lib}/{from_folder}"),
+    })
+}
+
+fn move_target_folder(req: &ManageMoveRequest) -> AppResult<String> {
+    if let Some(folder) = req.to_folder.as_deref().and_then(non_empty_trimmed) {
+        required_segment(folder, "to_folder")?;
+        return Ok(folder.to_string());
+    }
+    let name = Path::new(required_segment(&req.from_folder, "from_folder")?)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::BadRequest("from_folder 缺少可用末级目录名".to_string()))?;
+    Ok(name.to_string())
 }
 
 fn required_segment<'a>(value: &'a str, field: &str) -> AppResult<&'a str> {

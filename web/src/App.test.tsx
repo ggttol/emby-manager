@@ -921,9 +921,11 @@ describe('App shell', () => {
     ])));
   });
 
-  it('creates delete preview tasks from the manage panel with csrf', async () => {
+  it('creates delete and move tasks from the manage panel with csrf', async () => {
     let previewPayload: unknown = null;
     let executePayload: unknown = null;
+    let movePreviewPayload: unknown = null;
+    let moveExecutePayload: unknown = null;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/libraries') {
         return jsonResponse({
@@ -994,6 +996,52 @@ describe('App shell', () => {
           source: 'api'
         });
       }
+      if (url.pathname === '/api/v2/manage/move') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        movePreviewPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+          kind: 'manage_move_preview',
+          label: '移动预览: 电影/旧电影 -> 电视剧',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
+      if (url.pathname === '/api/v2/manage/move/execute') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        moveExecutePayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: '99999999-9999-4999-8999-999999999999',
+          kind: 'manage_move_execute',
+          label: '移动: 电影/旧电影 -> 电视剧/归档电影',
+          status: 'pending',
+          progress: 0,
+          total: 5,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
       return undefined;
     });
 
@@ -1028,6 +1076,38 @@ describe('App shell', () => {
       reason: '重复资源'
     }));
     expect(await screen.findByText('删除: 电影/旧电影')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('来源库名'), { target: { value: '电影' } });
+    fireEvent.change(screen.getByLabelText('来源 folder'), { target: { value: '旧电影' } });
+    fireEvent.change(screen.getByLabelText('目标库名'), { target: { value: '电视剧' } });
+    fireEvent.change(screen.getByLabelText('目标 folder'), { target: { value: '归档电影' } });
+    fireEvent.change(screen.getByLabelText('移动 ItemId'), { target: { value: 'item-move' } });
+    fireEvent.change(screen.getByLabelText('移动原因'), { target: { value: '归档' } });
+    fireEvent.click(screen.getByRole('button', { name: '生成移动预览任务' }));
+
+    await waitFor(() => expect(movePreviewPayload).toEqual({
+      from_lib: '电影',
+      from_folder: '旧电影',
+      to_lib: '电视剧',
+      to_folder: '归档电影',
+      item_id: 'item-move',
+      reason: '归档'
+    }));
+    expect(await screen.findByText('移动预览: 电影/旧电影 -> 电视剧')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '真实移动' }));
+    expect(await screen.findByText('确认真实移动')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认移动' }));
+
+    await waitFor(() => expect(moveExecutePayload).toEqual({
+      from_lib: '电影',
+      from_folder: '旧电影',
+      to_lib: '电视剧',
+      to_folder: '归档电影',
+      item_id: 'item-move',
+      reason: '归档'
+    }));
+    expect(await screen.findByText('移动: 电影/旧电影 -> 电视剧/归档电影')).toBeInTheDocument();
   });
 
   it('loads and saves Emby user policy from the users tab', async () => {

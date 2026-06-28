@@ -75,6 +75,7 @@ export function ManagePanel() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState('');
   const [lastTask, setLastTask] = useState<TaskRun | null>(null);
+  const [confirmMove, setConfirmMove] = useState(false);
   const toast = useToast();
 
   const sortedLibraries = useMemo(() => libraryOptions(libraries), [libraries]);
@@ -203,6 +204,38 @@ export function ManagePanel() {
     }
   };
 
+  const executeMove = async () => {
+    if (!fromLib.trim() || !fromFolder.trim() || !toLib.trim()) {
+      toast.push('先填写来源库、来源 folder 和目标库', 'warn');
+      return;
+    }
+    setConfirmMove(false);
+    setSubmitting('move');
+    setError('');
+    try {
+      const payload: ManageMoveRequest = {
+        from_lib: fromLib.trim(),
+        from_folder: fromFolder.trim(),
+        to_lib: toLib.trim(),
+        to_folder: toFolder.trim() || null,
+        item_id: moveItemId.trim() || null,
+        reason: moveReason.trim() || null
+      };
+      const task = await api<TaskRun>('/api/v2/manage/move/execute', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      setLastTask(task);
+      toast.push(`已创建真实移动任务：${task.label || task.kind}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`真实移动任务创建失败：${message}`, 'error');
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
   const renderLibSelect = (label: string, value: string, onChange: (value: string) => void) => (
     <label>
       <span>{label}</span>
@@ -229,10 +262,24 @@ export function ManagePanel() {
           )}
         />
       )}
+      {confirmMove && (
+        <ConfirmDanger
+          title="确认真实移动"
+          confirmText="确认移动"
+          onCancel={() => setConfirmMove(false)}
+          onConfirm={executeMove}
+          body={(
+            <div className="dangerCopy">
+              <p>将移动媒体目录，重建目标 STRM，删除旧 STRM，并刷新目标 Emby 库。</p>
+              <code>{fromLib.trim()}/{fromFolder.trim()} → {toLib.trim()}/{toFolder.trim() || fromFolder.trim().split('/').filter(Boolean).at(-1) || fromFolder.trim()}</code>
+            </div>
+          )}
+        />
+      )}
       <div className="manageToolbar">
         <div>
           <strong>删除·移动</strong>
-          <span>删除支持预览和真实执行；移动仍保持 dry-run 预览。</span>
+          <span>删除和移动都支持预览与真实执行。</span>
         </div>
         <button className="btn ghost" onClick={load} disabled={loading}>
           <RefreshCw size={16} />
@@ -249,8 +296,8 @@ export function ManagePanel() {
         <article className="statCard warn">
           <div><FileWarning /></div>
           <span>写操作</span>
-          <strong>删除可执行</strong>
-          <small>move remains preview</small>
+          <strong>删除 / 移动</strong>
+          <small>preview first, then execute</small>
         </article>
         <article className="statCard neutral">
           <div><RotateCcw /></div>
@@ -304,7 +351,7 @@ export function ManagePanel() {
         <form className="manageForm" onSubmit={submitMove}>
           <div className="manageFormHead">
             <ArrowRight size={18} />
-            <strong>移动预览</strong>
+            <strong>移动</strong>
           </div>
           {renderLibSelect('来源库名', fromLib, setFromLib)}
           <label>
@@ -324,9 +371,14 @@ export function ManagePanel() {
             <span>原因</span>
             <input className="input" aria-label="移动原因" value={moveReason} onChange={(event) => setMoveReason(event.target.value)} placeholder="可选" />
           </label>
-          <button className="btn" disabled={submitting !== null}>
-            {submitting === 'move' ? '创建中' : '生成移动预览任务'}
-          </button>
+          <div className="inlineActions">
+            <button className="btn" disabled={submitting !== null}>
+              {submitting === 'move' ? '创建中' : '生成移动预览任务'}
+            </button>
+            <button type="button" className="btn danger" disabled={submitting !== null} onClick={() => setConfirmMove(true)}>
+              真实移动
+            </button>
+          </div>
         </form>
       </div>
 

@@ -404,6 +404,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/manage/move/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["execute_move"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/manage/undo": {
         parameters: {
             query?: never;
@@ -1143,6 +1159,25 @@ export interface components {
             item_id?: string | null;
             lib: string;
             reason?: string | null;
+        };
+        ManageMoveExecuteResult: {
+            dry_run: boolean;
+            emby_gone: boolean;
+            from_folder: string;
+            from_lib: string;
+            moved: boolean;
+            notified: boolean;
+            ok: boolean;
+            old_strm_removed: boolean;
+            operation: string;
+            preview: boolean;
+            /** Format: int32 */
+            refresh_code?: number | null;
+            strm_written: number;
+            to_folder: string;
+            to_lib: string;
+            /** Format: uuid */
+            undo_id: string;
         };
         ManageMoveRequest: {
             from_folder: string;
@@ -2151,6 +2186,29 @@ export interface operations {
         };
     };
     preview_move: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManageMoveRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    execute_move: {
         parameters: {
             query?: never;
             header?: never;
