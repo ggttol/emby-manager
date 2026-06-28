@@ -3,7 +3,7 @@
 
 scan_lib / move_item / exec_dedup 走 _lib_lock(name) 串行化,避免并发扫同一库踩对方 strm。
 """
-import collections, copy, os, re, shutil, subprocess, threading, time
+import collections, os, re, shutil, subprocess, threading, time
 
 from lib.config import CFG, CD, STRM, DOCKER, VE
 from lib.logger import logger, log, AppError
@@ -13,6 +13,10 @@ from lib.emby import (eget, epost, edelete, emby_online, lib_count,
                       remote_search, apply_match)
 from lib.tasks import task_set, task_is_cancelled
 from lib.undo import _undo_record
+from lib.dedup import qscore, _is_extra, episode_set, fmt_eps, compact_ints
+from lib.config_api import (SENSITIVE_KEYS, PROTECTED_IMPORT_KEYS, IMPORTABLE_CONFIG_KEYS,
+                            get_config, set_config, _normalize_import_value,
+                            export_config, import_config)
 
 
 # 库锁:scan/move/dedup 涉及读改 STRM/<lib> 文件树,同库并发会踩对方
@@ -29,36 +33,6 @@ def _lib_lock(name):
     """获取某 lib 的 Lock(惰性创建,LIB_LOCKS_GUARD 守 dict 写)"""
     with LIB_LOCKS_GUARD:
         return LIB_LOCKS[name]
-
-
-# ===== 画质评分 =====
-def qscore(s):
-    """文件名 → 画质分(2160p/1080p/REMUX/HDR/DV 等加成)。返回 int(去重排序键依赖)。"""
-    p = s.lower(); sc = 0
-    if re.search(r'2160p|\buhd\b|\b4k\b|2160', p): sc += 4000
-    elif '1080p' in p or '1080i' in p: sc += 2000
-    elif '720p' in p: sc += 1000
-    elif '480p' in p or 'dvdrip' in p: sc += 300
-    if 'remux' in p: sc += 800
-    elif 'bluray' in p or 'blu-ray' in p or 'bdrip' in p: sc += 400
-    elif 'web-dl' in p or 'webdl' in p or 'webrip' in p or '.web.' in p: sc += 200
-    elif 'hdtv' in p: sc += 100
-    # 'dv' 要带边界,否则 dvd/dvdrip/advengers 等都会误命中 +60(review M3)
-    if re.search(r'(?<![a-z])dv(?![a-z])|杜比视界|dovi|dolby.?vision', p): sc += 60
-    if 'hdr' in p: sc += 30
-    return sc
-
-
-# 花絮/预告/样片识别。中文词 + 长英文词直接匹配;sp/op/ed/nc 这类短词易撞正片标题,
-# 要求它们是【独立 token】(前有分隔符、后跟数字+分隔符/扩展名/结尾)才算,降低误判(review)。
-_EXTRA_RE = re.compile(
-    r'花絮|预告|片花|彩蛋|特典|菜单|making[ ._-]?of|sample|trailer|preview|featurette'
-    r'|(?:^|[ ._/\-])(?:ncop|nced)\d{0,2}(?=[ ._\-]|\.[a-z0-9]+$|$)'
-    r'|(?:^|[ ._/\-])(?:sp|op|ed)\d{1,3}(?=[ ._\-]|\.[a-z0-9]+$|$)',
-    re.IGNORECASE)
-def _is_extra(name):
-    """是否花絮/预告/样片/SP/OP/ED —— 去重判画质时不拿它当正片(否则一个 2160p 预告污染整组)。"""
-    return bool(_EXTRA_RE.search(name or ""))
 
 
 # ===== 库列表 + 元信息汇总 =====
@@ -347,29 +321,6 @@ def analyze_dups():
             # 代表画质用正片里的最高分;整组全是 extra 时退回 maxsc(不至于算 0)
             rep = max(main_scs) if main_scs else maxsc
             groups[mm.group(1)][(lib, top)] = {"medias": medias, "score": rep, "n": len(medias)}
-    def eps(ms):
-        e = set()
-        for x in ms:
-            # episode 编号最多 4 位(海贼王 1163 集 / 名侦探柯南这类长寿剧)
-            z = re.search(r's(\d{1,2})e(\d{1,4})', x.lower())
-            if z: e.add((int(z.group(1)), int(z.group(2))))
-        return e
-    def fmt_eps(es):
-        """{(s,e),...} → 'S01·E01-12,45' or 'S01E01-12 · S02E05' for multi-season"""
-        if not es: return ""
-        by_s = collections.defaultdict(list)
-        for s, e in es: by_s[s].append(e)
-        def comp(xs):
-            xs = sorted(xs); out = []; a = p = xs[0]
-            for x in xs[1:]:
-                if x == p + 1: p = x
-                else: out.append(str(a) if a == p else "%d-%d" % (a, p)); a = p = x
-            out.append(str(a) if a == p else "%d-%d" % (a, p))
-            return ",".join(out)
-        if len(by_s) == 1:
-            s = next(iter(by_s))
-            return "S%02d · E%s" % (s, comp(by_s[s]))
-        return " · ".join("S%02dE%s" % (s, comp(by_s[s])) for s in sorted(by_s))
     dups = []; review = []
     for tid, folders in groups.items():
         if len(folders) < 2:
@@ -377,7 +328,7 @@ def analyze_dups():
         keys = list(folders.keys())
         flat = [x for k in keys for x in folders[k]["medias"]]
         shared = len(flat) != len(set(flat))
-        ep_map = {k: eps(folders[k]["medias"]) for k in keys}
+        ep_map = {k: episode_set(folders[k]["medias"]) for k in keys}
         epsets = [ep_map[k] for k in keys]
         is_series = any(len(e) > 0 for e in epsets)
         # 排序:① 画质高优先 ② 同画质看集数(文件数)多优先 ③ 带 (1) 后缀的排后 ④ 名字短优先
@@ -857,13 +808,6 @@ def series_gaps(series_id):
         if n is None:
             noidx += 1; continue
         (virt if e.get("LocationType") == "Virtual" else have)[s].add(n)
-    def compact(g):
-        if not g: return []
-        r = []; a = p = g[0]
-        for x in g[1:]:
-            if x == p + 1: p = x
-            else: r.append(str(a) if a == p else "%d-%d" % (a, p)); a = p = x
-        r.append(str(a) if a == p else "%d-%d" % (a, p)); return r
     have_all = set(); virt_all = set()
     for s in have: have_all |= have[s]
     for s in virt: virt_all |= virt[s]
@@ -875,7 +819,7 @@ def series_gaps(series_id):
         hi = max(union_pos | virt_all)
         miss = [x for x in range(min(union_pos), hi + 1) if x not in union_pos]
         return {"mode": "absolute", "have": len(union_pos), "max_ep": max(union_pos), "tmdb_max": hi,
-                "gaps": len(miss), "gap_list": compact(miss), "noidx": noidx, "seasons": []}
+                "gaps": len(miss), "gap_list": compact_ints(miss), "noidx": noidx, "seasons": []}
     seas = []; th = tg = mx = 0; tmdb_max = 0
     for s in sorted(set(have) | set(virt), key=lambda x: (x is None, x)):
         full = sorted(have[s] | virt[s])
@@ -883,7 +827,7 @@ def series_gaps(series_id):
             continue
         lo, hi = full[0], full[-1]
         miss = [x for x in range(lo, hi + 1) if x not in have[s]]
-        seas.append({"season": s, "count": len(have[s]), "lo": lo, "hi": hi, "gaps": compact(miss), "gapcount": len(miss)})
+        seas.append({"season": s, "count": len(have[s]), "lo": lo, "hi": hi, "gaps": compact_ints(miss), "gapcount": len(miss)})
         th += len(have[s]); tg += len(miss); mx = max(mx, max(have[s]) if have[s] else 0); tmdb_max = max(tmdb_max, hi)
     return {"mode": "season", "have": th, "gaps": tg, "max_ep": mx, "tmdb_max": tmdb_max, "noidx": noidx, "seasons": seas}
 
@@ -943,265 +887,6 @@ def system_info():
             "load": {"avg": loadavg, "ncpu": ncpu, "per_core": round(loadavg[0] / ncpu, 2) if loadavg else None},
             "dstate": dstate,
             "containers": conts, "procs": procs, "cd_ok": cd_ok}
-
-
-# ===== 配置 get/set(get 自动 mask cookie) =====
-def get_config():
-    ck = CFG.get("c115_cookie", "")
-    mask = (ck[:18] + "…" + ck[-18:]) if len(ck) > 50 else ck
-    from lib.config import _DEF_CD, _DEF_STRM, _DEF_DOCKER
-    return {"emby_url": CFG["emby_url"], "api_key": CFG["api_key"], "port": CFG["port"],
-            "c115_cookie_set": bool(ck), "c115_cookie_mask": mask,
-            "c115_cid_map": CFG.get("c115_cid_map") or {},
-            "trusted_proxies": CFG.get("trusted_proxies") or [],
-            # autostrm(CD2 webhook 自动生成 strm):密钥只回 _set 布尔(不回显原值,同 cookie)
-            "auto_strm_enabled": bool(CFG.get("auto_strm_enabled")),
-            "auto_strm_fullauto": bool(CFG.get("auto_strm_fullauto")),
-            "cd2_mount_prefix": CFG.get("cd2_mount_prefix") or "/CloudNAS/CloudDrive",
-            "auto_strm_debounce_sec": CFG.get("auto_strm_debounce_sec", 8),
-            "cd2_webhook_secret_set": bool(CFG.get("cd2_webhook_secret")),
-            # 存储路径(换机器改这三个,不用动代码;改完重启生效)
-            "cd": CFG.get("cd") or _DEF_CD, "strm": CFG.get("strm") or _DEF_STRM,
-            "docker": CFG.get("docker") or _DEF_DOCKER}
-
-
-def set_config(b):
-    # lazy import 避免 lib.config → lib.auth → lib.logger → ... 循环风险
-    from lib.config import CFG_LOCK, WEAK_PWS, save_cfg
-    from lib.auth import _hash_password, _verify_password
-    changed = []
-    password_changed = False
-    with CFG_LOCK:
-        # 先在候选副本上校验和修改，只有落盘成功才切换共享 CFG；避免后面的一个字段非法
-        # 却把前面已改的 Emby 地址/cookie 留在内存里这种“半保存”状态。
-        before = copy.deepcopy(CFG)
-        candidate = copy.deepcopy(CFG)
-        if b.get("password"):
-            pw = b["password"]
-            old = b.get("old_password", "")
-            cur_hash = candidate.get("password_hash", "")
-            # grace:首次升级(无 last_password_change_at 字段)允许一次无 old_password 改密;
-            # 之后必须输旧密码且匹配 hash
-            if CFG.get("last_password_change_at") and not _verify_password(old, cur_hash):
-                raise AppError("旧密码错误", status=403)
-            if len(pw) < 6:
-                return {"err": "密码至少 6 位"}
-            if pw in WEAK_PWS:
-                return {"err": "密码在弱密码列表,换一个"}
-            candidate["password_hash"] = _hash_password(pw); candidate.pop("password", None)
-            candidate["last_password_change_at"] = int(time.time())
-            changed.append("登录密码")
-            password_changed = True
-        if b.get("emby_url"):
-            candidate["emby_url"] = b["emby_url"].strip(); changed.append("Emby地址")
-        if b.get("api_key"):
-            candidate["api_key"] = b["api_key"].strip(); changed.append("API Key")
-        if b.get("c115_cookie") is not None:
-            candidate["c115_cookie"] = b["c115_cookie"].strip(); changed.append("115 Cookie")
-        if isinstance(b.get("c115_cid_map"), dict):
-            candidate["c115_cid_map"] = {k: str(v).strip() for k, v in b["c115_cid_map"].items() if str(v).strip()}
-            changed.append("115 库 cid 映射")
-        if isinstance(b.get("trusted_proxies"), list):
-            # 受信反代 IP 列表(影响登录限流的 XFF 信任)。只收字符串项,去空白。
-            candidate["trusted_proxies"] = [str(x).strip() for x in b["trusted_proxies"] if str(x).strip()]
-            changed.append("受信反代 IP")
-        # autostrm(CD2 webhook 自动生成 strm)开关组
-        if b.get("cd2_webhook_secret") is not None:
-            # 只写不回显(同 cookie)。空串 = 关闭功能(webhook 一律 403)
-            candidate["cd2_webhook_secret"] = str(b["cd2_webhook_secret"]).strip(); changed.append("CD2 webhook 密钥")
-        if b.get("cd2_mount_prefix") is not None and str(b["cd2_mount_prefix"]).strip():
-            v = str(b["cd2_mount_prefix"]).strip()
-            if not v.startswith("/"):
-                return {"err": "CD2 挂载前缀必须以 / 开头: %r" % v}
-            candidate["cd2_mount_prefix"] = v.rstrip("/") or "/"; changed.append("CD2 挂载前缀")
-        if b.get("auto_strm_enabled") is not None:
-            candidate["auto_strm_enabled"] = bool(b["auto_strm_enabled"]); changed.append("自动 strm 开关")
-        if b.get("auto_strm_fullauto") is not None:
-            candidate["auto_strm_fullauto"] = bool(b["auto_strm_fullauto"]); changed.append("自动 strm 全自动")
-        if b.get("auto_strm_debounce_sec") is not None:
-            try:
-                candidate["auto_strm_debounce_sec"] = max(1, min(120, int(b["auto_strm_debounce_sec"])))
-                changed.append("防抖窗口")
-            except Exception:
-                pass
-        # 存储路径(cd/strm/docker):必须绝对路径。写错会让扫描/删除指向错地方,严格校验。
-        path_changed = False
-        for k, name in (("cd", "115 挂载根"), ("strm", "strm 根"), ("docker", "docker 路径")):
-            v = b.get(k)
-            if v is not None and str(v).strip():
-                v = str(v).strip()
-                if not v.startswith("/"):
-                    return {"err": "%s 必须是绝对路径(以 / 开头): %r" % (name, v)}
-                candidate[k] = v; changed.append(name); path_changed = True
-        CFG.clear(); CFG.update(candidate)
-        if not save_cfg():
-            CFG.clear(); CFG.update(before)
-            raise AppError("配置保存失败(磁盘空间或权限异常),未应用本次修改", status=500)
-    if password_changed:
-        # 只有新 hash 已落盘才吊销会话；保存失败时保留原会话，避免用户被无端踢下线。
-        try:
-            from lib.auth import TOKENS, TOKENS_LOCK
-            with TOKENS_LOCK:
-                TOKENS.clear()
-        except Exception:
-            pass
-    if path_changed:
-        try:
-            from lib.config import _apply_paths
-            _apply_paths()  # 同步 config.CD/STRM/DOCKER;已 import 的模块要重启才生效
-        except Exception:
-            pass
-    log("修改配置: " + "、".join(changed))
-    r = {"ok": True, "changed": changed, "emby": emby_online()}
-    if path_changed:
-        r["restart_needed"] = True
-        r["note"] = "存储路径已存,但扫描/删除等用到路径的功能要【重启服务】才生效"
-    return r
-
-
-# ===== 配置导出/导入(剔密) =====
-SENSITIVE_KEYS = ("password_hash", "c115_cookie", "cd2_webhook_secret")
-# PROTECTED_IMPORT_KEYS:import 时**永远跳过**,无论用户传什么值。
-# 包括 schema_version(不让绕 migration)、敏感字段(防直接覆盖植入)、
-# **last_password_change_at(防 grace 复活提权)**、username(防越权)。
-# host / trusted_proxies 也不接受导入:防恶意备份植入 host=0.0.0.0(重启暴露公网)
-# 或 trusted_proxies=[攻击者IP](伪造 XFF 绕过登录限流)。这俩是运行时安全开关,只能在设置页手改(review)。
-PROTECTED_IMPORT_KEYS = ("schema_version", "password_hash", "c115_cookie",
-                         "last_password_change_at", "username",
-                         "host", "trusted_proxies", "cd2_webhook_secret")
-# 导入不是任意 CFG 注入接口：只接受文档化、可由设置页/调度页管理的字段。
-# bind_token_ip 虽暂未放 UI，仍保留给已有手工配置的兼容路径。
-IMPORTABLE_CONFIG_KEYS = frozenset((
-    "emby_url", "api_key", "port", "cd", "strm", "docker", "c115_cid_map", "schedules",
-    "auto_strm_enabled", "auto_strm_fullauto", "auto_strm_debounce_sec", "cd2_mount_prefix",
-    "bind_token_ip",
-))
-
-
-def _normalize_import_value(key, value):
-    """校验并规范化备份导入的值。
-
-    import_config 不能绕过设置页已有的路径/类型约束；否则一份坏备份会在重启后
-    把监听端口变成字符串、让 CD/STRM 指向相对路径，故障只会延迟到最难排查的启动时出现。
-    """
-    if key == "port":
-        if isinstance(value, bool):
-            raise AppError("port 必须是 1-65535 的整数", status=400)
-        try:
-            port = int(value)
-        except (TypeError, ValueError):
-            raise AppError("port 必须是 1-65535 的整数", status=400)
-        if not 1 <= port <= 65535:
-            raise AppError("port 必须是 1-65535 的整数", status=400)
-        return port
-    if key in ("cd", "strm", "docker"):
-        if not isinstance(value, str) or not value.startswith("/"):
-            raise AppError("%s 必须是绝对路径" % key, status=400)
-        return value.strip()
-    if key == "emby_url":
-        if not isinstance(value, str) or not value.strip().startswith(("http://", "https://")):
-            raise AppError("emby_url 必须以 http:// 或 https:// 开头", status=400)
-        return value.strip().rstrip("/")
-    if key == "api_key":
-        if not isinstance(value, str):
-            raise AppError("api_key 必须是字符串", status=400)
-        return value.strip()
-    if key == "c115_cid_map":
-        if not isinstance(value, dict):
-            raise AppError("c115_cid_map 必须是对象", status=400)
-        return {str(k): str(v).strip() for k, v in value.items() if str(v).strip()}
-    if key == "schedules":
-        if not isinstance(value, list):
-            raise AppError("schedules 必须是数组", status=400)
-        from lib.scheduler import _validate_schedule
-        for row in value:
-            if not isinstance(row, dict):
-                raise AppError("schedules 每项必须是对象", status=400)
-            try:
-                _validate_schedule(row.get("schedule") or {})
-            except ValueError as e:
-                raise AppError("定时任务配置非法: " + str(e), status=400)
-        return value
-    if key in ("auto_strm_enabled", "auto_strm_fullauto", "bind_token_ip"):
-        if not isinstance(value, bool):
-            raise AppError("%s 必须是 true/false" % key, status=400)
-        return value
-    if key == "auto_strm_debounce_sec":
-        if isinstance(value, bool):
-            raise AppError("auto_strm_debounce_sec 必须是 1-120 的整数", status=400)
-        try:
-            sec = int(value)
-        except (TypeError, ValueError):
-            raise AppError("auto_strm_debounce_sec 必须是 1-120 的整数", status=400)
-        if not 1 <= sec <= 120:
-            raise AppError("auto_strm_debounce_sec 必须是 1-120 的整数", status=400)
-        return sec
-    if key == "cd2_mount_prefix":
-        if not isinstance(value, str) or not value.startswith("/"):
-            raise AppError("cd2_mount_prefix 必须是绝对路径", status=400)
-        return value.rstrip("/") or "/"
-    # IMPORTABLE_CONFIG_KEYS 是唯一调用方；保留防御式兜底，后续扩项不能悄悄跳过校验。
-    raise AppError("不支持导入配置字段: " + str(key), status=400)
-
-
-def export_config():
-    """返 redacted CFG —— 密码 hash 和 cookie raw 替换为 '<redacted>'(供用户下载备份)。"""
-    from lib.config import CFG as _CFG, CFG_LOCK
-    # 持锁取快照:否则并发 import 新增键时 .items() 迭代会 RuntimeError: dict changed size(review)
-    with CFG_LOCK:
-        snapshot = list(_CFG.items())
-    out = {}
-    for k, v in snapshot:
-        if k in SENSITIVE_KEYS and v:
-            out[k] = "<redacted>"
-        else:
-            out[k] = v
-    return out
-
-
-def import_config(b):
-    """导入 config(必须 confirm=true)。schema 不匹配拒绝;PROTECTED_IMPORT_KEYS 永远不接受用户值。
-
-    安全模型:
-    - 敏感字段(password_hash / c115_cookie)即使非 <redacted> 也忽略,
-      因为合法导出必为 <redacted>;非 <redacted> = 攻击者植入。
-    - last_password_change_at 永远不接受导入 — 防止 import {last_password_change_at: null}
-      复活 grace 模式 → 接着 set_config {password: ..., old_password: ""} 提权改密。
-    - username / schema_version 同理不让动。
-    """
-    from lib.config import CFG as _CFG, CFG_LOCK, save_cfg, CURRENT_SCHEMA
-    if not b.get("confirm"):
-        raise AppError("必须显式 confirm=true", status=400)
-    cfg = b.get("cfg") or {}
-    if not isinstance(cfg, dict):
-        raise AppError("cfg 必须是 dict", status=400)
-    # schema 检查:旧导出包不能强压到新 schema 上
-    sv = cfg.get("schema_version")
-    if sv is not None and sv != CURRENT_SCHEMA:
-        raise AppError("schema 不匹配:导入 %s vs 当前 %s" % (sv, CURRENT_SCHEMA), status=400)
-    applied = []; skipped_protected = []; skipped_unknown = []
-    with CFG_LOCK:
-        before = copy.deepcopy(_CFG)
-        candidate = copy.deepcopy(_CFG)
-        for k, v in cfg.items():
-            if k in PROTECTED_IMPORT_KEYS:
-                skipped_protected.append(k)
-                continue
-            if k not in IMPORTABLE_CONFIG_KEYS:
-                skipped_unknown.append(k)
-                continue
-            candidate[k] = _normalize_import_value(k, v)
-            applied.append(k)
-        _CFG.clear(); _CFG.update(candidate)
-        if not save_cfg():
-            _CFG.clear(); _CFG.update(before)
-            raise AppError("配置保存失败(磁盘空间或权限异常),未应用导入", status=500)
-    log("config 导入: 改 %d 字段 [%s]%s" % (
-        len(applied), ", ".join(applied),
-        (" · 拒受保护字段 " + ",".join(skipped_protected) if skipped_protected else "") +
-        (" · 跳未知字段 " + ",".join(skipped_unknown) if skipped_unknown else "")))
-    return {"ok": True, "applied": applied, "skipped_protected": skipped_protected,
-            "skipped_unknown": skipped_unknown}
 
 
 # ===== 异步任务:全库扫描 + c115 批处理 =====

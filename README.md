@@ -4,27 +4,29 @@
 
 为 strm 架构(strm 文件 + 115 网盘 CloudDrive2 挂载)而生,但纯 Emby 库也能用大部分功能。
 
-**v3.0** 升级了体验:全局 UI 组件库(Modal/Toast/TaskCenter/Drawer/VirtualList/Combobox),危险操作走 Modal + 打字防误删,长任务进 TaskCenter(顶部进度条 + 🔔 bell + 可取消、跨 tab 不丢、刷新自动恢复),键盘快捷键全覆盖,暗/亮三态主题,撤销系统接入 UI,配置导出/导入。后端能力 100% 暴露,11 lib 模块零循环依赖,300 单元测试。
+**v3.0** 升级了体验:全局 UI 组件库(Modal/Toast/TaskCenter/Drawer/VirtualList/Combobox),危险操作走 Modal + 打字防误删,长任务进 TaskCenter(顶部进度条 + 🔔 bell + 可取消、跨 tab 不丢、刷新自动恢复),键盘快捷键全覆盖,暗/亮三态主题,撤销系统接入 UI,配置导出/导入。后端能力 100% 暴露,lib 模块保持零循环依赖,300+ 单元测试。
 
-**v3.0.x** 增量:智能清理(多维度评分)/ 一条龙加新资源向导 / 追更扫描 + 缺集汇总 / 全库缺集扫描 / 海报错绑检测 / 仪表盘待办 / 空 folder 扫 / 一键自动去重 / ⏰ 定时任务(每日 / 每周 / 每月,4 种 kind)/ 手机加主屏 + PWA standalone(蓝紫「管」图标)。
+**v3.0.x** 增量:智能清理(多维度评分)/ 一条龙加新资源向导 / 追更扫描 + 缺集汇总 / 全库缺集扫描 / 海报错绑检测 / 仪表盘待办 / 空 folder 扫 / 一键自动去重 / 自动 strm + 增量补扫 / ⏰ 定时任务(每日 / 每周 / 每月,5 种 kind)/ 手机加主屏 + PWA standalone(蓝紫「管」图标)。
 
 ---
 
-## 功能(13 个 tabs)
+## 功能(16 个 tabs)
 
 | Tab | 用途 |
 |---|---|
 | 仪表盘 | Emby 在线状态、库卡片(点击跳管理)、待办清单(无海报 / 重复项 / 无评分 等) |
 | 扫描 | 单库 / 全库扫描(异步任务,进度条),按关键词扫指定子目录,集成自动清孤儿 strm |
 | 115 转存 | 粘贴 115 分享链接 → snap 列文件 → receive 到指定库 cid;支持多链接批量;**一条龙向导**:转存 → 扫 → 等刮削 → 海报+重复检查 → 报告 |
+| 找资源 | 本地 `catalog_115.db` 关键词搜资源,115 分享链走转存,magnet/ed2k/http 直链走 115 离线下载 |
 | 追更检查 | 拉 TMDb `status` 看哪部剧已完结 / 在播,标红「应追更但本地没新集」;**一键扫所有在更剧** + **缺集求资源清单** |
 | 缺集检查 | 对照 TMDb 季集表,列出本地缺失的集号(支持绝对集号模式);**全库缺集扫描** |
 | 海报修复 | 列无海报项 → 调 Emby RemoteSearch 给候选 → 一键 Apply TMDb id;**全自动批量**;**错绑检测**(folder 中文 vs emby name 重合度低的疑似绑错) |
+| 字幕 | 扫 `/strm` 树统计外挂字幕覆盖情况,不碰 115 挂载 |
 | 去重 | 同 TMDb id 多份的项目对照(分辨率 / 容器 / 大小),勾选删冗余;**一键全自动去重**(只删可逆的清晰胜负);**全替换**(新版替老版) |
 | 删除·移动 | 单选 / 多选删除项目,或在库之间移动 strm + nfo + 海报;**智能冲突**(归档时按 strm 集数判断保留方) |
 | 智能清理 | 多维度评分(⭐评分低 / 📅入库久 / 👁️没人看 / 💾占空间 / 🖼️元数据残缺),维度可勾选,**只算勾选维度**;评分细则可查;一键删除选中 |
 | 系统 | Docker 容器列表、磁盘 / 内存 / 负载、Emby 版本;**健康预警**(容器非 Up / 磁盘紧 / Emby 离线 红色高亮)+ 复制系统报告 |
-| ⏰ 定时 | 4 种 kind(扫全库 / 扫追更剧 / 海报自动修 / 无评分剧刷新),触发模式每日 / 每周X / 每月N日 + HH:MM,启停 / 立即跑 / 改 / 删 |
+| ⏰ 定时 | 5 种 kind(扫全库 / 扫追更剧 / 海报自动修 / 无评分剧刷新 / 增量监控补扫),触发模式每日 / 每周X / 每月N日 + HH:MM,启停 / 立即跑 / 改 / 删 |
 | 日志 | 应用日志环形缓冲(最近 200 条),按级别过滤;**Undo 子页**:可逆操作记录 |
 | 用户 | Emby 用户增删改、禁用、活跃度;**单用户限速**(远程串流码率上限 Mbps)+ **限同时播放数**(并发流) |
 | 设置 | 改 Emby 地址 / API Key / 登录密码 / 115 cookie / 115 cid 映射 / 反代信任 IP / 配置导出导入 |
@@ -178,9 +180,9 @@ Emby 媒体库
 | `/` 或 `Cmd+K` | 全局搜索 / 跳转 tab |
 | `?` | 快捷键帮助 |
 | `Esc` | 关闭最上层 Modal / Drawer |
-| `g` 然后 `d/s/c/z/g/p/r/m/y/l/u/,` | 跳 12 个 tab(仪/扫/115/追/缺/海/重/管/系/日/用/设) |
+| `g` 然后 `d/s/c/z/g/p/r/m/y/l/u/,` | 跳 12 个常用 tab(仪/扫/115/追/缺/海/重/管/系/日/用/设) |
 
-在 input/textarea 输入时整套快捷键自动屏蔽,只允许 Esc blur 输入框。**智能清理 / 定时**两个 tab 暂无快捷键,从 nav 点。
+在 input/textarea 输入时整套快捷键自动屏蔽,只允许 Esc blur 输入框。找资源 / 字幕 / 智能清理 / 定时等低频 tab 从 nav 或全局搜索进入。
 
 ## 🔔 任务中心
 
@@ -198,9 +200,9 @@ Emby 媒体库
 
 ## ⏰ 定时任务
 
-后台 daemon 线程 30s 轮询,**5 min 触发窗口**容下 misses + **同周期防重入**(daily 同天 / weekly 同 ISO 周 / monthly 同月不重跑)+ **重叠保护**(上次任务 `last_status=running` 时跳过,避免长跑任务跨周期并发起两份)。命中后走 `run_async` 进 TaskCenter,watch 线程跟到结束 + 写 `last_status` / `last_err` 到 config。watch 线程 6h deadline 防卡死。
+后台 daemon 线程 30s 轮询,到点后会在本周期内补跑一次(防 NTP 校时 / 挂起恢复 / 轮询错拍漏跑)+ **同周期防重入**(daily 同天 / weekly 同 ISO 周 / monthly 同月不重跑)+ **重叠保护**(只在上次任务真实仍在 `TASKS` 中 pending/running 时跳过,避免长跑任务跨周期并发起两份)。命中后走 `run_async` 进 TaskCenter,watch 线程跟到结束 + 写 `last_status` / `last_err` 到 config。watch 线程 24h deadline 防卡死。
 
-4 种内置 kind(`business.SCHEDULE_KINDS`):
+5 种内置 kind(`business.SCHEDULE_KINDS`):
 
 | kind | 描述 |
 |---|---|
@@ -208,6 +210,7 @@ Emby 媒体库
 | `zhuigeng_scan_airing` | 🔄 对所有「在更」剧用剧名扫对应库,拿新集 |
 | `fix_posters_all` | 🖼️ 对所有无海报项跑保守自动匹配 |
 | `refresh_no_rating_all` | 🔄 对所有无评分剧调 Emby Refresh 重拉 TMDb |
+| `monitor_incremental` | 🛰️ autostrm webhook 兜底:只扫 mtime 变新的 top 目录,补漏掉的新内容 |
 
 UI 僻瓜式下拉:每日 / 每周X / 每月N日 + HH:MM。改 / 启停 / 立即跑 / 删 都在卡片上。
 
@@ -302,7 +305,7 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 | `trusted_proxies` | list | 受信任反代 IP 列表;默认 `[]` 不读 XFF。配 `["192.168.2.1"]` 让 X-Forwarded-For 生效(防反代后所有用户共享 IP 限流) |
 | `last_password_change_at` | int/null | 最近改密 unix timestamp;`null` = grace 模式,允许一次无旧密码改密(首次升级 v3.0 后用) |
 | `username` | str | header 显示用户名,默认 `admin`(单用户系统硬编码) |
-| `schema_version` | int | 配置 schema 版本,启动时 `migrate_cfg` 自动升(v3.0 = 4) |
+| `schema_version` | int | 配置 schema 版本,启动时 `migrate_cfg` 自动升(当前 = 5) |
 
 旧字段 `password`(明文)在启动时会被 `migrate_cfg` 自动转成 `password_hash` 并删除。
 
@@ -310,14 +313,14 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 
 ## 安全
 
-- **密码:** PBKDF2-SHA256 +per-user salt + 120k iter,只存 hash。
-- **登录限流:** 同源 IP 5 分钟内 10 次失败 → 429。
+- **密码:** PBKDF2-SHA256 + per-user salt + 200000 iter,只存 hash。
+- **登录限流:** 同源 IP 5 分钟内 5 次失败 → 429。
 - **Token:** 登录成功后发 token(HttpOnly cookie),7 天过期,后台 `token-reaper` 线程定期回收。
 - **CSRF:** 改写类请求(POST / DELETE)校验 CSRF token。
-- **CSP:** 响应头限制脚本源到 `'self'`,内联脚本走 nonce。
+- **CSP:** 响应头限制外部资源,脚本 / 样式允许当前单文件架构需要的 inline(`unsafe-inline`),禁 frame / object / 外站 connect。
 - **默认监听:** `127.0.0.1`(loopback),不主动暴露公网。
 - **config 权限:** 写入时原子 rename + `chmod 0600`,只 owner 可读(护住 cookie / api_key / hash)。
-- **Path traversal:** 所有暴露给前端的文件操作参数都过 `_safe_join` —— 拒绝 `..`、绝对路径、超出 base 的 realpath。
+- **Path traversal:** 所有暴露给前端的文件操作参数都过 `_safe_under` —— 拒绝 `..`、绝对路径、超出 base 的 realpath。
 - **危险操作 Modal + requireType:** 删除 / 移动 / 删用户 / 配置导入 / 容器重启都走 UI.modal.confirm,批量 ≥5 项或不可逆操作要求**打字「删除」或库名/用户名**才能确认。
 - **API Key + 115 Cookie 默认遮罩:** input `type="password"` + 「👁️ 显示」toggle,防止截图泄露。
 - **配置导出剔密:** `/api/config/export` 返回的 JSON 把 `password_hash` 和 `c115_cookie` 替换为 `"<redacted>"`,导入时这些字段保留原值。
@@ -331,8 +334,8 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 - **115 cookie 1-2 周过期:** 115 没刷新 token 机制,过期了「设置 → 115 Cookie」粘新的即可。每次过期工具会在 115 tab 标红。
 - **无 HTTPS:** HTTP 服务,加密交给反代(NAS 反代 / nginx / Caddy)。
 - **日志保留有限:** 「日志」页会读取当前 `logs/app.log` 的最近 200 条，文件按 2MB × 5 份轮转；没有 ELK / Loki、跨设备集中审计或长期归档。
-- **undo log 局部:** 删除 / 移动有 undo log,但 115 转存 / 海报 Apply 没记录。
-- **测试覆盖:** 300 case 覆盖 path 安全 / cfg migrate / TMDb 解析 / c115 内部 / 密码 / HTTP handler / 配置导入导出 / 配置落盘回滚 / 导入白名单和值校验 / 追更异步任务 / 写接口 CSRF / HTTP 慢连接护栏 / strm 列表 / qscore / XFF / scheduler / 任务队列 / 挂载探针 / 持久化日志。**Emby/115 实活 HTTP 端到端未覆盖**(需起 Emby mock,价值低)。
+- **undo log 局部:** 删除 / 移动 / 替换 / 海报改绑有 undo log 或回滚引导;115 转存本身不记录 undo。
+- **测试覆盖:** 300+ case 覆盖 path 安全 / cfg migrate / TMDb 解析 / c115 内部 / 密码 / HTTP handler / 配置导入导出 / 配置落盘回滚 / 导入白名单和值校验 / 追更异步任务 / 写接口 CSRF / HTTP 慢连接护栏 / strm 列表 / qscore / XFF / scheduler / 任务队列 / 挂载探针 / 持久化日志 / Emby fake HTTP。**Emby/115 实活 HTTP 端到端未覆盖**(真实 NAS 上手测)。
 
 ---
 

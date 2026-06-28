@@ -1,6 +1,11 @@
-# emby-manager 告警脚本套件
+# emby-manager 脚本目录
 
-主动监控 emby-manager 工具、Emby、115 cookie 三层是否健康。状态翻转时推 Bark / 微信 / Telegram,避免每 6h 骚扰。
+这里放两类脚本:
+
+- **长期运维脚本**:告警、cron、资源库更新/验证、部署模板。
+- **一次性维护脚本**:批量修命名、对齐库、清理孤儿、手工排查海报等。这类脚本会真实改 Emby / 115 / strm,跑前必须读源码和 dry-run 输出。
+
+所有脚本保持 Python / shell 标准库路线,不引入运行时 pip 依赖。
 
 ## 文件
 
@@ -9,10 +14,28 @@
 | `alert.sh` | 主探活脚本,cron 跑。三层探活 + 状态机 + 推送 |
 | `alert.conf.example` | 配置模板,`cp` 一份为 `alert.conf` 后填写 |
 | `install-cron.sh` | 把 `alert.sh` 加进 crontab(`0 */6 * * *`) |
+| `deploy_tar.sh.example` | tar over ssh 部署模板,不含凭据 |
 | `update_catalog_from_qqdocs.py` | 从已登录 Chrome 加载过的腾讯文档响应里重建 `catalog_115.db` |
 | `validate_catalog_115_links.py` | 对 `catalog_115.db` 里的 115 分享链接做有效性验证,结果写旁路 SQLite |
+| `clean_invalid_catalog_links.py` | 按验证结果清理失效资源库链接 |
+| `clean_115_orphans.py` | 对照 strm / 115 目录做孤儿清理辅助,高风险,先 dry-run |
+| `compare_libs.py` / `fix_align_libs.py` | 对比和修正库目录对齐问题 |
+| `fix_folder_names.py` / `tag_tmdbid.py` / `import_root_videos.py` | 一次性整理脚本,按需手工跑 |
 
 依赖:`sh`、`curl`、`python3`(只用标准库)。DSM 6/7 自带,无需额外装。
+
+未跟踪的本地脚本(例如 `batch_fix_mismatch.py`、`bulk_tmdb_match.py`、`check_wrong_poster.py`、`delete_tv_episodes.py`)默认视为一次性现场工具;确定可复用、脱敏且有测试/文档后再入库。
+
+## 部署模板(tar over ssh)
+
+DSM / Synology 环境里 sftp / rsync 可能受限,推荐用 tar over ssh。模板见 `deploy_tar.sh.example`:
+
+```sh
+NAS_HOST=nas.example.com NAS_USER=gaotao NAS_PORT=5022 \
+  sh scripts/deploy_tar.sh.example app.py index.html lib/business.py
+```
+
+模板强制带 `ControlMaster=no` 和 `ControlPath=none`,避免 DSM sshd 长连接复用导致级联 255 错误。真实凭据通过环境变量或你的私有 shell wrapper 提供,不要提交到仓库。
 
 ## 更新资源库 catalog_115.db
 
@@ -98,12 +121,13 @@ C115_COOKIE='UID=...; CID=...; SEID=...' python3 scripts/validate_catalog_115_li
 ## 第一次部署
 
 ```sh
-# 1. 把整个 scripts 目录传到 NAS
-#    (假设 emby-manager 在 /volume1/docker/emby-manager/)
-scp -P 5022 -r scripts/ gaotao@gaotao.cc:/volume1/docker/emby-manager/
+# 1. 把整个 scripts 目录传到 NAS(用 tar over ssh,不要依赖 sftp/rsync)
+#    假设 emby-manager 在 /volume1/docker/emby-manager/
+NAS_HOST=nas.example.com NAS_USER=gaotao NAS_PORT=5022 \
+  sh scripts/deploy_tar.sh.example scripts
 
 # 2. SSH 上去
-ssh -p 5022 gaotao@gaotao.cc
+ssh -p 5022 -o ControlMaster=no -o ControlPath=none gaotao@nas.example.com
 cd /volume1/docker/emby-manager/scripts
 
 # 3. 复制配置,填字段
@@ -154,7 +178,7 @@ sudo sh install-cron.sh --uninstall
 ## 已知限制
 
 - **6 小时粒度**: cron 默认 `0 */6 * * *`,最坏情况 6h 才发现。要近实时报警请上 [Uptime Kuma](https://github.com/louislam/uptime-kuma) 之类的专用监控。改 `install-cron.sh` 顶部的 `CRON_SCHED` 可以加密(注意 6h→5min 期间推送方限频)。
-- **/health 端点**: app.py 当前没有 `/health`,脚本会自动降级到 `GET /`(任何 2xx/3xx/401 都算活)。一旦 M-4 加上 `/health`,无需改本脚本即可生效。
+- **/health 端点**: app.py 已提供公开 `/health`;脚本仍保留降级到 `GET /` 的兼容逻辑。
 - **115 cookie 依赖工具**: 检测 115 需要先登录工具拿 token,所以工具挂了 cookie 状态不更新(`skip`,沿用上次)。
 - **DSM 重启 crond**: `install-cron.sh` 已自动 `synoservicectl --restart crond`,但若 DSM 版本 / 权限异常,可能要手动 `sudo /etc/init.d/synoschedtask reload` 或 DSM「控制面板 → 任务计划」里看一下。
 - **推送通道无重试**: 任一通道暂时挂了就这一轮丢一次。下一轮(6h 后)状态没变就不再推,所以告警可能丢。冗余配 2 个通道更稳。

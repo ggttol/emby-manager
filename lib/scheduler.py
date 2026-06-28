@@ -28,6 +28,8 @@ from lib.logger import logger, log
 _LOOP_STOP = threading.Event()
 _LOOP_THREAD = None
 _POLL_SEC = 30   # 轮询周期;5min 窗口能容下两次 miss
+_WATCH_TIMEOUT_SEC = 24 * 3600
+_WATCH_POLL_SEC = 2
 
 
 def _now():
@@ -301,7 +303,7 @@ def _fire(sid):
 
     # 监控线程:tasks 没原生 done-callback,自己轮询 + 写 last_*
     def watch():
-        deadline = time.time() + 24 * 3600  # 24h:全库刷新(33k×0.5s≈4.6h)等长任务也不会被误标超时
+        deadline = time.time() + _WATCH_TIMEOUT_SEC  # 长任务(全库刷新等)不应被短超时误标
         while time.time() < deadline:
             t = task_get(tid)
             if not t:
@@ -317,13 +319,13 @@ def _fire(sid):
                         save_cfg()
                 log("⏰ 定时 %s 结束 [%s] · %s · tid=%s" % (name, t["status"], _summarize_result(t.get("result")), tid))
                 return
-            time.sleep(2)
+            time.sleep(_WATCH_POLL_SEC)
         # 超时(任务跑了 >24h):标超时,不再 watch
         with CFG_LOCK:
             s2 = _find_by_id(sid)
             if s2 and s2.get("last_tid") == tid:
                 s2["last_status"] = "watch_timeout"
-                s2["last_err"] = "watch 超时 24h"
+                s2["last_err"] = "watch 超时 %dh" % int(_WATCH_TIMEOUT_SEC / 3600)
                 save_cfg()
     threading.Thread(target=watch, daemon=True, name="sch-watch-" + sid).start()
     return tid

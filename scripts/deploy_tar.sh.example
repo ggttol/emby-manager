@@ -1,0 +1,21 @@
+#!/bin/sh
+# Template: deploy selected files to a NAS with tar over ssh.
+#
+# Copy this file to a private location if you want to customize it. Do not put
+# real hostnames, passwords, or tokens in the repository.
+
+set -eu
+
+: "${NAS_HOST:?set NAS_HOST, for example nas.example.com}"
+: "${NAS_USER:?set NAS_USER, for example gaotao}"
+: "${NAS_PORT:=5022}"
+: "${NAS_DIR:=/volume1/docker/emby-manager}"
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: NAS_HOST=... NAS_USER=... $0 <files...>" >&2
+  exit 2
+fi
+
+tar cf - "$@" | ssh -p "$NAS_PORT" \
+  -o ControlMaster=no -o ControlPath=none \
+  "$NAS_USER@$NAS_HOST" "tar -C '$NAS_DIR' -xf -"

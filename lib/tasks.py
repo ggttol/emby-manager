@@ -17,11 +17,13 @@ ACTIVE_STATUSES = frozenset(("pending", "running"))
 
 def task_new(kind):
     tid = uuid.uuid4().hex[:12]
+    now = time.time()
     with TASKS_LOCK:
         # 先进入 pending，真正取得并发槽才切到 running。前端早已支持 pending，
         # 这样排队任务不会伪装成正在执行，也能在开始前被安全取消。
         TASKS[tid] = {"tid": tid, "kind": kind, "status": "pending", "progress": 0, "total": 0,
-                      "status_text": "", "started": time.time(), "ended": None,
+                      "status_text": "", "started": now, "queued_at": now,
+                      "started_at": None, "ended": None, "ended_at": None,
                       "result": None, "err": None, "cancelled": False}
         if len(TASKS) > TASKS_MAX:
             # pending 也还活着；不能为了腾位置删掉一个仍在等待的任务记录，
@@ -54,6 +56,7 @@ def task_cancel(tid):
             t["status"] = "cancelled"
             t["status_text"] = "已在开始前取消"
             t["ended"] = time.time()
+            t["ended_at"] = t["ended"]
         else:
             # 正在执行时只能协作式中止，保持 running 让前端继续轮询真实结果。
             t["status_text"] = "取消中…"
@@ -91,19 +94,20 @@ def run_async(kind, fn, *args, **kwargs):
                 if not t or t.get("cancelled"):
                     return
                 t["status"] = "running"
+                t["started_at"] = time.time()
                 t["status_text"] = ""
             result = fn(tid, *args, **kwargs)
             with TASKS_LOCK:
                 t = TASKS.get(tid)
                 if t:
                     t["status"] = "cancelled" if t.get("cancelled") else "done"
-                    t["ended"] = time.time(); t["result"] = result
+                    t["ended"] = time.time(); t["ended_at"] = t["ended"]; t["result"] = result
         except Exception as e:
             logger.exception("任务 %s [%s] 失败", tid, kind)
             with TASKS_LOCK:
                 t = TASKS.get(tid)
                 if t:
-                    t["status"] = "error"; t["ended"] = time.time(); t["err"] = str(e)
+                    t["status"] = "error"; t["ended"] = time.time(); t["ended_at"] = t["ended"]; t["err"] = str(e)
         finally:
             if acquired:
                 try: _TASK_SLOTS.release()
