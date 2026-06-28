@@ -1,6 +1,9 @@
 use crate::{
+    c115::{self, C115Client, C115OfflineRequest, C115SaveRequest},
+    config_store,
     error::{AppError, AppResult},
     state::AppState,
+    tasks::{self, TaskRun},
 };
 use axum::{
     Json, Router,
@@ -8,6 +11,14 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
+use uuid::Uuid;
+
+const C115_COOKIE_KEY: &str = "c115_cookie";
+const C115_CID_MAP_KEY: &str = "c115_cid_map";
+const C115_API_BASE_URL_KEY: &str = "c115_api_base_url";
+const C115_SITE_BASE_URL_KEY: &str = "c115_site_base_url";
 
 #[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct CatalogSearchQuery {
@@ -75,7 +86,7 @@ pub struct CatalogDuplicatesResponse {
     pub name_groups: Vec<CatalogDuplicateGroup>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CatalogTransferPlanItem {
     pub name: Option<String>,
     pub sheet: Option<String>,
@@ -86,7 +97,7 @@ pub struct CatalogTransferPlanItem {
     pub rc: Option<String>,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CatalogTransferPlanRequest {
     pub item: Option<CatalogTransferPlanItem>,
     pub link: Option<String>,
@@ -102,7 +113,7 @@ pub struct CatalogTransferPlanRequest {
     pub cid: Option<String>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CatalogTransferAction {
     SaveShare,
@@ -110,7 +121,7 @@ pub enum CatalogTransferAction {
     Unsupported,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct CatalogTransferTarget {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lib: Option<String>,
@@ -118,7 +129,7 @@ pub struct CatalogTransferTarget {
     pub cid: Option<String>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct CatalogC115SavePayload {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -131,7 +142,7 @@ pub struct CatalogC115SavePayload {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct CatalogC115SavePlan {
     pub endpoint: String,
     pub method: String,
@@ -141,7 +152,7 @@ pub struct CatalogC115SavePlan {
     pub payload: CatalogC115SavePayload,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct CatalogC115OfflinePayload {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,7 +163,7 @@ pub struct CatalogC115OfflinePayload {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct CatalogC115OfflinePlan {
     pub endpoint: String,
     pub method: String,
@@ -160,13 +171,13 @@ pub struct CatalogC115OfflinePlan {
     pub payload: CatalogC115OfflinePayload,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct CatalogUnsupportedPlan {
     pub reason: String,
     pub link: String,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct CatalogTransferPlanResponse {
     pub ok: bool,
     pub action: CatalogTransferAction,
@@ -184,12 +195,35 @@ pub struct CatalogTransferPlanResponse {
     pub unsupported: Option<CatalogUnsupportedPlan>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct CatalogTransferExecuteRequest {
+    #[serde(default)]
+    pub items: Vec<CatalogTransferPlanItem>,
+    pub target: Option<CatalogTransferTarget>,
+    pub item: Option<CatalogTransferPlanItem>,
+    pub link: Option<String>,
+    pub label: Option<String>,
+    pub name: Option<String>,
+    pub sheet: Option<String>,
+    pub is_pkg: Option<bool>,
+    pub link_type: Option<String>,
+    pub share: Option<String>,
+    pub rc: Option<String>,
+    pub pwd: Option<String>,
+    pub lib: Option<String>,
+    pub cid: Option<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/catalog/stats", get(catalog_stats))
         .route("/api/v2/catalog/search", get(catalog_search))
         .route("/api/v2/catalog/duplicates", get(catalog_duplicates))
         .route("/api/v2/catalog/transfer-plan", post(catalog_transfer_plan))
+        .route(
+            "/api/v2/catalog/transfer/execute",
+            post(catalog_transfer_execute),
+        )
 }
 
 #[utoipa::path(get, path = "/api/v2/catalog/stats", tag = "catalog", responses((status = 200, body = CatalogStatsResponse)))]
@@ -346,6 +380,374 @@ pub async fn catalog_transfer_plan(
     Json(req): Json<CatalogTransferPlanRequest>,
 ) -> AppResult<Json<CatalogTransferPlanResponse>> {
     Ok(Json(build_transfer_plan(req)?))
+}
+
+pub async fn catalog_transfer_execute(
+    State(state): State<AppState>,
+    Json(req): Json<CatalogTransferExecuteRequest>,
+) -> AppResult<Json<TaskRun>> {
+    let plans = build_execute_plans(&req)?;
+    let target = merged_execute_target(&req);
+    let (target_cid, target_lib) = resolve_catalog_target_cid(&state.pool, &target).await?;
+    let cookie =
+        c115::require_c115_cookie(config_store::get_string(&state.pool, C115_COOKIE_KEY).await?)?;
+    let (api_base, site_base) = c115_base_urls(&state.pool).await?;
+    let label = catalog_transfer_task_label(&plans, &target_cid);
+    let params = serde_json::to_value(&req).unwrap_or_else(|_| json!({}));
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "catalog_transfer_execute",
+        &label,
+        plans.len() as i64,
+        "manual",
+        params,
+    )
+    .await?;
+    spawn_catalog_transfer_execute(
+        state, task.id, cookie, api_base, site_base, plans, target_cid, target_lib,
+    );
+    Ok(Json(task))
+}
+
+fn build_execute_plans(
+    req: &CatalogTransferExecuteRequest,
+) -> AppResult<Vec<CatalogTransferPlanResponse>> {
+    execute_plan_requests(req)?
+        .into_iter()
+        .map(build_transfer_plan)
+        .collect()
+}
+
+fn execute_plan_requests(
+    req: &CatalogTransferExecuteRequest,
+) -> AppResult<Vec<CatalogTransferPlanRequest>> {
+    let target = merged_execute_target(req);
+    let mut requests = Vec::new();
+    let batch_label = (req.items.len() == 1).then(|| req.label.clone()).flatten();
+
+    for item in &req.items {
+        requests.push(CatalogTransferPlanRequest {
+            item: Some(item.clone()),
+            link: None,
+            label: batch_label.clone(),
+            name: None,
+            sheet: None,
+            is_pkg: None,
+            link_type: req.link_type.clone(),
+            share: req.share.clone(),
+            rc: req.rc.clone(),
+            pwd: req.pwd.clone(),
+            lib: target.lib.clone(),
+            cid: target.cid.clone(),
+        });
+    }
+
+    if req.item.is_some() || req.link.as_deref().and_then(non_empty_trimmed).is_some() {
+        requests.push(CatalogTransferPlanRequest {
+            item: req.item.clone(),
+            link: req.link.clone(),
+            label: req.label.clone(),
+            name: req.name.clone(),
+            sheet: req.sheet.clone(),
+            is_pkg: req.is_pkg,
+            link_type: req.link_type.clone(),
+            share: req.share.clone(),
+            rc: req.rc.clone(),
+            pwd: req.pwd.clone(),
+            lib: target.lib.clone(),
+            cid: target.cid.clone(),
+        });
+    }
+
+    if requests.is_empty() {
+        return Err(AppError::BadRequest(
+            "catalog transfer execute requires item(s) or link".to_string(),
+        ));
+    }
+    Ok(requests)
+}
+
+fn merged_execute_target(req: &CatalogTransferExecuteRequest) -> CatalogTransferTarget {
+    CatalogTransferTarget {
+        lib: first_clean([
+            req.target.as_ref().and_then(|target| target.lib.clone()),
+            req.lib.clone(),
+        ]),
+        cid: first_clean([
+            req.target.as_ref().and_then(|target| target.cid.clone()),
+            req.cid.clone(),
+        ]),
+    }
+}
+
+async fn resolve_catalog_target_cid(
+    pool: &sqlx::PgPool,
+    target: &CatalogTransferTarget,
+) -> AppResult<(String, Option<String>)> {
+    if let Some(cid) = target.cid.as_deref().and_then(non_empty_trimmed) {
+        return Ok((
+            c115::validate_target_cid(cid)?,
+            target
+                .lib
+                .as_deref()
+                .and_then(non_empty_trimmed)
+                .map(ToString::to_string),
+        ));
+    }
+
+    let lib = target
+        .lib
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .ok_or_else(|| AppError::BadRequest("未指定目标库或 cid".to_string()))?;
+    let map = catalog_cid_map(pool).await?;
+    let cid = map
+        .get(lib)
+        .ok_or_else(|| AppError::BadRequest(format!("库「{lib}」没配 115 cid,去设置页填")))?;
+    Ok((c115::validate_target_cid(cid)?, Some(lib.to_string())))
+}
+
+async fn catalog_cid_map(pool: &sqlx::PgPool) -> AppResult<BTreeMap<String, String>> {
+    let Some(value) = config_store::get_raw(pool, C115_CID_MAP_KEY).await? else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(value
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(key, value)| {
+                    value
+                        .as_str()
+                        .and_then(non_empty_trimmed)
+                        .map(|cid| (key.clone(), cid.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+async fn c115_base_urls(pool: &sqlx::PgPool) -> AppResult<(String, String)> {
+    let api_base = config_store::get_string_or(pool, C115_API_BASE_URL_KEY, c115::C115_API).await?;
+    let site_base =
+        config_store::get_string_or(pool, C115_SITE_BASE_URL_KEY, c115::C115_SITE).await?;
+    Ok((api_base, site_base))
+}
+
+fn spawn_catalog_transfer_execute(
+    state: AppState,
+    id: Uuid,
+    cookie: String,
+    api_base: String,
+    site_base: String,
+    plans: Vec<CatalogTransferPlanResponse>,
+    target_cid: String,
+    target_lib: Option<String>,
+) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.clouddrive_slot.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, id, "115 任务串行锁不可用", None).await;
+            return;
+        };
+        if tasks::cancel_requested(&state.pool, id).await {
+            let _ = tasks::finish_cancelled(&state.pool, id).await;
+            return;
+        }
+        let _ = tasks::mark_running(&state.pool, id, "准备执行 115 转存/离线...").await;
+
+        let client = C115Client::new_with_site(api_base, site_base, cookie, state.http.clone());
+        let total = plans.len();
+        let mut succeeded = 0usize;
+        let mut failed = 0usize;
+        let mut items = Vec::with_capacity(total);
+
+        for (index, plan) in plans.iter().enumerate() {
+            if tasks::cancel_requested(&state.pool, id).await {
+                let _ = tasks::finish_cancelled(&state.pool, id).await;
+                return;
+            }
+            let label = plan_display_label(plan);
+            let _ = tasks::set_progress(
+                &state.pool,
+                id,
+                index as i64,
+                &format!(
+                    "执行 {}/{}: {}",
+                    index + 1,
+                    total,
+                    truncate_label(&label, 48)
+                ),
+            )
+            .await;
+
+            let item = match execute_catalog_transfer_plan(
+                &client,
+                plan,
+                &target_cid,
+                target_lib.as_deref(),
+            )
+            .await
+            {
+                Ok(response) => {
+                    succeeded += 1;
+                    json!({
+                        "index": index,
+                        "ok": true,
+                        "action": &plan.action,
+                        "link_type": &plan.link_type,
+                        "label": &plan.label,
+                        "target": &plan.target,
+                        "response": response,
+                    })
+                }
+                Err(error) => {
+                    failed += 1;
+                    json!({
+                        "index": index,
+                        "ok": false,
+                        "action": &plan.action,
+                        "link_type": &plan.link_type,
+                        "label": &plan.label,
+                        "target": &plan.target,
+                        "error": error,
+                    })
+                }
+            };
+            items.push(item);
+            let _ = tasks::set_progress(
+                &state.pool,
+                id,
+                (index + 1) as i64,
+                &format!("已处理 {}/{}", index + 1, total),
+            )
+            .await;
+        }
+
+        let result = json!({
+            "ok": failed == 0,
+            "total": total,
+            "succeeded": succeeded,
+            "failed": failed,
+            "target": {
+                "cid": target_cid,
+                "lib": target_lib,
+            },
+            "items": items,
+        });
+        let status_text = if failed == 0 {
+            "完成".to_string()
+        } else {
+            format!("完成，{failed} 项失败")
+        };
+        let _ = tasks::finish_done_with_message(&state.pool, id, &status_text, result).await;
+    });
+}
+
+async fn execute_catalog_transfer_plan(
+    client: &C115Client,
+    plan: &CatalogTransferPlanResponse,
+    target_cid: &str,
+    target_lib: Option<&str>,
+) -> Result<Value, String> {
+    match &plan.action {
+        CatalogTransferAction::SaveShare => {
+            let save = plan
+                .save
+                .as_ref()
+                .ok_or_else(|| "save plan payload is missing".to_string())?;
+            let response = client
+                .save_to_cid(
+                    C115SaveRequest {
+                        url: save.payload.url.clone(),
+                        pwd: save.payload.pwd.clone(),
+                        lib: save.payload.lib.clone(),
+                        cid: save.payload.cid.clone(),
+                        label: save.payload.label.clone(),
+                        file_ids: None,
+                    },
+                    target_cid.to_string(),
+                    target_lib.map(ToString::to_string),
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+            if response.ok {
+                Ok(serde_json::to_value(response).unwrap_or_else(|_| json!({})))
+            } else {
+                Err(response.msg)
+            }
+        }
+        CatalogTransferAction::OfflineDownload => {
+            let offline = plan
+                .offline
+                .as_ref()
+                .ok_or_else(|| "offline plan payload is missing".to_string())?;
+            let response = client
+                .offline_add(
+                    C115OfflineRequest {
+                        url: offline.payload.url.clone(),
+                        lib: offline.payload.lib.clone(),
+                        cid: offline.payload.cid.clone(),
+                        label: offline.payload.label.clone(),
+                    },
+                    target_cid.to_string(),
+                    target_lib.map(ToString::to_string),
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+            if response.ok {
+                Ok(serde_json::to_value(response).unwrap_or_else(|_| json!({})))
+            } else {
+                Err(response.msg)
+            }
+        }
+        CatalogTransferAction::Unsupported => Err(plan
+            .unsupported
+            .as_ref()
+            .map(|unsupported| unsupported.reason.clone())
+            .unwrap_or_else(|| "catalog link type is not supported".to_string())),
+    }
+}
+
+fn catalog_transfer_task_label(plans: &[CatalogTransferPlanResponse], target_cid: &str) -> String {
+    if plans.len() == 1 {
+        return format!(
+            "目录转存: {} -> cid={target_cid}",
+            truncate_label(&plan_display_label(&plans[0]), 96)
+        );
+    }
+    format!("目录转存: {} 项 -> cid={target_cid}", plans.len())
+}
+
+fn plan_display_label(plan: &CatalogTransferPlanResponse) -> String {
+    plan.label
+        .clone()
+        .or_else(|| {
+            plan.save
+                .as_ref()
+                .map(|save| save.payload.url.clone())
+                .or_else(|| {
+                    plan.offline
+                        .as_ref()
+                        .map(|offline| offline.payload.url.clone())
+                })
+        })
+        .or_else(|| {
+            plan.unsupported
+                .as_ref()
+                .map(|unsupported| unsupported.link.clone())
+        })
+        .unwrap_or_else(|| plan.link_type.clone())
+}
+
+fn truncate_label(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    let mut out = value
+        .chars()
+        .take(limit.saturating_sub(3))
+        .collect::<String>();
+    out.push_str("...");
+    out
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -616,6 +1018,11 @@ fn clean(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 fn normalize_link_type(raw: Option<String>, link: &str) -> String {

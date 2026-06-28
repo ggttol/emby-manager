@@ -149,6 +149,76 @@ async fn delete_execute_skips_deleted_notification_when_no_paths_were_removed() 
 }
 
 #[tokio::test]
+async fn delete_batch_execute_continues_items_and_records_each_undo() {
+    let Some((_tmp, state)) = test_state().await else {
+        eprintln!("skipping manage execute DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
+        return;
+    };
+    let (base_url, requests) =
+        spawn_fake_emby(vec![FakeResponse::no_content(), FakeResponse::no_content()]).await;
+    configure_emby(&state, &base_url).await;
+    for folder in ["A/Movie One", "B/Movie Two"] {
+        std::fs::create_dir_all(state.settings.cd_root.join("Movies").join(folder)).unwrap();
+        std::fs::create_dir_all(state.settings.strm_root.join("Movies").join(folder)).unwrap();
+    }
+
+    let task = media_fs::execute_delete_batch(
+        State(state.clone()),
+        Json(media_fs::ManageDeleteBatchRequest {
+            items: vec![
+                ManageDeleteRequest {
+                    lib: "Movies".to_string(),
+                    folder: "A/Movie One".to_string(),
+                    item_id: None,
+                    reason: None,
+                },
+                ManageDeleteRequest {
+                    lib: "Movies".to_string(),
+                    folder: "B/Movie Two".to_string(),
+                    item_id: None,
+                    reason: None,
+                },
+            ],
+            reason: Some(format!("batch-delete-{}", Uuid::new_v4())),
+        }),
+    )
+    .await
+    .expect("delete batch should create a task")
+    .0;
+
+    assert_eq!(task.kind, "manage_delete_batch_execute");
+    let task = wait_for_task_status(&state, task.id, "done").await;
+    assert_eq!(task["result"]["total"], 2);
+    assert_eq!(task["result"]["ok_count"], 2);
+    assert_eq!(task["result"]["error_count"], 0);
+    assert!(!state.settings.cd_root.join("Movies/A/Movie One").exists());
+    assert!(!state.settings.cd_root.join("Movies/B/Movie Two").exists());
+    assert!(!state.settings.strm_root.join("Movies/A/Movie One").exists());
+    assert!(!state.settings.strm_root.join("Movies/B/Movie Two").exists());
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0].starts_with("POST /Library/Media/Updated?"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[1].starts_with("POST /Library/Media/Updated?"),
+        "{}",
+        requests[1]
+    );
+    drop(requests);
+
+    let undo_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM undo_entries WHERE op = 'delete'")
+            .fetch_one(&state.pool)
+            .await
+            .expect("count delete undo entries");
+    assert!(undo_count >= 2);
+}
+
+#[tokio::test]
 async fn move_execute_moves_media_rebuilds_strm_refreshes_target_and_writes_undo() {
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping manage execute DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");

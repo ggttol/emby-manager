@@ -1,5 +1,6 @@
 use crate::{
     error::{AppError, AppResult},
+    media_fs::safe_under,
     state::AppState,
 };
 use axum::{
@@ -11,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const DEFAULT_LIMIT: i64 = 50;
@@ -52,6 +54,7 @@ pub struct UndoExecuteRequest {
 #[serde(rename_all = "snake_case")]
 pub enum UndoExecuteAction {
     ManualRestore,
+    Executed,
     PendingPort,
     AlreadyUndone,
     Unsupported,
@@ -108,33 +111,18 @@ pub async fn exec_undo(
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::NotFound("未知 undo id".to_string()))?;
-    Ok(Json(build_execute_response(&entry)))
+    Ok(Json(execute_entry(&state, &entry).await?))
 }
 
 pub fn build_execute_response(entry: &UndoEntry) -> UndoExecuteResponse {
     if entry.undone {
-        return UndoExecuteResponse {
-            ok: false,
-            id: entry.id,
-            op: entry.op.clone(),
-            action: UndoExecuteAction::AlreadyUndone,
-            msg: "这条操作已经撤销过了,不会重复执行".to_string(),
-            lib: payload_string(&entry.payload, &["lib", "from", "to"]),
-            folder: payload_string(&entry.payload, &["folder", "lose_was", "lose_folder"]),
-            hint: None,
-        };
+        return already_undone_response(entry);
     }
 
     match entry.op.as_str() {
         "delete" | "smart_archive" | "replace" => manual_restore_response(entry),
-        "move" => pending_response(
-            entry,
-            "move undo requires Rust manage/move write path; not executed yet",
-        ),
-        "rebind" => pending_response(
-            entry,
-            "poster rebind undo requires Rust poster apply port; not executed yet",
-        ),
+        "move" => move_requires_execution_response(entry),
+        "rebind" => rebind_response(entry),
         _ => UndoExecuteResponse {
             ok: false,
             id: entry.id,
@@ -145,6 +133,41 @@ pub fn build_execute_response(entry: &UndoEntry) -> UndoExecuteResponse {
             folder: payload_string(&entry.payload, &["folder"]),
             hint: None,
         },
+    }
+}
+
+async fn execute_entry(state: &AppState, entry: &UndoEntry) -> AppResult<UndoExecuteResponse> {
+    if entry.undone {
+        return Ok(already_undone_response(entry));
+    }
+
+    match entry.op.as_str() {
+        "move" => execute_move_undo(state, entry).await,
+        "delete" | "smart_archive" | "replace" => Ok(manual_restore_response(entry)),
+        "rebind" => Ok(rebind_response(entry)),
+        _ => Ok(UndoExecuteResponse {
+            ok: false,
+            id: entry.id,
+            op: entry.op.clone(),
+            action: UndoExecuteAction::Unsupported,
+            msg: format!("不支持撤销此操作: {}", entry.op),
+            lib: payload_string(&entry.payload, &["lib", "from", "to"]),
+            folder: payload_string(&entry.payload, &["folder"]),
+            hint: None,
+        }),
+    }
+}
+
+fn already_undone_response(entry: &UndoEntry) -> UndoExecuteResponse {
+    UndoExecuteResponse {
+        ok: false,
+        id: entry.id,
+        op: entry.op.clone(),
+        action: UndoExecuteAction::AlreadyUndone,
+        msg: "这条操作已经撤销过了,不会重复执行".to_string(),
+        lib: payload_string(&entry.payload, &["lib", "from", "to"]),
+        folder: payload_string(&entry.payload, &["folder", "lose_was", "lose_folder"]),
+        hint: None,
     }
 }
 
@@ -171,6 +194,37 @@ fn manual_restore_response(entry: &UndoEntry) -> UndoExecuteResponse {
     }
 }
 
+fn move_requires_execution_response(entry: &UndoEntry) -> UndoExecuteResponse {
+    let payload = match parse_move_payload(entry) {
+        Ok(payload) => payload,
+        Err(response) => return response,
+    };
+    UndoExecuteResponse {
+        ok: false,
+        id: entry.id,
+        op: entry.op.clone(),
+        action: UndoExecuteAction::ManualRestore,
+        msg: "move undo 需要在执行接口中检查当前 STRM/CD 路径后才能反向移动".to_string(),
+        lib: Some(format!("{} -> {}", payload.to, payload.from)),
+        folder: Some(payload.folder),
+        hint: Some("调用 /api/v2/manage/undo/execute 会尝试安全反向移动; 若路径已变化,请手动恢复后扫描原库".to_string()),
+    }
+}
+
+fn rebind_response(entry: &UndoEntry) -> UndoExecuteResponse {
+    if payload_string(&entry.payload, &["old_tmdb"]).is_none() {
+        return unsupported_response(
+            entry,
+            "rebind undo payload 缺少 old_tmdb,无法安全恢复海报绑定",
+            Some("请手动检查当前海报/TMDB 绑定状态".to_string()),
+        );
+    }
+    pending_response(
+        entry,
+        "rebind undo 已记录 old_tmdb,但 Rust poster apply 尚未接入; 未执行写操作",
+    )
+}
+
 fn pending_response(entry: &UndoEntry, msg: &str) -> UndoExecuteResponse {
     UndoExecuteResponse {
         ok: false,
@@ -182,6 +236,273 @@ fn pending_response(entry: &UndoEntry, msg: &str) -> UndoExecuteResponse {
         folder: payload_string(&entry.payload, &["folder"]),
         hint: Some("Rust 预览版未执行任何写操作,旧版 Python 仍可作为回滚路径".to_string()),
     }
+}
+
+async fn execute_move_undo(state: &AppState, entry: &UndoEntry) -> AppResult<UndoExecuteResponse> {
+    let (payload, plan) = match build_move_undo_plan(state, entry) {
+        Ok(plan) => plan,
+        Err(response) => return Ok(response),
+    };
+    let preflight = match preflight_move_undo(entry, &payload, &plan) {
+        Ok(preflight) => preflight,
+        Err(response) => return Ok(response),
+    };
+
+    create_parent(&plan.restore_cd).await?;
+    if preflight.move_strm {
+        create_parent(&plan.restore_strm).await?;
+    }
+
+    tokio::fs::rename(&plan.current_cd, &plan.restore_cd)
+        .await
+        .map_err(anyhow::Error::from)?;
+    if preflight.move_strm {
+        if let Err(err) = tokio::fs::rename(&plan.current_strm, &plan.restore_strm).await {
+            let _ = tokio::fs::rename(&plan.restore_cd, &plan.current_cd).await;
+            return Err(AppError::Anyhow(err.into()));
+        }
+    }
+
+    let updated =
+        sqlx::query("UPDATE undo_entries SET undone = TRUE WHERE id = $1 AND undone = FALSE")
+            .bind(entry.id)
+            .execute(&state.pool)
+            .await?;
+    if updated.rows_affected() == 0 {
+        return Ok(already_undone_response(entry));
+    }
+
+    let strm_msg = if preflight.move_strm {
+        "STRM 已一起移回"
+    } else {
+        "STRM 源目录不存在,请按需扫描原库补齐 STRM"
+    };
+    Ok(UndoExecuteResponse {
+        ok: true,
+        id: entry.id,
+        op: entry.op.clone(),
+        action: UndoExecuteAction::Executed,
+        msg: format!(
+            "已反向移动 115 文件夹: {}/{} -> {}/{}; {strm_msg}",
+            payload.to, payload.to_folder, payload.from, payload.folder
+        ),
+        lib: Some(format!("{} -> {}", payload.to, payload.from)),
+        folder: Some(payload.folder),
+        hint: Some("未调用 Emby 刷新; 如媒体库仍显示旧路径,请扫描/刷新对应库".to_string()),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct MoveUndoPayload {
+    from: String,
+    to: String,
+    folder: String,
+    to_folder: String,
+}
+
+#[derive(Debug)]
+struct MoveUndoPlan {
+    current_cd: PathBuf,
+    restore_cd: PathBuf,
+    current_strm: PathBuf,
+    restore_strm: PathBuf,
+}
+
+#[derive(Debug)]
+struct MoveUndoPreflight {
+    move_strm: bool,
+}
+
+fn build_move_undo_plan(
+    state: &AppState,
+    entry: &UndoEntry,
+) -> Result<(MoveUndoPayload, MoveUndoPlan), UndoExecuteResponse> {
+    let payload = parse_move_payload(entry)?;
+    let plan = MoveUndoPlan {
+        current_cd: guarded_media_path(
+            entry,
+            &state.settings.cd_root,
+            &payload.to,
+            &payload.to_folder,
+        )?,
+        restore_cd: guarded_media_path(
+            entry,
+            &state.settings.cd_root,
+            &payload.from,
+            &payload.folder,
+        )?,
+        current_strm: guarded_media_path(
+            entry,
+            &state.settings.strm_root,
+            &payload.to,
+            &payload.to_folder,
+        )?,
+        restore_strm: guarded_media_path(
+            entry,
+            &state.settings.strm_root,
+            &payload.from,
+            &payload.folder,
+        )?,
+    };
+    Ok((payload, plan))
+}
+
+fn parse_move_payload(entry: &UndoEntry) -> Result<MoveUndoPayload, UndoExecuteResponse> {
+    let missing: Vec<&str> = ["from", "to", "folder", "to_folder"]
+        .into_iter()
+        .filter(|key| required_payload_string(&entry.payload, key).is_none())
+        .collect();
+    if !missing.is_empty() {
+        return Err(unsupported_response(
+            entry,
+            &format!(
+                "move undo payload 缺少 {},无法安全判断反向移动路径",
+                missing.join("/")
+            ),
+            Some("请手动确认 115 与 STRM 当前路径后恢复,再扫描对应库".to_string()),
+        ));
+    }
+    Ok(MoveUndoPayload {
+        from: required_payload_string(&entry.payload, "from")
+            .unwrap()
+            .to_string(),
+        to: required_payload_string(&entry.payload, "to")
+            .unwrap()
+            .to_string(),
+        folder: required_payload_string(&entry.payload, "folder")
+            .unwrap()
+            .to_string(),
+        to_folder: required_payload_string(&entry.payload, "to_folder")
+            .unwrap()
+            .to_string(),
+    })
+}
+
+fn guarded_path(
+    entry: &UndoEntry,
+    base: impl AsRef<Path>,
+    segment: &str,
+) -> Result<PathBuf, UndoExecuteResponse> {
+    safe_under(base, segment).map_err(|err| {
+        unsupported_response(
+            entry,
+            &format!("move undo payload 含非法路径段,已拒绝执行: {err}"),
+            Some("请手动确认路径没有绝对路径、.. 或符号链接越界".to_string()),
+        )
+    })
+}
+
+fn guarded_media_path(
+    entry: &UndoEntry,
+    root: &Path,
+    lib: &str,
+    folder: &str,
+) -> Result<PathBuf, UndoExecuteResponse> {
+    guarded_path(entry, root, lib)?;
+    guarded_path(entry, root, folder)?;
+    guarded_path(entry, root, &format!("{lib}/{folder}"))
+}
+
+fn preflight_move_undo(
+    entry: &UndoEntry,
+    payload: &MoveUndoPayload,
+    plan: &MoveUndoPlan,
+) -> Result<MoveUndoPreflight, UndoExecuteResponse> {
+    if !plan.current_cd.is_dir() {
+        return Err(move_manual_restore_response(
+            entry,
+            payload,
+            &format!(
+                "当前 115 源目录不存在,未执行: {}",
+                plan.current_cd.display()
+            ),
+            "请确认文件夹是否已被移动/删除,必要时从 115 web 手动恢复后扫描原库",
+        ));
+    }
+    if plan.restore_cd.exists() {
+        return Err(move_manual_restore_response(
+            entry,
+            payload,
+            &format!(
+                "115 还原目标已存在,为避免覆盖未执行: {}",
+                plan.restore_cd.display()
+            ),
+            "请手动合并或移开目标目录后再重试",
+        ));
+    }
+    if plan.restore_strm.exists() {
+        return Err(move_manual_restore_response(
+            entry,
+            payload,
+            &format!(
+                "STRM 还原目标已存在,为避免覆盖未执行: {}",
+                plan.restore_strm.display()
+            ),
+            "请手动确认 STRM 目录后再重试,或移开冲突目录并重新执行",
+        ));
+    }
+    if plan.current_strm.exists() && !plan.current_strm.is_dir() {
+        return Err(move_manual_restore_response(
+            entry,
+            payload,
+            &format!(
+                "当前 STRM 源路径不是目录,未执行: {}",
+                plan.current_strm.display()
+            ),
+            "请手动检查 STRM 文件/目录状态后扫描对应库",
+        ));
+    }
+    Ok(MoveUndoPreflight {
+        move_strm: plan.current_strm.is_dir(),
+    })
+}
+
+async fn create_parent(path: &PathBuf) -> AppResult<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(anyhow::Error::from)?;
+    }
+    Ok(())
+}
+
+fn move_manual_restore_response(
+    entry: &UndoEntry,
+    payload: &MoveUndoPayload,
+    msg: &str,
+    hint: &str,
+) -> UndoExecuteResponse {
+    UndoExecuteResponse {
+        ok: false,
+        id: entry.id,
+        op: entry.op.clone(),
+        action: UndoExecuteAction::ManualRestore,
+        msg: msg.to_string(),
+        lib: Some(format!("{} -> {}", payload.to, payload.from)),
+        folder: Some(payload.folder.clone()),
+        hint: Some(hint.to_string()),
+    }
+}
+
+fn unsupported_response(entry: &UndoEntry, msg: &str, hint: Option<String>) -> UndoExecuteResponse {
+    UndoExecuteResponse {
+        ok: false,
+        id: entry.id,
+        op: entry.op.clone(),
+        action: UndoExecuteAction::Unsupported,
+        msg: msg.to_string(),
+        lib: payload_string(&entry.payload, &["lib", "from", "to"]),
+        folder: payload_string(&entry.payload, &["folder"]),
+        hint,
+    }
+}
+
+fn required_payload_string<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn payload_string(payload: &Value, keys: &[&str]) -> Option<String> {

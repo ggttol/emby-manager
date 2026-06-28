@@ -5,8 +5,20 @@ use axum::{
 use emby_manager::{catalog, db, settings::Settings, state::AppState};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+    task::JoinHandle,
+    time::{sleep, timeout},
+};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn transfer_plan_routes_share115_to_c115_save() {
@@ -119,6 +131,130 @@ async fn transfer_plan_marks_other_links_unsupported() {
 }
 
 #[tokio::test]
+async fn transfer_execute_runs_batch_and_records_item_errors() {
+    let Some(database_url) = catalog_test_database_url() else {
+        eprintln!(
+            "skipping catalog transfer execute DB test; set EMBY_MANAGER_CATALOG_TEST_DATABASE_URL"
+        );
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .expect("connect catalog test database");
+    db::migrate(&pool)
+        .await
+        .expect("run catalog test migrations");
+    let state = test_state_with_pool(pool);
+
+    let snap = r#"{
+        "state": true,
+        "data": {
+            "total": 1,
+            "shareinfo": {"share_title": "Share Movie"},
+            "list": [{"fid": "file-share", "n": "Movie.mkv", "s": 1024}]
+        }
+    }"#;
+    let receive = r#"{"state": true}"#;
+    let space = r#"{"state": true, "sign": "SIGN", "time": 1710000000}"#;
+    let offline_ok = r#"{"state": true, "info_hash": "HASH"}"#;
+    let offline_fail = r#"{"state": false, "error_msg": "bad ed2k"}"#;
+    let (base_url, requests, handle) =
+        spawn_fake_c115(vec![snap, receive, space, offline_ok, space, offline_fail]).await;
+    configure_c115(&state, &base_url).await;
+
+    let app = catalog::router().with_state(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v2/catalog/transfer/execute")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "items": [
+                            {
+                                "name": "Share Movie",
+                                "link": "https://115.com/s/swOK?password=RC",
+                                "link_type": "share115"
+                            },
+                            {
+                                "name": "Magnet Movie",
+                                "link": "magnet:?xt=urn:btih:0123456789abcdef"
+                            },
+                            {
+                                "name": "Bad Ed2k",
+                                "link": "ed2k://|file|bad.mkv|123|abcdef|/"
+                            },
+                            {
+                                "name": "Unsupported",
+                                "link": "https://example.com/file.torrent",
+                                "link_type": "other"
+                            }
+                        ],
+                        "target": {"lib": "电影"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kind"], "catalog_transfer_execute");
+    assert_eq!(body["total"], 4);
+    let id = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+
+    let task = wait_for_task_status(&state, id, "done").await;
+    assert_eq!(task["status_text"], "完成，2 项失败");
+    assert_eq!(task["result"]["ok"], false);
+    assert_eq!(task["result"]["total"], 4);
+    assert_eq!(task["result"]["succeeded"], 2);
+    assert_eq!(task["result"]["failed"], 2);
+    assert_eq!(task["result"]["target"]["cid"], "12345");
+    assert_eq!(task["result"]["target"]["lib"], "电影");
+    assert_eq!(task["result"]["items"][0]["ok"], true);
+    assert_eq!(task["result"]["items"][0]["action"], "save_share");
+    assert_eq!(task["result"]["items"][0]["response"]["count"], 1);
+    assert_eq!(task["result"]["items"][1]["ok"], true);
+    assert_eq!(task["result"]["items"][1]["action"], "offline_download");
+    assert_eq!(task["result"]["items"][1]["response"]["info_hash"], "HASH");
+    assert_eq!(task["result"]["items"][2]["ok"], false);
+    assert!(
+        task["result"]["items"][2]["error"]
+            .as_str()
+            .unwrap()
+            .contains("bad ed2k"),
+        "{task}"
+    );
+    assert_eq!(task["result"]["items"][3]["ok"], false);
+    assert_eq!(task["result"]["items"][3]["action"], "unsupported");
+
+    timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 6);
+    assert!(requests[0].starts_with("GET /share/snap?"));
+    assert!(requests[1].starts_with("POST /share/receive "));
+    assert!(requests[1].contains("share_code=swOK"), "{}", requests[1]);
+    assert!(requests[1].contains("receive_code=RC"), "{}", requests[1]);
+    assert!(requests[1].contains("cid=12345"), "{}", requests[1]);
+    assert!(requests[2].starts_with("GET /?"));
+    assert!(requests[2].contains("ct=offline"), "{}", requests[2]);
+    assert!(requests[3].starts_with("POST /web/lixian/?"));
+    assert!(requests[3].contains("wp_path_id=12345"), "{}", requests[3]);
+    assert!(requests[4].starts_with("GET /?"));
+    assert!(requests[5].starts_with("POST /web/lixian/?"));
+}
+
+#[tokio::test]
 async fn duplicates_endpoint_returns_limited_readonly_catalog_groups() {
     let Some(database_url) = catalog_test_database_url() else {
         eprintln!(
@@ -212,6 +348,77 @@ async fn reset_catalog_items(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("seed catalog duplicates");
+}
+
+async fn configure_c115(state: &AppState, base_url: &str) {
+    for (key, value) in [
+        (
+            "c115_cookie",
+            json!("CID=cid-value; UID=123456_A1; SEID=seid-value"),
+        ),
+        ("c115_cid_map", json!({"电影": "12345"})),
+        ("c115_api_base_url", json!(base_url)),
+        ("c115_site_base_url", json!(base_url)),
+    ] {
+        sqlx::query(
+            "INSERT INTO app_settings(key, value, updated_at) VALUES ($1, $2, now())
+             ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&state.pool)
+        .await
+        .expect("save 115 config");
+    }
+}
+
+async fn wait_for_task_status(state: &AppState, id: Uuid, status: &str) -> Value {
+    for _ in 0..80 {
+        let task: Value =
+            sqlx::query_scalar("SELECT to_jsonb(task_runs) FROM task_runs WHERE id = $1")
+                .bind(id)
+                .fetch_one(&state.pool)
+                .await
+                .expect("load task");
+        if task["status"] == status {
+            return task;
+        }
+        if task["status"] == "error" {
+            panic!("task {id} failed: {}", task["error"]);
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+    panic!("task {id} did not reach {status}");
+}
+
+async fn spawn_fake_c115(
+    bodies: Vec<&'static str>,
+) -> (String, Arc<Mutex<Vec<String>>>, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+
+    let handle = tokio::spawn(async move {
+        for body in bodies {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0; 8192];
+            let n = socket.read(&mut buf).await.unwrap();
+            captured
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..n]).to_string());
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
+
+    (format!("http://{addr}"), requests, handle)
 }
 
 fn test_state() -> AppState {

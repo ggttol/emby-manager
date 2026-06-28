@@ -388,6 +388,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/manage/delete/batch/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["execute_delete_batch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/manage/delete/execute": {
         parameters: {
             query?: never;
@@ -1069,6 +1085,37 @@ export interface components {
             /** Format: double */
             used_percent?: number | null;
         };
+        DockerContainerSummary: {
+            id: string;
+            image: string;
+            name: string;
+            ports: string;
+            state: string;
+            status: string;
+        };
+        DockerSummary: {
+            available: boolean;
+            configured: boolean;
+            containers: components["schemas"]["DockerContainerSummary"][];
+            docker_bin: string;
+            running: number;
+            status: string;
+            total: number;
+            warning?: string | null;
+        };
+        EmbyHealthSummary: {
+            base_url: string;
+            configured: boolean;
+            /** Format: int32 */
+            http_status?: number | null;
+            online: boolean;
+            operating_system?: string | null;
+            server_id?: string | null;
+            server_name?: string | null;
+            status: string;
+            version?: string | null;
+            warning?: string | null;
+        };
         EmbyLibrary: {
             id?: string | null;
             name: string;
@@ -1180,6 +1227,24 @@ export interface components {
             ok: boolean;
             token: string;
             username: string;
+        };
+        ManageDeleteBatchItemResult: {
+            err?: string | null;
+            folder: string;
+            lib: string;
+            ok: boolean;
+            result?: null | components["schemas"]["ManageDeleteExecuteResult"];
+        };
+        ManageDeleteBatchRequest: {
+            items: components["schemas"]["ManageDeleteRequest"][];
+            reason?: string | null;
+        };
+        ManageDeleteBatchResult: {
+            error_count: number;
+            ok: boolean;
+            ok_count: number;
+            results: components["schemas"]["ManageDeleteBatchItemResult"][];
+            total: number;
         };
         ManageDeleteExecuteResult: {
             deleted_from: string[];
@@ -1540,8 +1605,10 @@ export interface components {
             cd_root_exists: boolean;
             configured_roots: components["schemas"]["PathStatus"][];
             database: components["schemas"]["DatabaseSummary"];
+            docker: components["schemas"]["DockerSummary"];
             docker_bin: string;
             docker_bin_exists: boolean;
+            emby: components["schemas"]["EmbyHealthSummary"];
             host: components["schemas"]["HostMetrics"];
             ok: boolean;
             rust_version: string;
@@ -1625,7 +1692,7 @@ export interface components {
             undone: boolean;
         };
         /** @enum {string} */
-        UndoExecuteAction: "manual_restore" | "pending_port" | "already_undone" | "unsupported";
+        UndoExecuteAction: "manual_restore" | "executed" | "pending_port" | "already_undone" | "unsupported";
         UndoExecuteRequest: {
             /** Format: uuid */
             id: string;
@@ -2213,6 +2280,29 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ManageDeleteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    execute_delete_batch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManageDeleteBatchRequest"];
             };
         };
         responses: {

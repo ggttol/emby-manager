@@ -159,6 +159,12 @@ pub struct ManageMoveRequest {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ManageDeleteBatchRequest {
+    pub items: Vec<ManageDeleteRequest>,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ManagePreviewResult {
     pub ok: bool,
@@ -208,6 +214,24 @@ pub struct ManageMoveExecuteResult {
     pub undo_id: Uuid,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ManageDeleteBatchResult {
+    pub ok: bool,
+    pub total: usize,
+    pub ok_count: usize,
+    pub error_count: usize,
+    pub results: Vec<ManageDeleteBatchItemResult>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ManageDeleteBatchItemResult {
+    pub lib: String,
+    pub folder: String,
+    pub ok: bool,
+    pub result: Option<ManageDeleteExecuteResult>,
+    pub err: Option<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/libraries", get(libraries))
@@ -215,6 +239,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/v2/libraries/strm", get(list_strm))
         .route("/api/v2/manage/delete", post(manage_delete))
         .route("/api/v2/manage/delete/execute", post(execute_delete))
+        .route(
+            "/api/v2/manage/delete/batch/execute",
+            post(execute_delete_batch),
+        )
         .route("/api/v2/manage/move", post(manage_move))
         .route("/api/v2/manage/move/execute", post(execute_move))
 }
@@ -375,6 +403,47 @@ pub async fn execute_delete(
     )
     .await?;
     spawn_delete_execute(state, task.id, emby_url, api_key, req, plan);
+    Ok(Json(task))
+}
+
+#[utoipa::path(post, path = "/api/v2/manage/delete/batch/execute", tag = "media", request_body = ManageDeleteBatchRequest, responses((status = 200, body = TaskRun)))]
+pub async fn execute_delete_batch(
+    State(state): State<AppState>,
+    Json(req): Json<ManageDeleteBatchRequest>,
+) -> AppResult<Json<TaskRun>> {
+    let items = req
+        .items
+        .into_iter()
+        .take(500)
+        .map(|mut item| {
+            if item.reason.as_deref().and_then(non_empty_trimmed).is_none() {
+                item.reason.clone_from(&req.reason);
+            }
+            plan_delete_execute(&state, &item).map(|plan| (item, plan))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    if items.is_empty() {
+        return Err(AppError::BadRequest("items must not be empty".to_string()));
+    }
+
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    ensure_api_key_configured(&api_key)?;
+
+    let params = serde_json::json!({
+        "items": items.iter().map(|(item, _)| item).collect::<Vec<_>>(),
+        "reason": req.reason,
+    });
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "manage_delete_batch_execute",
+        &format!("批量删除: {} 项", items.len()),
+        items.len() as i64,
+        "manual",
+        params,
+    )
+    .await?;
+    spawn_delete_batch_execute(state, task.id, emby_url, api_key, items);
     Ok(Json(task))
 }
 
@@ -547,6 +616,80 @@ fn spawn_delete_execute(
     });
 }
 
+fn spawn_delete_batch_execute(
+    state: AppState,
+    id: Uuid,
+    emby_url: String,
+    api_key: String,
+    items: Vec<(ManageDeleteRequest, DeleteExecutePlan)>,
+) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, id, "任务并发槽不可用", None).await;
+            return;
+        };
+        let _ = tasks::mark_running(&state.pool, id, "批量删除启动").await;
+        let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+        let total = items.len();
+        let mut results = Vec::new();
+
+        for (index, (req, plan)) in items.into_iter().enumerate() {
+            if tasks::cancel_requested(&state.pool, id).await {
+                let _ = tasks::finish_cancelled(&state.pool, id).await;
+                return;
+            }
+            let _ = tasks::set_progress(
+                &state.pool,
+                id,
+                index as i64,
+                &format!("删除 {}/{}", req.lib.trim(), req.folder.trim()),
+            )
+            .await;
+            let lib = req.lib.trim().to_string();
+            let folder = req.folder.trim().to_string();
+            match run_delete_execute_core(&state, &client, req, plan).await {
+                Ok(result) => results.push(ManageDeleteBatchItemResult {
+                    lib,
+                    folder,
+                    ok: true,
+                    result: Some(result),
+                    err: None,
+                }),
+                Err(err) => results.push(ManageDeleteBatchItemResult {
+                    lib,
+                    folder,
+                    ok: false,
+                    result: None,
+                    err: Some(err.to_string()),
+                }),
+            }
+            let _ = tasks::set_progress(
+                &state.pool,
+                id,
+                (index + 1) as i64,
+                &format!("批量删除 {}/{}", index + 1, total),
+            )
+            .await;
+        }
+
+        let ok_count = results.iter().filter(|item| item.ok).count();
+        let result = ManageDeleteBatchResult {
+            ok: ok_count == total,
+            total,
+            ok_count,
+            error_count: total.saturating_sub(ok_count),
+            results,
+        };
+        let _ = tasks::finish_done_with_message(
+            &state.pool,
+            id,
+            &format!("批量删除完成: {ok_count}/{total}"),
+            serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+        )
+        .await;
+    });
+}
+
 async fn run_delete_execute(
     state: &AppState,
     id: Uuid,
@@ -598,6 +741,50 @@ async fn run_delete_execute(
         .execute(&state.pool)
         .await?;
     tasks::set_progress(&state.pool, id, 4, "undo log 已写入").await?;
+
+    Ok(ManageDeleteExecuteResult {
+        ok: true,
+        preview: false,
+        dry_run: false,
+        operation: "delete".to_string(),
+        folder: req.folder.trim().to_string(),
+        emby_gone,
+        deleted_from,
+        notified,
+        undo_id,
+    })
+}
+
+async fn run_delete_execute_core(
+    state: &AppState,
+    client: &EmbyClient,
+    req: ManageDeleteRequest,
+    plan: DeleteExecutePlan,
+) -> AppResult<ManageDeleteExecuteResult> {
+    let mut emby_gone = true;
+    if let Some(item_id) = req.item_id.as_deref().and_then(non_empty_trimmed) {
+        client.delete_item(item_id).await?;
+        emby_gone = verify_emby_delete(client, item_id).await;
+    }
+    let deleted_from = delete_planned_paths(&plan).await?;
+    let notified = if deleted_from.is_empty() {
+        false
+    } else {
+        client.notify_media_deleted(&plan.emby_deleted_path).await?;
+        true
+    };
+
+    let undo_id = Uuid::new_v4();
+    let payload = serde_json::json!({
+        "lib": req.lib.trim(),
+        "folder": req.folder.trim(),
+        "deleted_from": deleted_from,
+    });
+    sqlx::query("INSERT INTO undo_entries(id, op, payload) VALUES ($1, 'delete', $2)")
+        .bind(undo_id)
+        .bind(payload)
+        .execute(&state.pool)
+        .await?;
 
     Ok(ManageDeleteExecuteResult {
         ok: true,
