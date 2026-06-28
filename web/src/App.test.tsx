@@ -563,6 +563,229 @@ describe('App shell', () => {
     }));
   });
 
+  it('runs poster mismatch detection with csrf and renders readonly repair notice', async () => {
+    let detectPayload: unknown = null;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/libraries') {
+        return jsonResponse({
+          libraries: [
+            { id: 'movie-lib', name: '电影', type: 'movies', paths: ['/strm/电影'] },
+            { id: 'show-lib', name: '电视剧', type: 'tvshows', paths: ['/strm/电视剧'] }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/posters/detect-mismatch') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        detectPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: true,
+          scanned_libraries: 1,
+          scanned_items: 80,
+          total: 2,
+          missing_primary_total: 1,
+          mismatch_total: 1,
+          truncated: false,
+          warnings: ['library 电影 was truncated at 80 of unknown items'],
+          items: [
+            {
+              id: 'item-1',
+              emby_name: '错绑电影',
+              name: '错绑电影',
+              lib: '电影',
+              type: 'Movie',
+              path: '/strm/电影/错绑电影 [tmdbid-123]/movie.strm',
+              folder: '错绑电影 [tmdbid-123]',
+              folder_clean: '错绑电影',
+              tmdb: '456',
+              declared_tmdb: '123',
+              has_poster: true,
+              score: 100,
+              reasons: ['folder 声明 tmdbid-123 但 Emby 绑了 456(确定绑错)'],
+              signals: [
+                {
+                  kind: 'declared_tmdb_mismatch',
+                  severity: 'danger',
+                  message: 'folder 声明 tmdbid-123 与 ProviderIds.Tmdb=456 不一致'
+                }
+              ]
+            },
+            {
+              id: 'item-2',
+              emby_name: '无海报剧',
+              name: '无海报剧',
+              lib: '电影',
+              type: 'Series',
+              path: null,
+              folder: '无海报剧',
+              folder_clean: '无海报剧',
+              tmdb: '',
+              declared_tmdb: null,
+              has_poster: false,
+              score: 40,
+              reasons: ['没有 Primary poster'],
+              signals: [
+                {
+                  kind: 'missing_primary',
+                  severity: 'warn',
+                  message: '条目没有 Primary poster'
+                }
+              ]
+            }
+          ]
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '海报修复' }));
+    expect(await screen.findByText('海报检测工作台')).toBeInTheDocument();
+    expect(screen.getByText(/修复动作未接入 Rust/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('海报目标库'), { target: { value: '电影' } });
+    fireEvent.change(screen.getByLabelText('海报扫描上限'), { target: { value: '80' } });
+    fireEvent.click(screen.getByRole('button', { name: '开始检测' }));
+
+    await waitFor(() => expect(detectPayload).toEqual({
+      lib: '电影',
+      limit: 80,
+      include_missing_primary: true
+    }));
+    expect((await screen.findAllByText('错绑电影')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('无海报剧').length).toBeGreaterThan(0);
+    expect(screen.getByText('Emby: 456')).toBeInTheDocument();
+    expect(screen.getByText('folder: 123')).toBeInTheDocument();
+    expect(screen.getByText('library 电影 was truncated at 80 of unknown items')).toBeInTheDocument();
+  });
+
+  it('renders zhuigeng and gaps readonly panels through the gaps scan api', async () => {
+    const calls: string[] = [];
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/gaps/scan') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        calls.push(url.pathname);
+        return jsonResponse(gapsSummary);
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '追更检查' }));
+    expect(await screen.findByText('追更只读预检')).toBeInTheDocument();
+    expect(screen.getByText(/当前 Rust 版没有独立追更扫描接口/)).toBeInTheDocument();
+    expect(screen.getByText('缺集只读预检')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '缺集检查' }));
+    expect(await screen.findByText('当前 Rust 版不会连接 TMDb/Emby 推断真实缺集集号，只展示可用的只读预检信号。')).toBeInTheDocument();
+    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  it('renders cleanup and dedup readonly summaries through cleanup suggest', async () => {
+    const calls: string[] = [];
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        calls.push(url.pathname);
+        return jsonResponse(cleanupSummary);
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '智能清理' }));
+    expect(await screen.findByText('智能清理预检')).toBeInTheDocument();
+    expect(screen.getByText('存在失败任务')).toBeInTheDocument();
+    expect(screen.getByText(/当前 Rust 版智能清理只读预检/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '去重' }));
+    expect(await screen.findByText('去重预检')).toBeInTheDocument();
+    expect(screen.getByText('v2 尚未暴露去重分析明细和替换/删除执行接口；这里先用 catalog 聚合值做风险提示。')).toBeInTheDocument();
+    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  it('creates delete preview tasks from the manage panel with csrf', async () => {
+    let previewPayload: unknown = null;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/libraries') {
+        return jsonResponse({
+          libraries: [
+            { id: 'movie-lib', name: '电影', type: 'movies', paths: ['/strm/电影'] },
+            { id: 'show-lib', name: '电视剧', type: 'tvshows', paths: ['/strm/电视剧'] }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/manage/undo') {
+        return jsonResponse({
+          total: 1,
+          items: [
+            {
+              id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+              legacy_id: 'legacy-1',
+              op: 'delete',
+              payload: { lib: '电影', folder: '旧电影' },
+              undone: false,
+              created_at: '2026-06-28T00:00:00Z'
+            }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/manage/delete') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        previewPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          kind: 'manage_delete_preview',
+          label: '删除预览: 电影/旧电影',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '删除·移动' }));
+    expect(await screen.findByText('删除·移动预览')).toBeInTheDocument();
+    expect(screen.getByText(/真实危险写路径尚未接入/)).toBeInTheDocument();
+    expect(screen.getByText('legacy-1')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('删除库名'), { target: { value: '电影' } });
+    fireEvent.change(screen.getByLabelText('删除 folder'), { target: { value: '旧电影' } });
+    fireEvent.change(screen.getByLabelText('删除 ItemId'), { target: { value: 'item-1' } });
+    fireEvent.change(screen.getByLabelText('删除原因'), { target: { value: '重复资源' } });
+    fireEvent.click(screen.getByRole('button', { name: '生成删除预览任务' }));
+
+    await waitFor(() => expect(previewPayload).toEqual({
+      lib: '电影',
+      folder: '旧电影',
+      item_id: 'item-1',
+      reason: '重复资源'
+    }));
+    expect(await screen.findByText('删除预览: 电影/旧电影')).toBeInTheDocument();
+  });
+
   it('loads and saves Emby user policy from the users tab', async () => {
     let savedPayload: unknown = null;
     mockApi((url, init) => {

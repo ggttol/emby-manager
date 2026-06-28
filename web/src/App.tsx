@@ -24,7 +24,10 @@ import { TaskCenter } from './components/TaskCenter';
 import { ToastProvider, useToast } from './components/Toast';
 import { C115Panel } from './components/C115Panel';
 import { CatalogPanel } from './components/CatalogPanel';
+import { CleanupPanel, DedupPanel, ZhuigengGapsPanel } from './components/InsightPanels';
 import { LogsPanel } from './components/LogsPanel';
+import { ManagePanel } from './components/ManagePanel';
+import { PostersPanel } from './components/PostersPanel';
 import { DashboardPanel, SubtitlesPanel, SystemPanel } from './components/ReadOnlyPanels';
 import { ScanPanel } from './components/ScanPanel';
 import { SchedulesPanel } from './components/SchedulesPanel';
@@ -45,7 +48,7 @@ const tabs: Tab[] = [
   { id: 'catalog', label: '找资源', endpoint: '/api/v2/catalog/stats', description: 'Postgres catalog 搜索和转存入口' },
   { id: 'zhuigeng', label: '追更检查', endpoint: '/api/v2/gaps/scan', description: '在更剧扫描和缺集汇总' },
   { id: 'gaps', label: '缺集检查', endpoint: '/api/v2/gaps/scan', description: '本地剧集和 TMDb 季集表对照' },
-  { id: 'posters', label: '海报修复', endpoint: '/api/v2/posters/detect-mismatch', description: '无海报、错绑检测和批量修复' },
+  { id: 'posters', label: '海报修复', endpoint: '/api/v2/posters/detect-mismatch', description: '无海报与 tmdbid 错绑检测' },
   { id: 'subtitles', label: '字幕', endpoint: '/api/v2/libraries', description: '外挂字幕覆盖统计' },
   { id: 'dedup', label: '去重', endpoint: '/api/v2/manage/undo', description: '重复资源分析、删除、替换' },
   { id: 'manage', label: '删除·移动', endpoint: '/api/v2/manage/undo', description: '危险操作、移动和 undo' },
@@ -109,54 +112,6 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
 }
 
 function TabPanel({ tab }: { tab: Tab }) {
-  const [data, setData] = useState<unknown>(null);
-  const [error, setError] = useState<string>('');
-  const [loading, setLoading] = useState(false);
-  const [strmLib, setStrmLib] = useState('电影');
-  const toast = useToast();
-
-  const load = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const method = tab.endpoint.includes('/scan') || tab.endpoint.includes('/suggest') || tab.endpoint.includes('/detect') ? 'POST' : 'GET';
-      const value = await api<unknown>(tab.endpoint, method === 'POST' ? { method, body: JSON.stringify({}) } : {});
-      setData(value);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    load();
-  }, [tab.id]);
-
-  const demoTask = async () => {
-    try {
-      await api('/api/v2/tasks/demo', { method: 'POST', body: JSON.stringify({ seconds: 5, label: `${tab.label} 演示任务` }) });
-      toast.push('演示任务已启动，打开任务中心查看', 'ok');
-    } catch (e) {
-      toast.push(`启动演示任务失败：${errorMessage(e)}`, 'error');
-    }
-  };
-
-  const loadStrm = async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const value = await api<unknown>(`/api/v2/libraries/strm?lib=${encodeURIComponent(strmLib)}&limit=80`);
-      setData(value);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   if (tab.id === 'dashboard') {
     return (
       <section className="panel">
@@ -236,6 +191,106 @@ function TabPanel({ tab }: { tab: Tab }) {
       </section>
     );
   }
+
+  if (tab.id === 'posters') {
+    return (
+      <section className="panel">
+        <PostersPanel />
+      </section>
+    );
+  }
+
+  if (tab.id === 'zhuigeng') {
+    return (
+      <section className="panel">
+        <ZhuigengGapsPanel mode="zhuigeng" />
+      </section>
+    );
+  }
+
+  if (tab.id === 'gaps') {
+    return (
+      <section className="panel">
+        <ZhuigengGapsPanel mode="gaps" />
+      </section>
+    );
+  }
+
+  if (tab.id === 'cleanup') {
+    return (
+      <section className="panel">
+        <CleanupPanel />
+      </section>
+    );
+  }
+
+  if (tab.id === 'dedup') {
+    return (
+      <section className="panel">
+        <DedupPanel />
+      </section>
+    );
+  }
+
+  if (tab.id === 'manage') {
+    return (
+      <section className="panel">
+        <ManagePanel />
+      </section>
+    );
+  }
+
+  return <FallbackPanel tab={tab} />;
+}
+
+function FallbackPanel({ tab }: { tab: Tab }) {
+  const [data, setData] = useState<unknown>(null);
+  const [error, setError] = useState<string>('');
+  const [loading, setLoading] = useState(false);
+  const [strmLib, setStrmLib] = useState('电影');
+  const toast = useToast();
+
+  const load = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const method = tab.endpoint.includes('/scan') || tab.endpoint.includes('/suggest') || tab.endpoint.includes('/detect') ? 'POST' : 'GET';
+      const value = await api<unknown>(tab.endpoint, method === 'POST' ? { method, body: JSON.stringify({}) } : {});
+      setData(value);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, [tab.id]);
+
+  const demoTask = async () => {
+    try {
+      await api('/api/v2/tasks/demo', { method: 'POST', body: JSON.stringify({ seconds: 5, label: `${tab.label} 演示任务` }) });
+      toast.push('演示任务已启动，打开任务中心查看', 'ok');
+    } catch (e) {
+      toast.push(`启动演示任务失败：${errorMessage(e)}`, 'error');
+    }
+  };
+
+  const loadStrm = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const value = await api<unknown>(`/api/v2/libraries/strm?lib=${encodeURIComponent(strmLib)}&limit=80`);
+      setData(value);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   return (
     <section className="panel">

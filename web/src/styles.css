@@ -1901,6 +1901,234 @@ main {
   overflow-wrap: anywhere;
 }
 
+.postersPanel {
+  display: grid;
+  gap: 14px;
+}
+
+.postersToolbar,
+.postersResultHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.postersToolbar > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.postersToolbar strong {
+  font-size: 15px;
+}
+
+.postersToolbar span,
+.postersResultHead span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.postersFilterBar {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) minmax(130px, 170px) auto auto;
+  align-items: end;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.postersFilterBar label:not(.switchRow) {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.postersSwitch {
+  align-self: end;
+}
+
+.postersTableWrap {
+  width: 100%;
+  overflow-x: auto;
+  border-radius: 8px;
+}
+
+.postersTable {
+  min-width: 980px;
+}
+
+.postersTable td strong,
+.postersTable td small,
+.postersTable td code,
+.postersTable td span {
+  display: block;
+}
+
+.postersTable td small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.postersTable td code {
+  max-width: 300px;
+  margin-top: 5px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.signalList {
+  display: grid;
+  gap: 5px;
+}
+
+.signalList .badge {
+  width: fit-content;
+  max-width: 310px;
+  overflow-wrap: anywhere;
+  text-transform: none;
+}
+
+.insightPanel,
+.managePanel {
+  display: grid;
+  gap: 14px;
+}
+
+.insightToolbar,
+.manageToolbar,
+.manageFormHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.insightToolbar > div,
+.manageToolbar > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.insightToolbar strong,
+.manageToolbar strong,
+.manageFormHead strong {
+  font-size: 15px;
+}
+
+.insightToolbar span,
+.manageToolbar span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.insightList,
+.undoMiniList {
+  display: grid;
+  gap: 8px;
+}
+
+.insightList article,
+.undoMiniList article {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  align-items: start;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.insightList.compact {
+  max-height: 280px;
+  overflow: auto;
+}
+
+.insightList strong,
+.undoMiniList strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.insightList small,
+.undoMiniList small,
+.undoMiniList code {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.undoMiniList code {
+  display: block;
+  max-height: 56px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: var(--surface-soft);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.catalogMiniStats {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.mutedParagraph {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.manageForms {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.manageForm {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.manageForm label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.manageFormHead {
+  justify-content: flex-start;
+  color: var(--muted-strong);
+}
+
+.manageFormHead svg {
+  color: var(--accent);
+}
+
+.manageTaskMeta {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .dangerText {
   color: var(--danger) !important;
 }
@@ -2187,6 +2415,14 @@ main {
   .scanLibraryCard,
   .scanGrid,
   .scanSplit,
+  .postersToolbar,
+  .postersResultHead,
+  .postersFilterBar,
+  .insightToolbar,
+  .manageToolbar,
+  .manageForms,
+  .manageTaskMeta,
+  .catalogMiniStats,
   .modalActions {
     align-items: stretch;
     flex-direction: column;
