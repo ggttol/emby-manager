@@ -28,6 +28,7 @@ async fn dry_run_reports_legacy_counts_without_writing_postgres() {
     assert_eq!(report.schedules, 2);
     assert_eq!(report.undo_entries, 2);
     assert_eq!(report.catalog_items, 2);
+    assert_eq!(report.autostrm_seen, 2);
     assert!(
         report
             .warnings
@@ -59,6 +60,7 @@ async fn apply_imports_legacy_rows_infers_old_catalog_types_and_skips_repeats() 
     assert_eq!(report.schedules, 2);
     assert_eq!(report.undo_entries, 2);
     assert_eq!(report.catalog_items, 2);
+    assert_eq!(report.autostrm_seen, 2);
     assert!(
         report
             .warnings
@@ -89,6 +91,7 @@ async fn apply_imports_legacy_rows_infers_old_catalog_types_and_skips_repeats() 
             schedules: 2,
             undo_entries: 2,
             catalog_items: 2,
+            autostrm_seen: 2,
         }
     );
     assert_eq!(
@@ -111,6 +114,7 @@ async fn apply_imports_legacy_rows_infers_old_catalog_types_and_skips_repeats() 
             schedules: 2,
             undo_entries: 2,
             catalog_items: 2,
+            autostrm_seen: 2,
         },
         "repeat apply should not duplicate exact same legacy schedules, undo entries, or catalog links"
     );
@@ -132,9 +136,11 @@ async fn missing_legacy_files_report_clear_warnings() {
     assert_eq!(report.schedules, 0);
     assert_eq!(report.undo_entries, 0);
     assert_eq!(report.catalog_items, 0);
+    assert_eq!(report.autostrm_seen, 0);
     assert_warning_contains(&report.warnings, "config.json not found at");
     assert_warning_contains(&report.warnings, "undo_log.jsonl not found at");
     assert_warning_contains(&report.warnings, "catalog_115.db not found at");
+    assert_warning_contains(&report.warnings, "autostrm_seen.json not found at");
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -187,6 +193,7 @@ struct MarkerCounts {
     schedules: i64,
     undo_entries: i64,
     catalog_items: i64,
+    autostrm_seen: i64,
 }
 
 async fn test_pool() -> Option<PgPool> {
@@ -258,6 +265,21 @@ fn seed_legacy_dir(path: &Path, marker: &str, schema: CatalogSchema) {
         .expect("serialize config"),
     )
     .expect("write config.json");
+
+    fs::write(
+        path.join("autostrm_seen.json"),
+        format!(
+            r#"{{
+              "libs": {{
+                "{marker}-lib": {{
+                  "{marker}-top-a": 1700000101.9,
+                  "{marker}-top-b": 1700000202
+                }}
+              }}
+            }}"#
+        ),
+    )
+    .expect("write autostrm_seen.json");
 
     fs::write(
         path.join("undo_log.jsonl"),
@@ -344,12 +366,18 @@ async fn marker_counts(pool: &PgPool, marker: &str) -> MarkerCounts {
             .fetch_one(pool)
             .await
             .expect("count marker catalog items");
+    let autostrm_seen = sqlx::query_scalar("SELECT COUNT(*) FROM autostrm_seen WHERE lib = $1")
+        .bind(format!("{marker}-lib"))
+        .fetch_one(pool)
+        .await
+        .expect("count marker autostrm seen");
     MarkerCounts {
         app_settings,
         auth_users,
         schedules,
         undo_entries,
         catalog_items,
+        autostrm_seen,
     }
 }
 

@@ -21,6 +21,7 @@ pub struct MigrationReport {
     pub schedules: usize,
     pub undo_entries: usize,
     pub catalog_items: usize,
+    pub autostrm_seen: usize,
     pub warnings: Vec<String>,
 }
 
@@ -36,11 +37,13 @@ pub async fn run(
         schedules: 0,
         undo_entries: 0,
         catalog_items: 0,
+        autostrm_seen: 0,
         warnings: vec![],
     };
     migrate_config(pool, &legacy_dir, apply, &mut report).await?;
     migrate_undo(pool, &legacy_dir, apply, &mut report).await?;
     migrate_catalog(pool, &legacy_dir, apply, &mut report).await?;
+    migrate_autostrm_seen(pool, &legacy_dir, apply, &mut report).await?;
     Ok(report)
 }
 
@@ -278,6 +281,85 @@ async fn migrate_catalog(
         flush_catalog_batch(pool, &mut batch).await?;
     }
     Ok(())
+}
+
+async fn migrate_autostrm_seen(
+    pool: &PgPool,
+    legacy_dir: &Path,
+    apply: bool,
+    report: &mut MigrationReport,
+) -> anyhow::Result<()> {
+    let Some(path) = find_autostrm_seen_path(legacy_dir) else {
+        report.warnings.push(format!(
+            "autostrm_seen.json not found at {} or {}",
+            legacy_dir.join("autostrm_seen.json").display(),
+            legacy_dir.join("strm").join("autostrm_seen.json").display()
+        ));
+        return Ok(());
+    };
+    let value: Value = match serde_json::from_reader(File::open(&path)?) {
+        Ok(value) => value,
+        Err(err) => {
+            report.warnings.push(format!(
+                "skipped malformed autostrm_seen.json at {}: {err}",
+                path.display()
+            ));
+            return Ok(());
+        }
+    };
+    let Some(libs) = value.get("libs").and_then(Value::as_object) else {
+        report
+            .warnings
+            .push("autostrm_seen.json missing object field libs".to_string());
+        return Ok(());
+    };
+    for (lib, tops) in libs {
+        let Some(tops) = tops.as_object() else {
+            report.warnings.push(format!(
+                "skipped autostrm seen lib {lib}: value is not an object"
+            ));
+            continue;
+        };
+        for (top, mtime_value) in tops {
+            let Some(mtime) = legacy_mtime(mtime_value) else {
+                report
+                    .warnings
+                    .push(format!("skipped autostrm seen {lib}/{top}: invalid mtime"));
+                continue;
+            };
+            report.autostrm_seen += 1;
+            if apply {
+                sqlx::query(
+                    "INSERT INTO autostrm_seen(lib, top, mtime, updated_at)
+                     VALUES ($1, $2, $3, now())
+                     ON CONFLICT(lib, top) DO UPDATE
+                     SET mtime = EXCLUDED.mtime, updated_at = now()
+                     WHERE autostrm_seen.mtime IS DISTINCT FROM EXCLUDED.mtime",
+                )
+                .bind(lib)
+                .bind(top)
+                .bind(mtime)
+                .execute(pool)
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_autostrm_seen_path(legacy_dir: &Path) -> Option<PathBuf> {
+    [
+        legacy_dir.join("autostrm_seen.json"),
+        legacy_dir.join("strm").join("autostrm_seen.json"),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+}
+
+fn legacy_mtime(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_f64().map(|value| value.trunc() as i64))
 }
 
 struct CatalogImportRow {
