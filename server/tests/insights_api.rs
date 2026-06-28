@@ -13,6 +13,7 @@ use std::{
     env,
     path::{Path, PathBuf},
 };
+use tokio::time::{Duration, sleep};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -39,7 +40,7 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
     let username = create_test_user(&pool).await;
     let app = api::router(
         pool.clone(),
-        test_settings(&database_url, tmp.path(), strm_root),
+        test_settings(&database_url, tmp.path(), strm_root.clone()),
     );
 
     let (status, headers, body) = send(
@@ -90,7 +91,10 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
         Method::POST,
         "/api/v2/cleanup/suggest",
         Some(json!({})),
-        &[(COOKIE.as_str(), cookie.clone()), ("x-csrf-token", csrf)],
+        &[
+            (COOKIE.as_str(), cookie.clone()),
+            ("x-csrf-token", csrf.clone()),
+        ],
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{cleanup}");
@@ -110,6 +114,42 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
             .any(|todo| todo["area"] == "tasks" && todo["severity"] == "high"),
         "{cleanup}"
     );
+
+    let (status, _, empty_preview) = send(
+        &app,
+        Method::POST,
+        "/api/v2/cleanup/empty-dirs",
+        Some(json!({"execute": false})),
+        &[
+            (COOKIE.as_str(), cookie.clone()),
+            ("x-csrf-token", csrf.clone()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{empty_preview}");
+    assert_eq!(empty_preview["dry_run"], true);
+    assert_eq!(empty_preview["candidate_count"], 1);
+    assert_eq!(empty_preview["samples"][0], "Empty");
+    assert!(strm_root.join("Empty").exists(), "dry-run must not delete");
+
+    let (status, _, empty_execute) = send(
+        &app,
+        Method::POST,
+        "/api/v2/cleanup/empty-dirs",
+        Some(json!({"execute": true})),
+        &[(COOKIE.as_str(), cookie.clone()), ("x-csrf-token", csrf)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{empty_execute}");
+    assert_eq!(empty_execute["dry_run"], false);
+    let task_id = empty_execute["task"]["id"].as_str().unwrap();
+    assert_eq!(empty_execute["task"]["kind"], "cleanup_empty_strm_dirs");
+    let task = wait_for_task_status(&pool, task_id, "done").await;
+    assert_eq!(task["result"]["dry_run"], false);
+    assert_eq!(task["result"]["deleted"], json!(["Empty"]));
+    assert_eq!(task["result"]["deleted_count"], 1);
+    assert!(!strm_root.join("Empty").exists());
+    assert!(strm_root.join("Shows").join("Season 1").exists());
 
     let (status, _, autostrm) = send(
         &app,
@@ -277,6 +317,23 @@ fn json_array_contains(value: &Value, needle: &str) -> bool {
         .as_array()
         .map(|items| items.iter().any(|item| item == needle))
         .unwrap_or(false)
+}
+
+async fn wait_for_task_status(pool: &PgPool, id: &str, status: &str) -> Value {
+    let id = Uuid::parse_str(id).expect("task id is uuid");
+    for _ in 0..50 {
+        let task: Value =
+            sqlx::query_scalar("SELECT to_jsonb(task_runs) FROM task_runs WHERE id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .expect("load task");
+        if task["status"] == status {
+            return task;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("task {id} did not reach {status}");
 }
 
 fn insights_test_database_url() -> Option<String> {

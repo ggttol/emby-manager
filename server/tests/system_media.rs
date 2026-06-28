@@ -5,7 +5,14 @@ use emby_manager::{
     state::AppState,
     system,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpListener,
+};
 
 #[tokio::test]
 async fn system_summary_reports_database_and_path_warnings() {
@@ -49,11 +56,107 @@ async fn system_summary_reports_database_and_path_warnings() {
             .iter()
             .any(|warning| warning.contains("Docker CLI") && warning.contains("不存在"))
     );
+    assert_eq!(summary.docker.status, "unavailable");
+    assert!(summary.docker.containers.is_empty());
+    assert!(
+        summary
+            .docker
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("Docker 容器列表不可用"))
+    );
+    assert_eq!(summary.emby.status, "config_unavailable");
+    assert!(
+        summary
+            .emby
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("Emby 配置读取失败"))
+    );
     assert!(
         summary
             .warnings
             .iter()
             .any(|warning| warning.contains("数据库检查失败"))
+    );
+}
+
+#[test]
+fn docker_ps_parser_reads_json_lines() {
+    let output = r#"
+{"ID":"abc123def456","Image":"emby/embyserver:latest","Names":"emby","State":"running","Status":"Up 2 hours","Ports":"0.0.0.0:8096->8096/tcp"}
+{"ID":"def456abc123","Image":"postgres:16","Names":"postgres","State":"exited","Status":"Exited (0) 3 minutes ago","Ports":""}
+"#;
+
+    let containers = system::parse_docker_ps_output(output).unwrap();
+
+    assert_eq!(containers.len(), 2);
+    assert_eq!(containers[0].id, "abc123def456");
+    assert_eq!(containers[0].name, "emby");
+    assert_eq!(containers[0].image, "emby/embyserver:latest");
+    assert_eq!(containers[0].state, "running");
+    assert!(containers[0].ports.contains("8096"));
+    assert_eq!(containers[1].name, "postgres");
+    assert_eq!(containers[1].state, "exited");
+}
+
+#[test]
+fn docker_ps_parser_reports_bad_json_line() {
+    let err = system::parse_docker_ps_output("{not-json}").unwrap_err();
+
+    assert!(err.contains("第 1 行 JSON 无法解析"), "{err}");
+}
+
+#[tokio::test]
+async fn emby_health_reads_system_info_with_readonly_request() {
+    let body = r#"{
+        "Version": "4.9.5.0",
+        "ServerName": "NAS Emby",
+        "Id": "server-1",
+        "OperatingSystemDisplayName": "Linux"
+    }"#;
+    let (base_url, requests) = spawn_fake_emby_once(body).await;
+
+    let health = system::probe_emby_health(
+        &format!("{base_url}/emby/"),
+        "secret-key",
+        &reqwest::Client::new(),
+    )
+    .await;
+
+    assert!(health.configured);
+    assert!(health.online);
+    assert_eq!(health.status, "ok");
+    assert_eq!(health.http_status, Some(200));
+    assert_eq!(health.version.as_deref(), Some("4.9.5.0"));
+    assert_eq!(health.server_name.as_deref(), Some("NAS Emby"));
+    assert_eq!(health.server_id.as_deref(), Some("server-1"));
+    assert_eq!(health.operating_system.as_deref(), Some("Linux"));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].starts_with("GET /emby/System/Info?api_key=secret-key HTTP/1.1"),
+        "{}",
+        requests[0]
+    );
+    assert!(!requests[0].starts_with("POST "), "{}", requests[0]);
+    assert!(!requests[0].starts_with("DELETE "), "{}", requests[0]);
+}
+
+#[tokio::test]
+async fn emby_health_warns_without_api_key() {
+    let health =
+        system::probe_emby_health("http://127.0.0.1:1/emby", " ", &reqwest::Client::new()).await;
+
+    assert!(!health.configured);
+    assert!(!health.online);
+    assert_eq!(health.status, "missing_api_key");
+    assert!(
+        health
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("api_key 未配置"))
     );
 }
 
@@ -187,4 +290,30 @@ fn state_with_roots(
         .connect_lazy(&settings.database_url)
         .unwrap();
     AppState::new(pool, settings)
+}
+
+async fn spawn_fake_emby_once(body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = [0; 4096];
+        let n = socket.read(&mut buf).await.unwrap();
+        captured
+            .lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(&buf[..n]).to_string());
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    });
+
+    (format!("http://{addr}"), requests)
 }

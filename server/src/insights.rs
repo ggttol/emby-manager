@@ -1,19 +1,30 @@
-use crate::{error::AppResult, state::AppState};
+use crate::{
+    error::{AppError, AppResult},
+    state::AppState,
+    tasks::{self, TaskRun},
+};
 use axum::{
     Json, Router,
     extract::State,
     routing::{get, post},
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, HashSet},
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
 const STRM_SUMMARY_MAX_DEPTH: usize = 8;
 const STRM_SUMMARY_ENTRY_LIMIT: usize = 50_000;
 const STRM_SUMMARY_SAMPLE_LIMIT: usize = 20;
+const EMPTY_DIR_CLEANUP_LIMIT_DEFAULT: usize = 500;
+const EMPTY_DIR_CLEANUP_LIMIT_MAX: usize = 10_000;
+const EMPTY_DIR_CLEANUP_SAMPLE_LIMIT: usize = 20;
 const SUBTITLE_EXTENSIONS: &[&str] = &["ass", "idx", "smi", "srt", "ssa", "sub", "sup", "vtt"];
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -189,10 +200,45 @@ pub struct LogInsight {
     pub last_error_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct EmptyDirCleanupRequest {
+    pub execute: Option<bool>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EmptyDirCleanupResponse {
+    pub ok: bool,
+    pub dry_run: bool,
+    pub execute: bool,
+    pub root: String,
+    pub candidate_count: usize,
+    pub samples: Vec<String>,
+    pub truncated: bool,
+    pub warnings: Vec<String>,
+    pub task: Option<TaskRun>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EmptyDirCleanupTaskResult {
+    pub ok: bool,
+    pub dry_run: bool,
+    pub root: String,
+    pub candidate_count: usize,
+    pub deleted_count: usize,
+    pub skipped_count: usize,
+    pub failed_count: usize,
+    pub deleted: Vec<String>,
+    pub skipped: Vec<String>,
+    pub failures: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/gaps/scan", post(gaps_summary))
         .route("/api/v2/cleanup/suggest", post(cleanup_summary))
+        .route("/api/v2/cleanup/empty-dirs", post(cleanup_empty_dirs))
         .route("/api/v2/autostrm/status", get(autostrm_status))
 }
 
@@ -286,6 +332,61 @@ pub async fn cleanup_summary(
         logs,
         todos,
         warnings,
+    }))
+}
+
+#[utoipa::path(post, path = "/api/v2/cleanup/empty-dirs", tag = "insights", request_body = EmptyDirCleanupRequest, responses((status = 200, body = EmptyDirCleanupResponse)))]
+pub async fn cleanup_empty_dirs(
+    State(state): State<AppState>,
+    Json(req): Json<EmptyDirCleanupRequest>,
+) -> AppResult<Json<EmptyDirCleanupResponse>> {
+    let limit = empty_dir_cleanup_limit(req.limit);
+    let scan = scan_empty_strm_dirs(&state.settings.strm_root, limit);
+    let execute = req.execute.unwrap_or(false);
+    let candidate_count = scan.candidates.len();
+    let samples = scan.samples();
+
+    if !execute {
+        return Ok(Json(EmptyDirCleanupResponse {
+            ok: true,
+            dry_run: true,
+            execute: false,
+            root: scan.root,
+            candidate_count,
+            samples,
+            truncated: scan.truncated,
+            warnings: scan.warnings,
+            task: None,
+        }));
+    }
+
+    let params = serde_json::json!({
+        "execute": true,
+        "limit": limit,
+        "root": state.settings.strm_root.display().to_string(),
+        "dry_run": false,
+    });
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "cleanup_empty_strm_dirs",
+        "清理空 STRM 目录",
+        candidate_count.max(1) as i64,
+        "manual",
+        params,
+    )
+    .await?;
+    spawn_empty_dir_cleanup(state, task.id, limit);
+
+    Ok(Json(EmptyDirCleanupResponse {
+        ok: true,
+        dry_run: false,
+        execute: true,
+        root: scan.root,
+        candidate_count,
+        samples,
+        truncated: scan.truncated,
+        warnings: scan.warnings,
+        task: Some(task),
     }))
 }
 
@@ -717,6 +818,288 @@ fn push_text_sample(samples: &mut Vec<String>, rel_path: &str) {
     samples.push(rel_path.to_string());
 }
 
+#[derive(Debug, Clone)]
+struct EmptyDirCandidate {
+    path: PathBuf,
+    rel_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct EmptyDirScan {
+    root: String,
+    candidates: Vec<EmptyDirCandidate>,
+    truncated: bool,
+    warnings: Vec<String>,
+}
+
+impl EmptyDirScan {
+    fn samples(&self) -> Vec<String> {
+        self.candidates
+            .iter()
+            .take(EMPTY_DIR_CLEANUP_SAMPLE_LIMIT)
+            .map(|candidate| candidate.rel_path.clone())
+            .collect()
+    }
+}
+
+fn empty_dir_cleanup_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(EMPTY_DIR_CLEANUP_LIMIT_DEFAULT)
+        .clamp(1, EMPTY_DIR_CLEANUP_LIMIT_MAX)
+}
+
+fn scan_empty_strm_dirs(root: &Path, limit: usize) -> EmptyDirScan {
+    let mut scan = EmptyDirScan {
+        root: root.display().to_string(),
+        candidates: Vec::new(),
+        truncated: false,
+        warnings: Vec::new(),
+    };
+    if !root.exists() {
+        scan.warnings
+            .push(format!("strm_root 不存在: {}", root.display()));
+        return scan;
+    }
+    if !root.is_dir() {
+        scan.warnings
+            .push(format!("strm_root 不是目录: {}", root.display()));
+        return scan;
+    }
+    let Ok(canon_root) = root.canonicalize() else {
+        scan.warnings
+            .push(format!("strm_root 无法解析真实路径: {}", root.display()));
+        return scan;
+    };
+
+    let mut dirs = Vec::<(PathBuf, usize)>::new();
+    let mut blocked_dirs = HashSet::<PathBuf>::new();
+    let mut visited = 0usize;
+    for entry in WalkDir::new(root)
+        .min_depth(1)
+        .follow_links(false)
+        .contents_first(true)
+        .into_iter()
+    {
+        if visited >= STRM_SUMMARY_ENTRY_LIMIT {
+            scan.truncated = true;
+            break;
+        }
+        visited += 1;
+
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                scan.warnings
+                    .push("strm_root 遍历时有条目不可读，已跳过相关父目录".to_string());
+                if let Some(path) = err.path() {
+                    mark_ancestors_blocked(root, path, &mut blocked_dirs);
+                }
+                continue;
+            }
+        };
+
+        if entry.file_type().is_dir() {
+            dirs.push((entry.path().to_path_buf(), entry.depth()));
+        } else {
+            mark_ancestors_blocked(root, entry.path(), &mut blocked_dirs);
+        }
+    }
+
+    dirs.sort_by(|(left_path, left_depth), (right_path, right_depth)| {
+        right_depth
+            .cmp(left_depth)
+            .then_with(|| rel_display(root, left_path).cmp(&rel_display(root, right_path)))
+    });
+
+    for (path, _depth) in dirs {
+        if scan.candidates.len() >= limit {
+            scan.truncated = true;
+            break;
+        }
+        if blocked_dirs.contains(&path) {
+            continue;
+        }
+        if let Err(err) = guard_existing_strm_child_dir(root, &canon_root, &path) {
+            scan.warnings.push(err.to_string());
+            continue;
+        }
+        scan.candidates.push(EmptyDirCandidate {
+            rel_path: rel_display(root, &path),
+            path,
+        });
+    }
+
+    scan
+}
+
+fn mark_ancestors_blocked(root: &Path, path: &Path, blocked: &mut HashSet<PathBuf>) {
+    if path != root && path.starts_with(root) {
+        blocked.insert(path.to_path_buf());
+    }
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        if parent == root {
+            break;
+        }
+        if !parent.starts_with(root) {
+            break;
+        }
+        blocked.insert(parent.to_path_buf());
+        current = parent.parent();
+    }
+}
+
+fn guard_existing_strm_child_dir(root: &Path, canon_root: &Path, path: &Path) -> AppResult<()> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|err| {
+        AppError::BadRequest(format!(
+            "空目录候选不可读，已拒绝: {} ({err})",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(AppError::BadRequest(format!(
+            "空目录候选不是普通目录，已拒绝: {}",
+            path.display()
+        )));
+    }
+    let canon_path = path.canonicalize().map_err(|err| {
+        AppError::BadRequest(format!(
+            "空目录候选无法解析真实路径，已拒绝: {} ({err})",
+            path.display()
+        ))
+    })?;
+    if canon_path == canon_root || !canon_path.starts_with(canon_root) {
+        return Err(AppError::BadRequest(format!(
+            "空目录候选越过 strm_root，已拒绝: {}",
+            path.display()
+        )));
+    }
+    if !path.starts_with(root) {
+        return Err(AppError::BadRequest(format!(
+            "空目录候选不在 strm_root 下，已拒绝: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn spawn_empty_dir_cleanup(state: AppState, task_id: Uuid, limit: usize) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, task_id, "任务并发槽不可用", None).await;
+            return;
+        };
+        if tasks::cancel_requested(&state.pool, task_id).await {
+            let _ = tasks::finish_cancelled(&state.pool, task_id).await;
+            return;
+        }
+        let _ = tasks::mark_running(&state.pool, task_id, "扫描空 STRM 目录").await;
+        match run_empty_dir_cleanup(&state, task_id, limit).await {
+            Ok(result) => {
+                let _ = tasks::finish_done_with_message(
+                    &state.pool,
+                    task_id,
+                    "空 STRM 目录清理完成",
+                    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+                )
+                .await;
+            }
+            Err(err) => {
+                let _ = tasks::finish_error(&state.pool, task_id, &err.to_string(), None).await;
+            }
+        }
+    });
+}
+
+async fn run_empty_dir_cleanup(
+    state: &AppState,
+    task_id: Uuid,
+    limit: usize,
+) -> AppResult<EmptyDirCleanupTaskResult> {
+    let scan = scan_empty_strm_dirs(&state.settings.strm_root, limit);
+    let total = scan.candidates.len().max(1) as i64;
+    tasks::set_total(&state.pool, task_id, total).await?;
+    if scan.candidates.is_empty() {
+        tasks::set_progress(&state.pool, task_id, 1, "没有空 STRM 目录").await?;
+        return Ok(EmptyDirCleanupTaskResult {
+            ok: true,
+            dry_run: false,
+            root: scan.root,
+            candidate_count: 0,
+            deleted_count: 0,
+            skipped_count: 0,
+            failed_count: 0,
+            deleted: Vec::new(),
+            skipped: Vec::new(),
+            failures: Vec::new(),
+            warnings: scan.warnings,
+        });
+    }
+
+    let canon_root = state
+        .settings
+        .strm_root
+        .canonicalize()
+        .map_err(|err| AppError::BadRequest(format!("strm_root 无法解析真实路径: {err}")))?;
+    let mut deleted = Vec::<String>::new();
+    let mut skipped = Vec::<String>::new();
+    let mut failures = Vec::<String>::new();
+
+    for (idx, candidate) in scan.candidates.iter().enumerate() {
+        if tasks::cancel_requested(&state.pool, task_id).await {
+            tasks::finish_cancelled(&state.pool, task_id).await?;
+            return Err(AppError::Conflict("任务已取消".to_string()));
+        }
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            idx as i64,
+            &format!("清理 {}", candidate.rel_path),
+        )
+        .await?;
+
+        if let Err(err) =
+            guard_existing_strm_child_dir(&state.settings.strm_root, &canon_root, &candidate.path)
+        {
+            failures.push(format!("{}: {err}", candidate.rel_path));
+            continue;
+        }
+        match std::fs::remove_dir(&candidate.path) {
+            Ok(()) => deleted.push(candidate.rel_path.clone()),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    ErrorKind::NotFound | ErrorKind::DirectoryNotEmpty
+                ) =>
+            {
+                skipped.push(candidate.rel_path.clone());
+            }
+            Err(err) => failures.push(format!("{}: {err}", candidate.rel_path)),
+        }
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            (idx + 1) as i64,
+            &format!("已处理 {}/{}", idx + 1, total),
+        )
+        .await?;
+    }
+
+    Ok(EmptyDirCleanupTaskResult {
+        ok: failures.is_empty(),
+        dry_run: false,
+        root: scan.root,
+        candidate_count: scan.candidates.len(),
+        deleted_count: deleted.len(),
+        skipped_count: skipped.len(),
+        failed_count: failures.len(),
+        deleted,
+        skipped,
+        failures,
+        warnings: scan.warnings,
+    })
+}
+
 fn gaps_todos(
     task_history: &TaskHistorySummary,
     catalog: &CatalogInsight,
@@ -891,7 +1274,7 @@ fn todo(severity: &str, area: &str, message: &str, count: i64, source: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::strm_readonly_overview;
+    use super::{guard_existing_strm_child_dir, scan_empty_strm_dirs, strm_readonly_overview};
 
     #[test]
     fn strm_overview_is_metadata_only_and_counts_candidates() {
@@ -918,5 +1301,41 @@ mod tests {
                 .iter()
                 .any(|sample| sample.kind == "empty_dir" && sample.rel_path == "Empty")
         );
+    }
+
+    #[test]
+    fn empty_dir_scan_includes_parents_after_empty_children() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nested = tmp.path().join("Shows").join("Empty Season");
+        let keep = tmp.path().join("Movies").join("Keep");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&keep).unwrap();
+        std::fs::write(keep.join("movie.strm"), "http://example.invalid/movie.mkv").unwrap();
+
+        let scan = scan_empty_strm_dirs(tmp.path(), 20);
+
+        assert_eq!(scan.candidates.len(), 2, "{scan:?}");
+        assert_eq!(scan.candidates[0].rel_path, "Shows/Empty Season");
+        assert_eq!(scan.candidates[1].rel_path, "Shows");
+        assert!(
+            scan.candidates
+                .iter()
+                .all(|candidate| !candidate.rel_path.starts_with("Movies")),
+            "{scan:?}"
+        );
+    }
+
+    #[test]
+    fn empty_dir_guard_rejects_outside_path() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_empty = outside.path().join("Empty");
+        std::fs::create_dir_all(&outside_empty).unwrap();
+        let canon_root = root.path().canonicalize().unwrap();
+
+        let err = guard_existing_strm_child_dir(root.path(), &canon_root, &outside_empty)
+            .expect_err("outside path should be rejected");
+
+        assert!(err.to_string().contains("strm_root"), "{err}");
     }
 }

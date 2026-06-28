@@ -863,6 +863,7 @@ describe('App shell', () => {
 
   it('renders cleanup and dedup readonly summaries through cleanup suggest', async () => {
     const calls: string[] = [];
+    const emptyPayloads: unknown[] = [];
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/cleanup/suggest') {
         const headers = init?.headers as Headers;
@@ -870,6 +871,55 @@ describe('App shell', () => {
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
         calls.push(url.pathname);
         return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/empty-dirs') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        const payload = JSON.parse(String(init?.body));
+        emptyPayloads.push(payload);
+        calls.push(url.pathname);
+        if (payload.execute) {
+          return jsonResponse({
+            ok: true,
+            dry_run: false,
+            execute: true,
+            root: '/volume1/strm',
+            candidate_count: 1,
+            samples: ['电影/空目录'],
+            truncated: false,
+            warnings: [],
+            task: {
+              id: 'abababab-abab-4aba-8aba-abababababab',
+              kind: 'cleanup_empty_strm_dirs',
+              label: '清理空 STRM 目录',
+              status: 'pending',
+              progress: 0,
+              total: 1,
+              source: 'manual',
+              params: { execute: true },
+              status_text: '排队中',
+              result: null,
+              error: null,
+              cancel_requested: false,
+              queued_at: '2026-06-28T00:00:00Z',
+              started_at: null,
+              ended_at: null,
+              updated_at: '2026-06-28T00:00:00Z'
+            }
+          });
+        }
+        return jsonResponse({
+          ok: true,
+          dry_run: true,
+          execute: false,
+          root: '/volume1/strm',
+          candidate_count: 1,
+          samples: ['电影/空目录'],
+          truncated: false,
+          warnings: [],
+          task: null
+        });
       }
       if (url.pathname === '/api/v2/catalog/duplicates') {
         calls.push(url.pathname);
@@ -907,8 +957,14 @@ describe('App shell', () => {
     expect(await screen.findByText('智能清理预检')).toBeInTheDocument();
     expect(screen.getByText('存在失败任务')).toBeInTheDocument();
     expect(screen.getByText(/当前 Rust 版智能清理只读预检/)).toBeInTheDocument();
+    expect(await screen.findByText('可清理')).toBeInTheDocument();
     expect(screen.getByText('电影/空目录')).toBeInTheDocument();
     expect(screen.getByText('电影/poster.jpg')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '清理空 STRM 目录' }));
+    expect(await screen.findByText('确认清理空 STRM 目录')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认清理' }));
+    await waitFor(() => expect(emptyPayloads).toEqual([{ execute: false }, { execute: true }]));
+    expect(await screen.findByText(/已创建任务：清理空 STRM 目录/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '去重' }));
     expect(await screen.findByText('去重预检')).toBeInTheDocument();
@@ -917,6 +973,7 @@ describe('App shell', () => {
     expect(screen.getByText('同名资源')).toBeInTheDocument();
     await waitFor(() => expect(calls).toEqual(expect.arrayContaining([
       '/api/v2/cleanup/suggest',
+      '/api/v2/cleanup/empty-dirs',
       '/api/v2/catalog/duplicates'
     ])));
   });

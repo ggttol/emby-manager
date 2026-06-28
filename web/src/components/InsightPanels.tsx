@@ -7,11 +7,13 @@ import {
   Play,
   RefreshCw,
   SearchX,
+  Trash2,
   Webhook
 } from 'lucide-react';
 import { ReactNode, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { ConfirmDanger } from './Modal';
 import { useToast } from './Toast';
 
 type CatalogInsight = components['schemas']['CatalogInsight'];
@@ -27,6 +29,18 @@ type LibrariesResponse = components['schemas']['LibrariesResponse'];
 type StrmReadOnlyOverview = components['schemas']['StrmReadOnlyOverview'];
 type TaskRun = components['schemas']['TaskRun'];
 type TaskHistorySummary = components['schemas']['TaskHistorySummary'];
+
+type EmptyDirCleanupResponse = {
+  ok: boolean;
+  dry_run: boolean;
+  execute: boolean;
+  root: string;
+  candidate_count: number;
+  samples: string[];
+  truncated: boolean;
+  warnings: string[];
+  task?: TaskRun | null;
+};
 
 type Tone = 'neutral' | 'ok' | 'warn' | 'error';
 
@@ -250,17 +264,31 @@ function CatalogDuplicateDetails({ data }: { data?: CatalogDuplicatesResponse | 
   );
 }
 
-function StrmBlock({ strm }: { strm?: StrmReadOnlyOverview }) {
-  const emptySamples = strm?.empty_directory_samples || [];
+function StrmBlock({
+  strm,
+  emptyCleanup,
+  emptyCleanupTask,
+  action
+}: {
+  strm?: StrmReadOnlyOverview;
+  emptyCleanup?: EmptyDirCleanupResponse | null;
+  emptyCleanupTask?: TaskRun | null;
+  action?: ReactNode;
+}) {
+  const emptySamples = emptyCleanup?.samples?.length ? emptyCleanup.samples : strm?.empty_directory_samples || [];
   const otherSamples = strm?.other_file_samples || [];
   return (
     <section className="readonlyBlock">
-      <h2>strm 只读信号</h2>
+      <div className="sectionTitleRow">
+        <h2>strm 只读信号</h2>
+        {action}
+      </div>
       <div className="miniStats">
         <span>文件 <strong>{count(strm?.files)}</strong></span>
         <span>.strm <strong>{count(strm?.strm_files)}</strong></span>
         <span>字幕 <strong>{count(strm?.subtitle_files)}</strong></span>
         <span>空目录 <strong>{count(strm?.empty_directories)}</strong></span>
+        {emptyCleanup && <span>可清理 <strong>{count(emptyCleanup.candidate_count)}</strong></span>}
       </div>
       <div className="insightList compact">
         {(strm?.samples || []).map((sample) => (
@@ -284,6 +312,13 @@ function StrmBlock({ strm }: { strm?: StrmReadOnlyOverview }) {
           {strm && otherSamples.length === 0 && <small>暂无</small>}
         </div>
       </div>
+      {emptyCleanup?.truncated && <div className="notice warn">空目录候选已截断，仅处理前 {count(emptyCleanup.candidate_count)} 个</div>}
+      {emptyCleanup?.warnings?.length ? <WarningList warnings={emptyCleanup.warnings} /> : null}
+      {emptyCleanupTask && (
+        <div className="notice">
+          已创建任务：{emptyCleanupTask.label} · {emptyCleanupTask.status}
+        </div>
+      )}
     </section>
   );
 }
@@ -297,19 +332,39 @@ function CleanupLayout({
   error,
   onRefresh,
   variant,
-  duplicates
+  duplicates,
+  emptyCleanup,
+  emptyCleanupTask,
+  emptyCleanupLoading,
+  onExecuteEmptyCleanup
 }: {
   title: string;
   subtitle: string;
   notice: string;
   data: CleanupSummaryResponse | null;
   duplicates?: CatalogDuplicatesResponse | null;
+  emptyCleanup?: EmptyDirCleanupResponse | null;
+  emptyCleanupTask?: TaskRun | null;
+  emptyCleanupLoading?: boolean;
   loading: boolean;
   error: string;
   onRefresh: () => void;
+  onExecuteEmptyCleanup?: () => void;
   variant: 'cleanup' | 'dedup';
 }) {
   const duplicateTotal = Number(data?.catalog?.duplicate_links || 0) + Number(data?.catalog?.duplicate_names || 0);
+  const emptyCandidateCount = Number(emptyCleanup?.candidate_count ?? data?.strm?.empty_directories ?? 0);
+  const emptyCleanupActive = isActiveTask(emptyCleanupTask);
+  const emptyCleanupAction = variant === 'cleanup' ? (
+    <button
+      className="btn compact"
+      onClick={onExecuteEmptyCleanup}
+      disabled={emptyCleanupLoading || emptyCleanupActive || emptyCandidateCount === 0}
+    >
+      <Trash2 size={14} />
+      {emptyCleanupLoading ? '提交中' : '清理空 STRM 目录'}
+    </button>
+  ) : undefined;
 
   return (
     <section className="insightPanel">
@@ -352,7 +407,12 @@ function CleanupLayout({
       {variant === 'dedup' && <CatalogDuplicateDetails data={duplicates} />}
       <div className="readonlySplit">
         <CatalogBlock catalog={data?.catalog} />
-        <StrmBlock strm={data?.strm} />
+        <StrmBlock
+          strm={data?.strm}
+          emptyCleanup={variant === 'cleanup' ? emptyCleanup : null}
+          emptyCleanupTask={variant === 'cleanup' ? emptyCleanupTask : null}
+          action={emptyCleanupAction}
+        />
       </div>
       <div className="readonlySplit">
         <section className="readonlyBlock">
@@ -373,6 +433,10 @@ function CleanupLayout({
 
 export function CleanupPanel() {
   const [data, setData] = useState<CleanupSummaryResponse | null>(null);
+  const [emptyCleanup, setEmptyCleanup] = useState<EmptyDirCleanupResponse | null>(null);
+  const [emptyCleanupTask, setEmptyCleanupTask] = useState<TaskRun | null>(null);
+  const [emptyCleanupLoading, setEmptyCleanupLoading] = useState(false);
+  const [confirmEmptyCleanup, setConfirmEmptyCleanup] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const toast = useToast();
@@ -381,7 +445,12 @@ export function CleanupPanel() {
     setLoading(true);
     setError('');
     try {
-      setData(await api<CleanupSummaryResponse>('/api/v2/cleanup/suggest', { method: 'POST', body: JSON.stringify({}) }));
+      const [summary, emptyPreview] = await Promise.all([
+        api<CleanupSummaryResponse>('/api/v2/cleanup/suggest', { method: 'POST', body: JSON.stringify({}) }),
+        api<EmptyDirCleanupResponse>('/api/v2/cleanup/empty-dirs', { method: 'POST', body: JSON.stringify({ execute: false }) })
+      ]);
+      setData(summary);
+      setEmptyCleanup(emptyPreview);
     } catch (e) {
       const message = errorMessage(e);
       setError(message);
@@ -395,17 +464,55 @@ export function CleanupPanel() {
     load();
   }, []);
 
+  const executeEmptyCleanup = async () => {
+    setEmptyCleanupLoading(true);
+    setConfirmEmptyCleanup(false);
+    try {
+      const result = await api<EmptyDirCleanupResponse>('/api/v2/cleanup/empty-dirs', {
+        method: 'POST',
+        body: JSON.stringify({ execute: true })
+      });
+      setEmptyCleanup(result);
+      setEmptyCleanupTask(result.task || null);
+      toast.push('已创建空 STRM 目录清理任务', 'ok');
+    } catch (e) {
+      toast.push(`清理空 STRM 目录失败：${errorMessage(e)}`, 'error');
+    } finally {
+      setEmptyCleanupLoading(false);
+    }
+  };
+
   return (
-    <CleanupLayout
-      title="智能清理预检"
-      subtitle="汇总任务、catalog、strm、autostrm 和日志信号。"
-      notice="当前 Rust 版智能清理只读预检，不做评分删除、不移动文件、不调用 Emby/115。"
-      data={data}
-      loading={loading}
-      error={error}
-      onRefresh={load}
-      variant="cleanup"
-    />
+    <>
+      {confirmEmptyCleanup && (
+        <ConfirmDanger
+          title="确认清理空 STRM 目录"
+          confirmText="确认清理"
+          onCancel={() => setConfirmEmptyCleanup(false)}
+          onConfirm={executeEmptyCleanup}
+          body={(
+            <div className="dangerCopy">
+              <p>只删除 strm_root 下当前仍为空的目录，不访问 115/CD 根目录。</p>
+              <code>{emptyCleanup?.root || data?.strm?.root || 'strm_root'}</code>
+            </div>
+          )}
+        />
+      )}
+      <CleanupLayout
+        title="智能清理预检"
+        subtitle="汇总任务、catalog、strm、autostrm 和日志信号。"
+        notice="当前 Rust 版智能清理只读预检，不做评分删除、不移动文件、不调用 Emby/115。"
+        data={data}
+        emptyCleanup={emptyCleanup}
+        emptyCleanupTask={emptyCleanupTask}
+        emptyCleanupLoading={emptyCleanupLoading}
+        loading={loading}
+        error={error}
+        onRefresh={load}
+        onExecuteEmptyCleanup={() => setConfirmEmptyCleanup(true)}
+        variant="cleanup"
+      />
+    </>
   );
 }
 
