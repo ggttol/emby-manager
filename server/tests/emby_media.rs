@@ -251,6 +251,51 @@ async fn emby_client_lists_series_and_episodes_for_gap_scan() {
     assert!(requests[1].contains("Limit=6000"), "{}", requests[1]);
 }
 
+#[tokio::test]
+async fn emby_client_lists_library_items_for_manage_picker() {
+    let items = r#"{
+        "Items": [
+            {
+                "Id": "movie-1",
+                "Name": "Movie A",
+                "Type": "Movie",
+                "Path": "/strm/Movies/Movie A [tmdbid-123]/Movie A.strm",
+                "ProductionYear": 2026,
+                "ProviderIds": {"Tmdb": "123"}
+            }
+        ],
+        "TotalRecordCount": 1
+    }"#;
+    let (base_url, requests) = spawn_fake_emby_many(vec![items]).await;
+    let client = EmbyClient::new(base_url, "secret-key", reqwest::Client::new());
+
+    let found = client.library_items("lib movies", "Movie", 10).await.unwrap();
+
+    assert_eq!(found.items.len(), 1);
+    assert_eq!(found.total_record_count, Some(1));
+    assert!(!found.truncated);
+    assert_eq!(found.items[0].id.as_deref(), Some("movie-1"));
+    assert_eq!(found.items[0].item_type.as_deref(), Some("Movie"));
+    assert_eq!(found.items[0].production_year, Some(2026));
+    assert_eq!(found.items[0].provider_id("Tmdb").as_deref(), Some("123"));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("GET /Items?"), "{}", requests[0]);
+    assert!(
+        requests[0].contains("ParentId=lib%20movies") || requests[0].contains("ParentId=lib+movies"),
+        "{}",
+        requests[0]
+    );
+    assert!(requests[0].contains("IncludeItemTypes=Movie"), "{}", requests[0]);
+    assert!(
+        requests[0].contains("Fields=Path%2CProductionYear%2CProviderIds")
+            || requests[0].contains("Fields=Path,ProductionYear,ProviderIds"),
+        "{}",
+        requests[0]
+    );
+}
+
 async fn spawn_fake_emby_many(bodies: Vec<&'static str>) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

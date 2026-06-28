@@ -47,6 +47,8 @@ pub struct EmbyItem {
     pub item_type: Option<String>,
     #[serde(rename = "Path")]
     pub path: Option<String>,
+    #[serde(rename = "ProductionYear")]
+    pub production_year: Option<i32>,
     #[serde(rename = "ImageTags", default)]
     pub image_tags: BTreeMap<String, Value>,
     #[serde(rename = "ProviderIds", default)]
@@ -282,6 +284,57 @@ impl EmbyClient {
         Ok(items)
     }
 
+    pub async fn library_items(
+        &self,
+        parent_id: &str,
+        item_types: &str,
+        limit: usize,
+    ) -> anyhow::Result<EmbyItemsResult> {
+        if parent_id.trim().is_empty() {
+            bail!("parent_id is required for Emby item listing");
+        }
+        if item_types.trim().is_empty() {
+            bail!("item_types is required for Emby item listing");
+        }
+        let limit = limit.clamp(1, 30_000);
+        let mut start = 0usize;
+        let mut items = Vec::new();
+        let mut total_record_count = None;
+
+        while items.len() < limit {
+            let page_limit = (limit - items.len()).min(1000);
+            let page = self
+                .items_page(
+                    parent_id,
+                    item_types,
+                    "Path,ProductionYear,ProviderIds",
+                    start,
+                    page_limit,
+                )
+                .await?;
+            if total_record_count.is_none() {
+                total_record_count = page.total_record_count;
+            }
+            if page.items.is_empty() {
+                break;
+            }
+            start += page.items.len();
+            items.extend(page.items);
+            if let Some(total) = total_record_count
+                && start >= total
+            {
+                break;
+            }
+        }
+
+        let truncated = total_record_count.is_some_and(|total| items.len() < total);
+        Ok(EmbyItemsResult {
+            items,
+            total_record_count,
+            truncated,
+        })
+    }
+
     pub async fn episodes(&self, series_id: &str) -> anyhow::Result<Vec<EmbyEpisode>> {
         if series_id.trim().is_empty() {
             bail!("series_id is required for Emby episode listing");
@@ -344,15 +397,36 @@ impl EmbyClient {
     }
 
     pub async fn notify_media_deleted(&self, path: &str) -> anyhow::Result<u16> {
-        if path.trim().is_empty() {
-            bail!("path is required for Emby media deleted notification");
+        self.notify_media_updated([(path, "Deleted")]).await
+    }
+
+    pub async fn notify_media_updated<I, P, U>(&self, updates: I) -> anyhow::Result<u16>
+    where
+        I: IntoIterator<Item = (P, U)>,
+        P: AsRef<str>,
+        U: AsRef<str>,
+    {
+        let updates = updates
+            .into_iter()
+            .map(|(path, update_type)| {
+                let path = path.as_ref().trim();
+                let update_type = update_type.as_ref().trim();
+                if path.is_empty() {
+                    bail!("path is required for Emby media update notification");
+                }
+                if update_type.is_empty() {
+                    bail!("update_type is required for Emby media update notification");
+                }
+                Ok(serde_json::json!({
+                    "Path": path,
+                    "UpdateType": update_type,
+                }))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        if updates.is_empty() {
+            bail!("updates must not be empty for Emby media update notification");
         }
-        let body = serde_json::json!({
-            "Updates": [{
-                "Path": path.trim(),
-                "UpdateType": "Deleted"
-            }]
-        });
+        let body = serde_json::json!({ "Updates": updates });
         self.post_json_status("/Library/Media/Updated", &body).await
     }
 

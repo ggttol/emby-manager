@@ -39,6 +39,32 @@ pub struct LibrariesResponse {
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct LibraryItemsQuery {
+    pub lib: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct LibraryItemEntry {
+    pub id: Option<String>,
+    pub name: String,
+    pub item_type: Option<String>,
+    pub year: Option<i32>,
+    pub tmdb: String,
+    pub folder: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct LibraryItemsResponse {
+    pub lib: String,
+    pub item_types: String,
+    pub total_record_count: Option<usize>,
+    pub truncated: bool,
+    pub items: Vec<LibraryItemEntry>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct StrmListQuery {
     pub lib: Option<String>,
     pub folder: Option<String>,
@@ -235,6 +261,7 @@ pub struct ManageDeleteBatchItemResult {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/libraries", get(libraries))
+        .route("/api/v2/libraries/items", get(library_items))
         .route("/api/v2/libraries/scan", post(scan_library))
         .route("/api/v2/libraries/strm", get(list_strm))
         .route("/api/v2/manage/delete", post(manage_delete))
@@ -256,6 +283,60 @@ pub async fn libraries(State(state): State<AppState>) -> AppResult<Json<Librarie
     let client = EmbyClient::new(emby_url, api_key, state.http.clone());
     let libraries = client.libraries().await?;
     Ok(Json(LibrariesResponse { libraries }))
+}
+
+#[utoipa::path(get, path = "/api/v2/libraries/items", tag = "media", params(LibraryItemsQuery), responses((status = 200, body = LibraryItemsResponse)))]
+pub async fn library_items(
+    State(state): State<AppState>,
+    Query(query): Query<LibraryItemsQuery>,
+) -> AppResult<Json<LibraryItemsResponse>> {
+    let requested = query.lib.trim();
+    if requested.is_empty() {
+        return Err(AppError::BadRequest("lib is required".to_string()));
+    }
+
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    ensure_api_key_configured(&api_key)?;
+
+    let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+    let libraries = client.libraries().await?;
+    let library = libraries
+        .into_iter()
+        .find(|library| {
+            library.name == requested || library.id.as_deref().is_some_and(|id| id == requested)
+        })
+        .ok_or_else(|| AppError::BadRequest(format!("未知库 {requested}")))?;
+    let parent_id = library
+        .id
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .ok_or_else(|| AppError::BadRequest(format!("库 {} 缺少 Emby ItemId", library.name)))?;
+    let item_types = library_item_types(&library.library_type);
+    let result = client
+        .library_items(parent_id, item_types, query.limit.unwrap_or(30_000))
+        .await?;
+    let items = result
+        .items
+        .into_iter()
+        .map(|item| LibraryItemEntry {
+            tmdb: item.provider_id("Tmdb").unwrap_or_default(),
+            folder: folder_from_library_path(item.path.as_deref(), &library),
+            id: item.id,
+            name: item.name.unwrap_or_else(|| "(无名)".to_string()),
+            item_type: item.item_type,
+            year: item.production_year,
+            path: item.path,
+        })
+        .collect();
+
+    Ok(Json(LibraryItemsResponse {
+        lib: library.name,
+        item_types: item_types.to_string(),
+        total_record_count: result.total_record_count,
+        truncated: result.truncated,
+        items,
+    }))
 }
 
 #[utoipa::path(get, path = "/api/v2/libraries/strm", tag = "media", params(StrmListQuery), responses((status = 200, body = StrmListResponse)))]
@@ -524,6 +605,46 @@ fn ensure_api_key_configured(api_key: &str) -> AppResult<()> {
         ));
     }
     Ok(())
+}
+
+fn library_item_types(library_type: &str) -> &'static str {
+    if library_type.eq_ignore_ascii_case("tvshows") {
+        "Series"
+    } else {
+        "Movie"
+    }
+}
+
+fn folder_from_library_path(path: Option<&str>, library: &EmbyLibrary) -> String {
+    let Some(path) = path else {
+        return String::new();
+    };
+    for root in &library.paths {
+        let root = root.trim_end_matches('/');
+        if root.is_empty() {
+            continue;
+        }
+        if let Some(rest) = path.strip_prefix(root)
+            && let Some(rest) = rest.strip_prefix('/')
+        {
+            return rest.split('/').next().unwrap_or_default().to_string();
+        }
+    }
+    let library_folder = library
+        .paths
+        .iter()
+        .filter_map(|root| {
+            root.trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|value| !value.is_empty())
+        })
+        .next()
+        .unwrap_or(&library.name);
+    let sep = format!("/{library_folder}/");
+    path.split_once(&sep)
+        .map(|(_, rest)| rest.split('/').next().unwrap_or_default().to_string())
+        .unwrap_or_default()
 }
 
 fn spawn_manage_preview(

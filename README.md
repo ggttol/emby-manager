@@ -268,20 +268,48 @@ CREATE INDEX idx_catalog_link_type on catalog(link_type);
 
 ### Rust + Docker 预览版
 
-Rust/React 重构版使用 `Dockerfile` + `docker-compose.yml` 启动,默认只把宿主 `127.0.0.1:8098` 映射进容器,不会占用 legacy Python 版的 `8097`。
+Rust/React 重构版使用 `Dockerfile` + `docker-compose.yml` 启动,默认只把宿主 `127.0.0.1:8098` 映射进容器,不会占用 legacy Python 版的 `8097`。灰度时建议 **Python 8097 继续跑生产流量,Rust 8098 只给自己验收**,两个服务并行,不要直接替换反代入口。
+
+重要原则: **镜像在本地开发机 build,再传到 NAS;NAS 只 `docker load` + `docker compose up --no-build`,不在 NAS 上编译 Rust/React。** 不要在 NAS 上运行 `docker compose up --build`、`docker compose build` 或 `cargo build`。
+
+本地开发机:
 
 ```sh
-docker compose up -d --build
+cp .env.example .env
+# 编辑 .env: 至少改 EMBY_MANAGER_BOOTSTRAP_PASSWORD / POSTGRES_PASSWORD,
+# 如需访问 NAS bind mount,同步填 NAS 上有权限的 uid/gid 和路径。
+docker compose build emby-manager-rs
+docker save ghcr.io/ggttol/emby-manager:rs-dev | gzip > emby-manager-rs-dev.tar.gz
 ```
+
+把 `emby-manager-rs-dev.tar.gz`、`docker-compose.yml` 和你的 NAS `.env` 传到 NAS 上的灰度目录,例如 `/volume1/docker/emby-manager-rs/`。NAS 上只加载并启动:
+
+```sh
+cd /volume1/docker/emby-manager-rs
+gzip -dc emby-manager-rs-dev.tar.gz | docker load
+docker compose --env-file .env up -d --no-build
+```
+
+升级也是同样流程:本地重新 build/save,传 NAS,`docker load`,再 `docker compose up -d --no-build`。回滚/停止 Rust 灰度只用 `docker compose down`,**不要加 `-v`**,也不要删除 `postgres-data` volume;Postgres named volume 里有 Rust 版用户、会话、迁移状态等运行数据。
 
 默认挂载:
 
 - legacy 数据: `./legacy` → `/legacy`(只读,供迁移读取 `config.json` / `undo_log.jsonl` / `catalog_115.db`;真实迁移时用 `.env` 指到旧目录)
 - 本地数据: `./data` → `/data`
-- strm 根目录: `/volume1/strm` → `/strm`(默认只读灰度;确认要让 Rust 写入时再设 `EMBY_MANAGER_STRM_MODE=rw`)
-- CloudDrive2 媒体根: `/volume1/docker/clouddrive2/CloudNAS/CloudDrive` → `/media`(只读)
+- strm 根目录: `/volume1/strm` → `/strm`(默认只读灰度;Rust 已有真实 STRM 写入、删除、移动、清空目录能力,要写 STRM 或执行 cleanup/delete/move 才设 `EMBY_MANAGER_STRM_MODE=rw`)
+- CloudDrive2 媒体根: `/volume1/docker/clouddrive2/CloudNAS/CloudDrive` → `/media`(默认只读;只有确认要让 Rust 对媒体/CD 根执行真实删除或移动时,才设 `EMBY_MANAGER_MEDIA_MODE=rw`)
 
-可通过 `.env` 覆盖 `EMBY_MANAGER_BIND_IP`、`EMBY_MANAGER_HTTP_PORT`、`EMBY_MANAGER_LEGACY_DIR`、`EMBY_MANAGER_DATA_DIR`、`EMBY_MANAGER_STRM_ROOT`、`EMBY_MANAGER_STRM_MODE`、`EMBY_MANAGER_MEDIA_ROOT`、`EMBY_MANAGER_UID`、`EMBY_MANAGER_GID`、`POSTGRES_PASSWORD` 和 `EMBY_MANAGER_BOOTSTRAP_PASSWORD`。
+权限建议:
+
+| 场景 | `/strm` | `/media` / CD 根 |
+|---|---|---|
+| 只看面板、读配置、扫描验证 | `ro` | `ro` |
+| 生成 / 删除 / 移动 STRM、清空 STRM 空目录 | `rw` | `ro` |
+| 对 CloudDrive2 媒体根执行真实删除 / 移动 | 按需 `rw` | `rw` |
+
+危险能力必须显式打开:默认 `ro` 是为了灰度时把 Rust 的文件系统写入挡在 Docker bind mount 外。打开 `rw` 前确认目标目录、uid/gid 和操作范围,尤其不要把 CloudDrive2 根误配成可写后直接跑批量删除。
+
+可通过 `.env` 覆盖 `EMBY_MANAGER_BIND_IP`、`EMBY_MANAGER_HTTP_PORT`、`EMBY_MANAGER_LEGACY_DIR`、`EMBY_MANAGER_DATA_DIR`、`EMBY_MANAGER_STRM_ROOT`、`EMBY_MANAGER_STRM_MODE`、`EMBY_MANAGER_MEDIA_ROOT`、`EMBY_MANAGER_MEDIA_MODE`、`EMBY_MANAGER_UID`、`EMBY_MANAGER_GID`、`POSTGRES_PASSWORD` 和 `EMBY_MANAGER_BOOTSTRAP_PASSWORD`。
 
 ```env
 # 默认是 127.0.0.1,建议经 NAS 反代访问;确需局域网直连再改成 0.0.0.0
@@ -292,6 +320,10 @@ POSTGRES_PASSWORD=改成随机强密码
 # 如果 NAS bind mount 不是 world-readable,把这里改成有权读取 /volume1/strm 和 CloudDrive2 的宿主 uid/gid
 EMBY_MANAGER_UID=10001
 EMBY_MANAGER_GID=10001
+# 默认灰度只读。确认 Rust 要写 STRM 后才改 rw
+EMBY_MANAGER_STRM_MODE=ro
+# 默认灰度只读。确认 Rust 要真实删除/移动媒体根后才改 rw
+EMBY_MANAGER_MEDIA_MODE=ro
 ```
 
 首次启动会创建 Rust 版 `admin` 用户。`EMBY_MANAGER_BOOTSTRAP_PASSWORD` 只在数据库里还没有用户时使用,且 Rust 服务会拒绝缺失、过短或明显弱的 bootstrap 密码。
@@ -366,8 +398,9 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 - **首次管理员:** 必须显式设置 `EMBY_MANAGER_BOOTSTRAP_PASSWORD`,服务会拒绝缺失、过短或明显弱密码。
 - **会话:** 登录发 HttpOnly cookie,React 前端只保存 CSRF/用户名,不把 Bearer token 存入 localStorage;Bearer 保留给后续显式 API/CLI 场景。
 - **CSRF:** cookie 模式下所有 POST/PUT/PATCH/DELETE 要带 `X-CSRF-Token`;未登录的 `/api/v2/*` 业务接口默认 401。
-- **运行用户:** Docker runtime 使用非 root 用户;`/media` 和默认 `/strm` 都按只读挂载,写能力需要显式 opt-in。
+- **运行用户:** Docker runtime 使用非 root 用户;`/media` 和默认 `/strm` 都按只读挂载,写 STRM/cleanup 或真实删除/移动能力需要显式 opt-in。
 - **NAS 权限:** Docker build/runtime 默认 uid/gid 是 `10001:10001`;Synology bind mount 保留宿主权限,可用 `.env` 的 `EMBY_MANAGER_UID` / `EMBY_MANAGER_GID` 对齐到有权读取媒体目录的 NAS 用户。
+- **Postgres 数据:** Rust 版状态在 compose named volume `postgres-data`;停止灰度用 `docker compose down`,不要 `down -v` 或手工删 volume。
 - **仍在预览:** Rust 版还没有 legacy 的登录限流、trusted proxy/XFF、CSP 全量头和 16 tab 功能齐平,上线前必须通过灰度验收。
 
 ## 已知未做(诚实清单)

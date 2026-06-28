@@ -1,5 +1,5 @@
 import { Bell, ChevronDown, ChevronUp, Copy, RefreshCw, XCircle } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
 import { Drawer } from './Drawer';
@@ -9,7 +9,20 @@ type TaskRun = components['schemas']['TaskRun'];
 type TaskListResponse = components['schemas']['TaskListResponse'];
 
 const active = new Set(['pending', 'running']);
+const terminal = new Set(['done', 'error', 'cancelled', 'interrupted']);
 type TaskFilter = 'all' | 'active' | 'done' | 'issue';
+
+export const TASK_COMPLETED_EVENT = 'emby-manager:task-completed';
+
+export type TaskCompleteDetail = {
+  task: TaskRun;
+  previousTask: TaskRun;
+  previousStatus: string;
+};
+
+type TaskCenterProps = {
+  onTaskComplete?: (detail: TaskCompleteDetail) => void;
+};
 
 const statusLabels: Record<string, string> = {
   pending: '排队',
@@ -82,7 +95,12 @@ function hasJsonPayload(value: unknown) {
   return true;
 }
 
-export function TaskCenter() {
+function isCompletedTransition(previous?: TaskRun, next?: TaskRun) {
+  if (!previous || !next) return false;
+  return active.has(previous.status) && terminal.has(next.status);
+}
+
+export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
   const [open, setOpen] = useState(false);
   const [tasks, setTasks] = useState<TaskRun[]>([]);
   const [activeCount, setActiveCount] = useState(0);
@@ -90,11 +108,37 @@ export function TaskCenter() {
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [filter, setFilter] = useState<TaskFilter>('all');
+  const knownTasksRef = useRef<Map<string, TaskRun>>(new Map());
+  const emittedIdsRef = useRef<Set<string>>(new Set());
   const toast = useToast();
 
-  const load = async (options: { silent?: boolean } = {}) => {
+  const emitCompletedTasks = useCallback((nextTasks: TaskRun[]) => {
+    const knownTasks = knownTasksRef.current;
+    const completed = nextTasks
+      .map((task) => ({ task, previousTask: knownTasks.get(task.id) }))
+      .filter(({ task, previousTask }) => (
+        isCompletedTransition(previousTask, task) && !emittedIdsRef.current.has(task.id)
+      ));
+
+    knownTasksRef.current = new Map(nextTasks.map((task) => [task.id, task]));
+
+    for (const { task, previousTask } of completed) {
+      if (!previousTask) continue;
+      emittedIdsRef.current.add(task.id);
+      const detail: TaskCompleteDetail = {
+        task,
+        previousTask,
+        previousStatus: previousTask.status
+      };
+      onTaskComplete?.(detail);
+      window.dispatchEvent(new CustomEvent<TaskCompleteDetail>(TASK_COMPLETED_EVENT, { detail }));
+    }
+  }, [onTaskComplete]);
+
+  const load = useCallback(async (options: { silent?: boolean } = {}) => {
     try {
       const data = await api<TaskListResponse>('/api/v2/tasks?limit=50');
+      emitCompletedTasks(data.tasks);
       setTasks(data.tasks);
       setActiveCount(data.active_count);
       setLoadError('');
@@ -105,7 +149,7 @@ export function TaskCenter() {
         toast.push(`任务中心加载失败：${message}`, 'error');
       }
     }
-  };
+  }, [emitCompletedTasks, toast]);
 
   useEffect(() => {
     load({ silent: true });
@@ -113,7 +157,7 @@ export function TaskCenter() {
       load({ silent: true });
     }, activeCount > 0 ? 900 : 5000);
     return () => window.clearInterval(timer);
-  }, [activeCount]);
+  }, [activeCount, load]);
 
   const pct = useMemo(() => {
     const running = tasks.filter((task) => active.has(task.status));

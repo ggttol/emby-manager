@@ -1,12 +1,14 @@
-import { ArrowRight, CheckCircle2, FileWarning, FolderInput, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { ArrowRight, CheckCircle2, FileWarning, FolderInput, ListChecks, RefreshCw, RotateCcw, Trash2 } from 'lucide-react';
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
 import { ConfirmDanger } from './Modal';
+import { TASK_COMPLETED_EVENT, type TaskCompleteDetail } from './TaskCenter';
 import { useToast } from './Toast';
 
 type EmbyLibrary = components['schemas']['EmbyLibrary'];
 type LibrariesResponse = components['schemas']['LibrariesResponse'];
+type ManageDeleteBatchRequest = components['schemas']['ManageDeleteBatchRequest'];
 type ManageDeleteRequest = components['schemas']['ManageDeleteRequest'];
 type ManageMoveRequest = components['schemas']['ManageMoveRequest'];
 type TaskRun = components['schemas']['TaskRun'];
@@ -56,6 +58,86 @@ function libraryOptions(libraries: EmbyLibrary[]) {
   return [...libraries].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
 }
 
+const manageRefreshKinds = new Set([
+  'manage_delete_execute',
+  'manage_delete_batch_execute',
+  'manage_move_execute'
+]);
+
+function shouldRefreshManage(task: TaskRun) {
+  return task.status === 'done' && manageRefreshKinds.has(task.kind);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function optionalText(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function parseBatchJsonItem(value: unknown, index: number): ManageDeleteRequest {
+  if (!isRecord(value)) throw new Error(`第 ${index + 1} 项不是对象`);
+  const lib = optionalText(value.lib);
+  const folder = optionalText(value.folder);
+  if (!lib || !folder) throw new Error(`第 ${index + 1} 项缺少 lib 或 folder`);
+  return {
+    lib,
+    folder,
+    item_id: optionalText(value.item_id),
+    reason: optionalText(value.reason)
+  };
+}
+
+function parseBatchLine(line: string, index: number): ManageDeleteRequest {
+  const delimiter = ['\t', '|', ','].find((item) => line.includes(item)) || '/';
+  const parts = line.split(delimiter).map((item) => item.trim()).filter(Boolean);
+  if (parts.length < 2) throw new Error(`第 ${index + 1} 行至少需要 lib 和 folder`);
+  const lib = parts[0];
+  const itemId = parts.length >= 3 ? parts[parts.length - 1] : '';
+  const folderParts = parts.length >= 3 ? parts.slice(1, -1) : parts.slice(1);
+  const folder = folderParts.join(delimiter).trim();
+  if (!lib || !folder) throw new Error(`第 ${index + 1} 行缺少 lib 或 folder`);
+  return {
+    lib,
+    folder,
+    item_id: itemId || null,
+    reason: null
+  };
+}
+
+function parseBatchDeleteInput(text: string, reason: string): ManageDeleteBatchRequest {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error('先填写批量删除内容');
+  const requestReason = optionalText(reason);
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e) {
+      throw new Error(`JSON 解析失败：${errorMessage(e)}`);
+    }
+    if (Array.isArray(parsed)) {
+      return {
+        items: parsed.map(parseBatchJsonItem),
+        reason: requestReason
+      };
+    }
+    if (isRecord(parsed) && Array.isArray(parsed.items)) {
+      return {
+        items: parsed.items.map(parseBatchJsonItem),
+        reason: optionalText(parsed.reason) || requestReason
+      };
+    }
+    throw new Error('JSON 需要是数组，或包含 items 数组的对象');
+  }
+  const items = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map(parseBatchLine);
+  return {
+    items,
+    reason: requestReason
+  };
+}
+
 export function ManagePanel() {
   const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
   const [undoItems, setUndoItems] = useState<UndoEntry[]>([]);
@@ -64,6 +146,9 @@ export function ManagePanel() {
   const [deleteFolder, setDeleteFolder] = useState('');
   const [deleteItemId, setDeleteItemId] = useState('');
   const [deleteReason, setDeleteReason] = useState('');
+  const [batchDeleteText, setBatchDeleteText] = useState('');
+  const [batchDeleteReason, setBatchDeleteReason] = useState('');
+  const [pendingBatchDelete, setPendingBatchDelete] = useState<ManageDeleteBatchRequest | null>(null);
   const [fromLib, setFromLib] = useState('');
   const [fromFolder, setFromFolder] = useState('');
   const [toLib, setToLib] = useState('');
@@ -71,8 +156,9 @@ export function ManagePanel() {
   const [moveItemId, setMoveItemId] = useState('');
   const [moveReason, setMoveReason] = useState('');
   const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState<'delete' | 'move' | null>(null);
+  const [submitting, setSubmitting] = useState<'delete' | 'move' | 'batch-delete' | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
   const [error, setError] = useState('');
   const [lastTask, setLastTask] = useState<TaskRun | null>(null);
   const [confirmMove, setConfirmMove] = useState(false);
@@ -80,14 +166,14 @@ export function ManagePanel() {
 
   const sortedLibraries = useMemo(() => libraryOptions(libraries), [libraries]);
 
-  const applyDefaultLibs = (next: EmbyLibrary[]) => {
+  const applyDefaultLibs = useCallback((next: EmbyLibrary[]) => {
     const first = libraryOptions(next)[0]?.name || '';
     setDeleteLib((value) => value || first);
     setFromLib((value) => value || first);
     setToLib((value) => value || first);
-  };
+  }, []);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
@@ -106,11 +192,22 @@ export function ManagePanel() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [applyDefaultLibs, toast]);
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
+
+  useEffect(() => {
+    const onTaskCompleted = (event: Event) => {
+      const detail = (event as CustomEvent<TaskCompleteDetail>).detail;
+      if (detail?.task && shouldRefreshManage(detail.task)) {
+        load();
+      }
+    };
+    window.addEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
+    return () => window.removeEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
+  }, [load]);
 
   const submitDelete = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -167,6 +264,45 @@ export function ManagePanel() {
       const message = errorMessage(e);
       setError(message);
       toast.push(`真实删除任务创建失败：${message}`, 'error');
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  const submitBatchDelete = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError('');
+    try {
+      const payload = parseBatchDeleteInput(batchDeleteText, batchDeleteReason);
+      if (payload.items.length === 0) {
+        toast.push('批量删除至少需要 1 项', 'warn');
+        return;
+      }
+      setPendingBatchDelete(payload);
+      setConfirmBatchDelete(true);
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`批量删除内容无效：${message}`, 'error');
+    }
+  };
+
+  const executeBatchDelete = async () => {
+    if (!pendingBatchDelete) return;
+    setConfirmBatchDelete(false);
+    setSubmitting('batch-delete');
+    setError('');
+    try {
+      const task = await api<TaskRun>('/api/v2/manage/delete/batch/execute', {
+        method: 'POST',
+        body: JSON.stringify(pendingBatchDelete)
+      });
+      setLastTask(task);
+      toast.push(`已创建批量真实删除任务：${task.label || task.kind}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`批量真实删除任务创建失败：${message}`, 'error');
     } finally {
       setSubmitting(null);
     }
@@ -262,6 +398,20 @@ export function ManagePanel() {
           )}
         />
       )}
+      {confirmBatchDelete && pendingBatchDelete && (
+        <ConfirmDanger
+          title="确认批量真实删除"
+          confirmText="确认批量删除"
+          onCancel={() => setConfirmBatchDelete(false)}
+          onConfirm={executeBatchDelete}
+          body={(
+            <div className="dangerCopy">
+              <p>将逐项执行真实删除，并由任务写入 undo 记录。</p>
+              <code>{pendingBatchDelete.items.length} 项 · {pendingBatchDelete.items[0]?.lib}/{pendingBatchDelete.items[0]?.folder}</code>
+            </div>
+          )}
+        />
+      )}
       {confirmMove && (
         <ConfirmDanger
           title="确认真实移动"
@@ -344,6 +494,33 @@ export function ManagePanel() {
             </button>
             <button type="button" className="btn danger" disabled={submitting !== null} onClick={() => setConfirmDelete(true)}>
               真实删除
+            </button>
+          </div>
+        </form>
+
+        <form className="manageForm" onSubmit={submitBatchDelete}>
+          <div className="manageFormHead">
+            <ListChecks size={18} />
+            <strong>批量删除</strong>
+          </div>
+          <label>
+            <span>批量项</span>
+            <textarea
+              className="input"
+              aria-label="批量删除内容"
+              value={batchDeleteText}
+              onChange={(event) => setBatchDeleteText(event.target.value)}
+              rows={7}
+              placeholder={'电影/旧电影/item-1\n电视剧/旧剧\n或 JSON: {"items":[{"lib":"电影","folder":"旧电影","item_id":"item-1"}]}'}
+            />
+          </label>
+          <label>
+            <span>批量原因</span>
+            <input className="input" aria-label="批量删除原因" value={batchDeleteReason} onChange={(event) => setBatchDeleteReason(event.target.value)} placeholder="可选，写入批量任务参数" />
+          </label>
+          <div className="inlineActions">
+            <button className="btn danger" disabled={submitting !== null}>
+              {submitting === 'batch-delete' ? '创建中' : '检查并确认批量删除'}
             </button>
           </div>
         </form>

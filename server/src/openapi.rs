@@ -16,6 +16,11 @@ use crate::{
         CatalogUnsupportedPlan,
     },
     config_store::{ConfigResponse, ConfigUpdateRequest},
+    dedup::{
+        DedupAnalysisResponse, DedupAutoAllItemResult, DedupAutoAllRequest, DedupAutoAllResponse,
+        DedupDeleteResult, DedupExecuteRequest, DedupExecuteResponse, DedupFolderRef, DedupGroup,
+        DedupReviewGroup, DedupRow, EmbyUpdate, ReplaceExecuteResponse, ReplaceRequest,
+    },
     emby::EmbyLibrary,
     gaps::{GapsScanLibRequest, GapsScanLibResult, GapsScanRow, SeasonGaps, SeriesGaps},
     insights::{
@@ -26,10 +31,11 @@ use crate::{
     },
     logs::{AppLogEntry, LogListQuery, LogListResponse},
     media_fs::{
-        LibrariesResponse, ManageDeleteBatchItemResult, ManageDeleteBatchRequest,
-        ManageDeleteBatchResult, ManageDeleteExecuteResult, ManageDeleteRequest,
-        ManageMoveExecuteResult, ManageMoveRequest, ManagePreviewResult, ScanLibraryItemResult,
-        ScanLibraryRequest, ScanLibraryResult, StrmEntry, StrmGenerateResult, StrmListResponse,
+        LibrariesResponse, LibraryItemEntry, LibraryItemsResponse, ManageDeleteBatchItemResult,
+        ManageDeleteBatchRequest, ManageDeleteBatchResult, ManageDeleteExecuteResult,
+        ManageDeleteRequest, ManageMoveExecuteResult, ManageMoveRequest, ManagePreviewResult,
+        ScanLibraryItemResult, ScanLibraryRequest, ScanLibraryResult, StrmEntry,
+        StrmGenerateResult, StrmListResponse,
     },
     posters::{
         PosterApplyRequest, PosterApplyResponse, PosterDetectRequest, PosterDetectResponse,
@@ -46,6 +52,15 @@ use crate::{
     users::{
         UpdateUserPolicyRequest, UpdateUserPolicyResponse, UserPolicySummary, UserSummary,
         UsersResponse,
+    },
+    wizard::{
+        AddNewItem, AddNewPlaceholderReport, AddNewReport, AddNewRequest, AddNewScanReport,
+        AddNewTarget, AddNewTargetReport, AddNewTransferAction, AddNewTransferItemReport,
+        AddNewTransferSummary,
+    },
+    zhuigeng::{
+        TmdbEpisodeSummary, ZhuigengGapRow, ZhuigengGapsSummaryResponse, ZhuigengItem,
+        ZhuigengScanAiringResponse, ZhuigengScanAiringRow, ZhuigengStatusResponse,
     },
 };
 use utoipa::OpenApi;
@@ -73,7 +88,12 @@ use utoipa::OpenApi;
         crate::catalog::catalog_search,
         crate::catalog::catalog_duplicates,
         crate::catalog::catalog_transfer_plan,
+        crate::dedup::duplicates,
+        crate::dedup::execute_dedup,
+        crate::dedup::replace_execute,
+        crate::dedup::auto_all,
         crate::media_fs::libraries,
+        crate::media_fs::library_items,
         crate::media_fs::scan_library,
         crate::media_fs::list_strm,
         crate::media_fs::preview_delete,
@@ -101,7 +121,11 @@ use utoipa::OpenApi;
         crate::insights::autostrm_status,
         crate::users::list_users,
         crate::users::get_user_policy,
-        crate::users::update_user_policy
+        crate::users::update_user_policy,
+        crate::wizard::add_new,
+        crate::zhuigeng::status,
+        crate::zhuigeng::scan_airing,
+        crate::zhuigeng::gaps_summary
     ),
     components(schemas(
         HealthResponse,
@@ -138,8 +162,24 @@ use utoipa::OpenApi;
         CatalogC115OfflinePlan,
         CatalogUnsupportedPlan,
         CatalogTransferPlanResponse,
+        DedupRow,
+        DedupGroup,
+        DedupReviewGroup,
+        DedupAnalysisResponse,
+        DedupFolderRef,
+        DedupExecuteRequest,
+        DedupDeleteResult,
+        DedupExecuteResponse,
+        ReplaceRequest,
+        EmbyUpdate,
+        ReplaceExecuteResponse,
+        DedupAutoAllRequest,
+        DedupAutoAllItemResult,
+        DedupAutoAllResponse,
         EmbyLibrary,
         LibrariesResponse,
+        LibraryItemEntry,
+        LibraryItemsResponse,
         ScanLibraryRequest,
         ScanLibraryResult,
         ScanLibraryItemResult,
@@ -216,7 +256,24 @@ use utoipa::OpenApi;
         UserSummary,
         UserPolicySummary,
         UpdateUserPolicyRequest,
-        UpdateUserPolicyResponse
+        UpdateUserPolicyResponse,
+        AddNewRequest,
+        AddNewItem,
+        AddNewTarget,
+        AddNewReport,
+        AddNewTargetReport,
+        AddNewTransferSummary,
+        AddNewTransferItemReport,
+        AddNewTransferAction,
+        AddNewScanReport,
+        AddNewPlaceholderReport,
+        ZhuigengStatusResponse,
+        ZhuigengItem,
+        TmdbEpisodeSummary,
+        ZhuigengScanAiringResponse,
+        ZhuigengScanAiringRow,
+        ZhuigengGapsSummaryResponse,
+        ZhuigengGapRow
     )),
     tags(
         (name = "health", description = "Runtime health"),
@@ -234,7 +291,10 @@ use utoipa::OpenApi;
         (name = "insights", description = "Read-only task and cleanup insights"),
         (name = "gaps", description = "Episode gap scanning APIs"),
         (name = "autostrm", description = "Auto STRM status APIs"),
-        (name = "users", description = "Emby user policy APIs")
+        (name = "users", description = "Emby user policy APIs"),
+        (name = "dedup", description = "Duplicate detection and replacement APIs"),
+        (name = "wizard", description = "One-shot add-new-resource APIs"),
+        (name = "zhuigeng", description = "Airing series and TMDb gap APIs")
     )
 )]
 pub struct ApiDoc;

@@ -1,7 +1,7 @@
 use crate::{
-    auth, autostrm, c115, catalog, config_store, error::AppResult, gaps, insights, logs, media_fs,
-    openapi::ApiDoc, posters, scheduler, settings::Settings, state::AppState, system, tasks, undo,
-    users,
+    auth, autostrm, c115, catalog, config_store, dedup, error::AppResult, gaps, insights, logs,
+    media_fs, openapi::ApiDoc, posters, scheduler, settings::Settings, state::AppState, system,
+    tasks, undo, users, wizard, zhuigeng,
 };
 use axum::{
     Json, Router,
@@ -55,6 +55,7 @@ pub fn router_with_state(state: AppState) -> Router {
         .merge(system::router())
         .merge(autostrm::router())
         .merge(c115::router())
+        .merge(dedup::router())
         .merge(media_fs::router())
         .merge(undo::router())
         .merge(logs::router())
@@ -62,6 +63,8 @@ pub fn router_with_state(state: AppState) -> Router {
         .merge(gaps::router())
         .merge(posters::router())
         .merge(users::router())
+        .merge(zhuigeng::router())
+        .merge(wizard::router())
         .with_state(state);
 
     api.fallback_service(ServeDir::new(web_dist).not_found_service(ServeFile::new(index)))

@@ -2,6 +2,7 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  Copy,
   Database,
   FileText,
   Gauge,
@@ -27,6 +28,11 @@ type StrmListResponse = components['schemas']['StrmListResponse'];
 type StrmOverview = components['schemas']['StrmOverview'];
 type SystemSummary = components['schemas']['SystemSummary'];
 type TaskHistorySummary = components['schemas']['TaskHistorySummary'];
+type DockerContainerSummary = components['schemas']['DockerContainerSummary'];
+type EmbyHealthSummary = components['schemas']['EmbyHealthSummary'];
+type HostMetrics = components['schemas']['HostMetrics'];
+type LoadAverage = components['schemas']['LoadAverage'];
+type MemorySummary = components['schemas']['MemorySummary'];
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -54,6 +60,38 @@ function bytes(value: number | null | undefined) {
   return `${next >= 10 || index === 0 ? next.toFixed(0) : next.toFixed(1)} ${units[index]}`;
 }
 
+function boolText(value: boolean | null | undefined) {
+  if (value == null) return '未知';
+  return value ? '是' : '否';
+}
+
+function statusTone(
+  status: string | null | undefined,
+  ok = false
+): 'neutral' | 'ok' | 'warn' | 'error' {
+  if (ok || status === 'ok' || status === 'online') return 'ok';
+  if (!status || status === 'checking') return 'neutral';
+  if (status === 'offline' || status === 'unavailable' || status === 'parse_error') return 'error';
+  return 'warn';
+}
+
+function badgeClass(tone: 'neutral' | 'ok' | 'warn' | 'error') {
+  if (tone === 'ok') return 'badge done';
+  if (tone === 'warn') return 'badge warn';
+  if (tone === 'error') return 'badge error';
+  return 'badge';
+}
+
+function memoryUsedBytes(memory?: MemorySummary | null) {
+  if (!memory) return null;
+  return Math.max(0, memory.total_bytes - memory.available_bytes);
+}
+
+function loadAverageText(load?: LoadAverage | null) {
+  if (!load) return '无 load average';
+  return `${load.one.toFixed(2)} / ${load.five.toFixed(2)} / ${load.fifteen.toFixed(2)}`;
+}
+
 function dateText(value?: string | null) {
   if (!value) return '无记录';
   const date = new Date(value);
@@ -76,6 +114,65 @@ function todoTone(severity: string) {
 function taskProblemCount(task?: TaskHistorySummary) {
   if (!task) return 0;
   return task.error + task.cancelled + task.interrupted + task.stale_running;
+}
+
+function buildSystemReport(system: SystemSummary | null) {
+  if (!system) return '';
+  const memory = system.host.memory;
+  const load = system.host.load_average;
+  const lines = [
+    'Emby Manager System Report',
+    `generated_at: ${new Date().toISOString()}`,
+    `ok: ${system.ok}`,
+    `version: ${system.version}`,
+    `rust_version: ${system.rust_version}`,
+    '',
+    '[Emby]',
+    `configured: ${system.emby.configured}`,
+    `status: ${system.emby.status}`,
+    `online: ${system.emby.online}`,
+    `http_status: ${system.emby.http_status ?? 'unknown'}`,
+    `server_name: ${system.emby.server_name || 'unknown'}`,
+    `version: ${system.emby.version || 'unknown'}`,
+    `base_url: ${system.emby.base_url || 'unknown'}`,
+    '',
+    '[Database]',
+    `status: ${system.database.status}`,
+    `current_database: ${system.database.current_database || 'unknown'}`,
+    `pool_size: ${system.database.pool_size}`,
+    `idle_connections: ${system.database.idle_connections}`,
+    `url: ${system.database.url || 'unknown'}`,
+    '',
+    '[Docker]',
+    `configured: ${system.docker.configured}`,
+    `available: ${system.docker.available}`,
+    `status: ${system.docker.status}`,
+    `docker_bin: ${system.docker.docker_bin}`,
+    `containers: ${system.docker.running}/${system.docker.total} running`,
+    ...system.docker.containers.map(
+      (container) =>
+        `- ${container.name} | ${container.image} | ${container.state} | ${container.status} | ${container.ports || 'no ports'}`
+    ),
+    '',
+    '[Host]',
+    `os: ${system.host.os}`,
+    `arch: ${system.host.arch}`,
+    `process_id: ${system.host.process_id}`,
+    `memory: ${memory ? `${bytes(memoryUsedBytes(memory))} used / ${bytes(memory.total_bytes)} total (${percent(memory.used_percent)})` : 'unknown'}`,
+    `load_average: ${load ? loadAverageText(load) : 'unknown'}`,
+    '',
+    '[Paths]',
+    ...system.configured_roots.map((path) => {
+      const disk = path.disk
+        ? ` | disk=${path.disk.mount_point} ${bytes(path.disk.available_bytes)} available ${percent(path.disk.used_percent)} used`
+        : '';
+      return `- ${path.key}: ${path.path} | exists=${path.exists} | readable=${path.readable ?? 'unknown'} | writable=${path.writable_hint ?? 'unknown'}${disk}`;
+    }),
+    '',
+    '[Warnings]',
+    ...(system.warnings.length ? system.warnings.map((warning) => `- ${warning}`) : ['none'])
+  ];
+  return lines.join('\n');
 }
 
 function StatCard({
@@ -258,6 +355,7 @@ export function SystemPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const toast = useToast();
+  const report = useMemo(() => buildSystemReport(system), [system]);
 
   const load = async () => {
     setLoading(true);
@@ -277,6 +375,27 @@ export function SystemPanel() {
     load();
   }, []);
 
+  const copyReport = async () => {
+    if (!system) {
+      toast.push('系统报告还没加载完成', 'warn');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(report);
+      toast.push('系统报告已复制', 'ok');
+    } catch (e) {
+      toast.push(`复制失败：${errorMessage(e)}`, 'error');
+    }
+  };
+
+  const roots = system?.configured_roots || [];
+  const healthyRoots = roots.filter((path) => path.exists && path.warnings.length === 0).length;
+  const memory = system?.host?.memory;
+  const loadAverage = system?.host?.load_average;
+  const embyTone = system?.emby ? statusTone(system.emby.status, system.emby.online) : 'neutral';
+  const dockerTone = system?.docker ? statusTone(system.docker.status, system.docker.status === 'ok') : 'neutral';
+  const pathTone = system && roots.length > 0 && healthyRoots === roots.length ? 'ok' : 'warn';
+
   return (
     <section className="readonlyPanel">
       <div className="readonlyToolbar">
@@ -284,27 +403,171 @@ export function SystemPanel() {
           <strong>系统健康</strong>
           <span>数据库、路径、磁盘和主机负载的实时只读状态。</span>
         </div>
-        <button className="btn ghost" onClick={load} disabled={loading}>
-          <RefreshCw size={16} />
-          {loading ? '加载中' : '刷新'}
-        </button>
+        <div className="readonlyToolbarActions">
+          <button className="btn ghost" onClick={copyReport} disabled={!system}>
+            <Copy size={16} />
+            复制系统报告
+          </button>
+          <button className="btn ghost" onClick={load} disabled={loading}>
+            <RefreshCw size={16} />
+            {loading ? '加载中' : '刷新'}
+          </button>
+        </div>
       </div>
       {error && <div className="notice warn">{error}</div>}
       <div className="statGrid">
         <StatCard icon={<CheckCircle2 />} label="整体" value={system?.ok ? '正常' : '需检查'} tone={system?.ok ? 'ok' : 'warn'} hint={system?.version || '等待数据'} />
+        <StatCard icon={<Server />} label="Emby" value={system?.emby?.online ? '在线' : system?.emby?.configured ? '离线' : '未配置'} tone={embyTone} hint={system?.emby?.version || system?.emby?.server_name || '无版本'} />
+        <StatCard icon={<Server />} label="Docker" value={system?.docker ? `${count(system.docker.running)} / ${count(system.docker.total)}` : '未知'} tone={dockerTone} hint={system?.docker?.status || '等待数据'} />
+        <StatCard icon={<HardDrive />} label="路径" value={`${count(healthyRoots)} / ${count(roots.length)}`} tone={pathTone} hint="已配置根路径" />
         <StatCard icon={<Database />} label="Postgres" value={system?.database?.status || '未知'} tone={system?.database?.status === 'ok' ? 'ok' : 'warn'} hint={`${system?.database?.pool_size || 0} pool / ${system?.database?.idle_connections || 0} idle`} />
-        <StatCard icon={<Gauge />} label="内存" value={percent(system?.host?.memory?.used_percent)} hint={system?.host?.memory ? `${bytes(system.host.memory.available_bytes)} 可用` : '无主机数据'} />
-        <StatCard icon={<Activity />} label="负载" value={system?.host?.load_average ? system.host.load_average.one.toFixed(2) : '未知'} hint={system?.host?.load_average ? `${system.host.load_average.five.toFixed(2)} / ${system.host.load_average.fifteen.toFixed(2)}` : `${system?.host?.os || ''} ${system?.host?.arch || ''}`} />
+        <StatCard icon={<Gauge />} label="内存" value={percent(memory?.used_percent)} hint={memory ? `${bytes(memory.available_bytes)} 可用 / ${bytes(memory.total_bytes)}` : '无主机数据'} />
+        <StatCard icon={<Activity />} label="负载" value={loadAverage ? loadAverage.one.toFixed(2) : '未知'} hint={loadAverage ? `${loadAverage.five.toFixed(2)} / ${loadAverage.fifteen.toFixed(2)}` : `${system?.host?.os || ''} ${system?.host?.arch || ''}`} />
+        <StatCard icon={<FileText />} label="进程" value={system?.host?.process_id ? String(system.host.process_id) : '未知'} hint={`${system?.host?.os || 'unknown'} / ${system?.host?.arch || 'unknown'}`} />
       </div>
       <WarningList warnings={system?.warnings || []} />
+      <div className="systemDetailGrid">
+        <SystemEmbyBlock emby={system?.emby} />
+        <SystemDockerBlock docker={system?.docker} />
+      </div>
+      <SystemHostBlock host={system?.host} />
       <section className="readonlyBlock">
         <h2>路径与磁盘</h2>
+        <DiskMountList paths={roots} />
         <div className="pathGrid">
-          {(system?.configured_roots || []).map((path) => <PathCard key={path.key} path={path} />)}
+          {roots.map((path) => <PathCard key={path.key} path={path} />)}
+          {system && roots.length === 0 && <div className="empty inlineEmpty">没有配置根路径</div>}
         </div>
       </section>
       {system?.database?.warning && <div className="notice warn">{system.database.warning}</div>}
     </section>
+  );
+}
+
+function SystemEmbyBlock({ emby }: { emby?: EmbyHealthSummary }) {
+  if (!emby) {
+    return (
+      <section className="readonlyBlock">
+        <h2>Emby</h2>
+        <div className="empty inlineEmpty">等待 Emby 状态</div>
+      </section>
+    );
+  }
+  const tone = statusTone(emby.status, emby.online);
+  return (
+    <section className="readonlyBlock">
+      <div className="systemBlockHead">
+        <h2>Emby</h2>
+        <span className={badgeClass(tone)}>{emby.online ? 'online' : emby.status}</span>
+      </div>
+      <div className="systemKeyValueGrid">
+        <span><strong>版本</strong>{emby.version || '未知'}</span>
+        <span><strong>服务器</strong>{emby.server_name || '未返回'}</span>
+        <span><strong>HTTP</strong>{emby.http_status ? `HTTP ${emby.http_status}` : '无响应'}</span>
+        <span><strong>系统</strong>{emby.operating_system || '未知'}</span>
+        <span><strong>已配置</strong>{boolText(emby.configured)}</span>
+        <span><strong>Server ID</strong>{emby.server_id || '未返回'}</span>
+      </div>
+      <code className="systemCodeLine">{emby.base_url || '未配置 base_url'}</code>
+      {emby.warning && <div className="notice warn">{emby.warning}</div>}
+    </section>
+  );
+}
+
+function SystemDockerBlock({ docker }: { docker?: SystemSummary['docker'] }) {
+  if (!docker) {
+    return (
+      <section className="readonlyBlock">
+        <h2>Docker</h2>
+        <div className="empty inlineEmpty">等待 Docker 状态</div>
+      </section>
+    );
+  }
+  const tone = statusTone(docker.status, docker.status === 'ok');
+  return (
+    <section className="readonlyBlock">
+      <div className="systemBlockHead">
+        <h2>Docker</h2>
+        <span className={badgeClass(tone)}>{docker.status}</span>
+      </div>
+      <div className="miniStats systemMiniStats">
+        <span><strong>{count(docker.total)}</strong>容器总数</span>
+        <span><strong>{count(docker.running)}</strong>运行中</span>
+        <span><strong>{boolText(docker.available)}</strong>CLI 可用</span>
+        <span><strong>{boolText(docker.configured)}</strong>已配置</span>
+      </div>
+      <code className="systemCodeLine">{docker.docker_bin || '未配置 docker_bin'}</code>
+      {docker.warning && <div className="notice warn">{docker.warning}</div>}
+      <strong className="systemSubhead">容器列表</strong>
+      <DockerContainerList containers={docker.containers} />
+    </section>
+  );
+}
+
+function SystemHostBlock({ host }: { host?: HostMetrics }) {
+  if (!host) {
+    return (
+      <section className="readonlyBlock">
+        <h2>主机指标</h2>
+        <div className="empty inlineEmpty">等待主机指标</div>
+      </section>
+    );
+  }
+  const memory = host.memory;
+  return (
+    <section className="readonlyBlock">
+      <h2>主机指标</h2>
+      <div className="systemKeyValueGrid">
+        <span><strong>OS / Arch</strong>{host.os} / {host.arch}</span>
+        <span><strong>进程 PID</strong>{host.process_id}</span>
+        <span><strong>内存总量</strong>{memory ? bytes(memory.total_bytes) : '未知'}</span>
+        <span><strong>内存已用</strong>{memory ? `${bytes(memoryUsedBytes(memory))} (${percent(memory.used_percent)})` : '未知'}</span>
+        <span><strong>内存可用</strong>{memory ? bytes(memory.available_bytes) : '未知'}</span>
+        <span><strong>Load 1 / 5 / 15</strong>{loadAverageText(host.load_average)}</span>
+      </div>
+    </section>
+  );
+}
+
+function DockerContainerList({ containers }: { containers: DockerContainerSummary[] }) {
+  if (!containers.length) return <div className="empty inlineEmpty">没有 Docker 容器数据</div>;
+  return (
+    <div className="containerList">
+      {containers.map((container) => {
+        const running = container.state.toLowerCase() === 'running';
+        return (
+          <article key={container.id || container.name} className="containerItem">
+            <div>
+              <strong>{container.name}</strong>
+              <span className={badgeClass(running ? 'ok' : 'warn')}>{container.state || 'unknown'}</span>
+            </div>
+            <code>{container.image}</code>
+            <small>{container.status || '无状态'} · {container.ports || '无端口映射'}</small>
+            <small>{container.id}</small>
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function DiskMountList({ paths }: { paths: PathStatus[] }) {
+  const mounts = new Map<string, NonNullable<PathStatus['disk']>>();
+  paths.forEach((path) => {
+    if (!path.disk) return;
+    mounts.set(`${path.disk.filesystem}:${path.disk.mount_point}`, path.disk);
+  });
+  const disks = Array.from(mounts.values());
+  if (!disks.length) return <div className="empty inlineEmpty">没有磁盘挂载数据</div>;
+  return (
+    <div className="miniStats systemMiniStats">
+      {disks.map((disk) => (
+        <span key={`${disk.filesystem}:${disk.mount_point}`}>
+          <strong>{disk.mount_point}</strong>
+          {bytes(disk.available_bytes)} 可用 / {bytes(disk.total_bytes)} · {percent(disk.used_percent)} 已用
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -315,9 +578,9 @@ function PathCard({ path }: { path: PathStatus }) {
       <div>
         <HardDrive size={17} />
         <strong>{path.label}</strong>
-        <span className={`badge ${tone}`}>{path.exists ? '存在' : '缺失'}</span>
+        <span className={badgeClass(tone)}>{path.exists ? '存在' : '缺失'}</span>
       </div>
-      <code>{path.path}</code>
+      <code title={path.path}>{path.path}</code>
       <small>{path.expected_kind} · readable {String(path.readable ?? 'unknown')} · writable {String(path.writable_hint ?? 'unknown')}</small>
       {path.disk && (
         <small>{path.disk.mount_point} · {bytes(path.disk.available_bytes)} 可用 · {percent(path.disk.used_percent)} 已用</small>

@@ -1554,6 +1554,12 @@ main {
   font-size: 13px;
 }
 
+.readonlyToolbarActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .statGrid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1626,6 +1632,57 @@ main {
 .readonlyBlock h2 {
   margin: 0;
   font-size: 16px;
+}
+
+.systemDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.systemBlockHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.systemKeyValueGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.systemKeyValueGrid span {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.systemKeyValueGrid strong {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.systemCodeLine {
+  display: block;
+  min-width: 0;
+  padding: 9px 10px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .todoList,
@@ -1706,6 +1763,15 @@ main {
   font-size: 15px;
 }
 
+.systemMiniStats {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.systemSubhead {
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
 .issueList article {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1771,6 +1837,48 @@ main {
 
 .pathCard.warn {
   border-color: #edcf95;
+}
+
+.containerList {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.containerItem {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.containerItem > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.containerItem strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.containerItem code,
+.containerItem small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .readonlyFilter {
@@ -2713,8 +2821,11 @@ main {
   .logsTabs,
   .undoResult dl,
   .readonlyToolbar,
+  .readonlyToolbarActions,
   .statGrid,
   .miniStats,
+  .systemDetailGrid,
+  .systemKeyValueGrid,
   .pathGrid,
   .readonlyFilter,
   .readonlySplit,

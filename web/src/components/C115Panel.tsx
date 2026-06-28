@@ -18,6 +18,8 @@ type C115SnapResponse = components['schemas']['C115SnapResponse'];
 type C115TestResponse = components['schemas']['C115TestResponse'];
 type C115AutoCidResponse = components['schemas']['C115AutoCidResponse'];
 type ConfigResponse = components['schemas']['ConfigResponse'];
+type AddNewItem = components['schemas']['AddNewItem'];
+type AddNewRequest = components['schemas']['AddNewRequest'];
 type TaskRun = components['schemas']['TaskRun'];
 
 type InputLine = {
@@ -68,6 +70,10 @@ function parseLines(value: string): InputLine[] {
 function isOfflineUrl(url: string) {
   const normalized = url.trim().toLowerCase();
   return normalized.startsWith('magnet:') || normalized.startsWith('ed2k://');
+}
+
+function inferAddNewKind(url: string): NonNullable<AddNewItem['kind']> {
+  return isOfflineUrl(url) ? 'offline_download' : 'share115';
 }
 
 function pwdFromUrl(url: string) {
@@ -122,6 +128,8 @@ export function C115Panel() {
   const [previewing, setPreviewing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [offlining, setOfflining] = useState(false);
+  const [wizarding, setWizarding] = useState(false);
+  const [wizardDelayMs, setWizardDelayMs] = useState('500');
   const [scanning, setScanning] = useState(false);
   const [autoDetecting, setAutoDetecting] = useState(false);
   const [progressText, setProgressText] = useState('');
@@ -130,7 +138,16 @@ export function C115Panel() {
   const cidEntries = useMemo(() => Object.entries(cidMap).sort(([a], [b]) => a.localeCompare(b, 'zh-CN')), [cidMap]);
   const selectableFiles = useMemo(() => snap?.files.filter((file) => file.id) || [], [snap]);
   const allFilesSelected = selectableFiles.length > 0 && selectedFileIds.size === selectableFiles.length;
-  const busy = previewing || saving || offlining || scanning || autoDetecting;
+  const wizardStats = useMemo(() => {
+    const lines = [...parseLines(shareText), ...parseLines(offlineText)];
+    const offline = lines.filter((line) => isOfflineUrl(line.url)).length;
+    return { total: lines.length, share: lines.length - offline, offline };
+  }, [shareText, offlineText]);
+  const currentTargetLabel = customCid.trim() ? `cid ${customCid.trim()}` : targetLib ? `库「${targetLib}」` : '未选目标';
+  const wizardSummary = wizardStats.total
+    ? `${wizardStats.total} 项 · 分享 ${wizardStats.share} · 离线 ${wizardStats.offline} · ${currentTargetLabel}`
+    : `等待链接 · ${currentTargetLabel}`;
+  const busy = previewing || saving || offlining || wizarding || scanning || autoDetecting;
 
   const loadMeta = async () => {
     setLoadingMeta(true);
@@ -335,6 +352,82 @@ export function C115Panel() {
     }
   };
 
+  const parseWizardDelay = () => {
+    const raw = wizardDelayMs.trim();
+    if (!raw) return 0;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+      toast.push('delay_ms 必须是非负整数', 'warn');
+      return null;
+    }
+    return value;
+  };
+
+  const createAddNewWizardTask = async () => {
+    const target = parseTarget();
+    if (!target) return;
+    const delayMs = parseWizardDelay();
+    if (delayMs == null) return;
+
+    const lines = [...parseLines(shareText), ...parseLines(offlineText)];
+    if (!lines.length) {
+      toast.push('先贴分享链接或离线链接', 'warn');
+      return;
+    }
+
+    const shareLines = lines.filter((line) => !isOfflineUrl(line.url));
+    if (
+      shareLines.length === 1 &&
+      snapSource?.url === shareLines[0].url &&
+      selectableFiles.length > 0 &&
+      selectedFileIds.size === 0
+    ) {
+      toast.push('预览分享至少勾选一个文件', 'warn');
+      return;
+    }
+
+    const items = lines.map((line): AddNewItem => {
+      const kind = inferAddNewKind(line.url);
+      const isShare = kind === 'share115';
+      const canUseFileSubset =
+        isShare &&
+        shareLines.length === 1 &&
+        snapSource?.url === line.url &&
+        selectableFiles.length > 0 &&
+        selectedFileIds.size !== selectableFiles.length;
+      const pwd = isShare ? resolvePwd(line, defaultPwd) : undefined;
+      return {
+        url: line.url,
+        kind,
+        label: isShare && snapSource?.url === line.url && snap?.share_title ? snap.share_title : line.url,
+        pwd,
+        file_ids: canUseFileSubset ? Array.from(selectedFileIds) : undefined
+      };
+    });
+
+    const request: AddNewRequest = {
+      items,
+      delay_ms: delayMs,
+      ...(target.cid ? { cid: target.cid } : { lib: target.lib })
+    };
+
+    setWizarding(true);
+    setError('');
+    try {
+      const task = await api<TaskRun>('/api/v2/wizard/add-new', {
+        method: 'POST',
+        body: JSON.stringify(request)
+      });
+      toast.push(`一条龙任务已创建：${taskSummary(task)}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`创建一条龙任务失败：${message}`, 'error');
+    } finally {
+      setWizarding(false);
+    }
+  };
+
   const scanTarget = async () => {
     if (!targetLib || customCid.trim()) {
       toast.push('扫库需要选择已配置的目标库，不能只填 cid', 'warn');
@@ -506,6 +599,27 @@ export function C115Panel() {
         <button className="btn ghost" onClick={createOfflineTasks} disabled={busy}>
           <RadioTower size={16} />
           {offlining ? '提交中' : '创建离线任务'}
+        </button>
+      </div>
+
+      <div className="c115TargetBar">
+        <label>
+          <span>一条龙加新资源</span>
+          <input className="input" aria-label="一条龙加新资源条目" readOnly value={wizardSummary} />
+        </label>
+        <label>
+          <span>delay_ms</span>
+          <input
+            className="input"
+            aria-label="一条龙 delay_ms"
+            inputMode="numeric"
+            value={wizardDelayMs}
+            onChange={(event) => setWizardDelayMs(event.target.value)}
+          />
+        </label>
+        <button className="btn" onClick={createAddNewWizardTask} disabled={busy}>
+          <DownloadCloud size={16} />
+          {wizarding ? '创建中' : '创建一条龙任务'}
         </button>
       </div>
 

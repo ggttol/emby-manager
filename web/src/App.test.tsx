@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import App from './App';
 import { api, clearAuthSession, getAuthSession, setAuthSession } from './api/client';
@@ -66,6 +66,16 @@ function mockApi(handler?: ApiHandler) {
   });
 }
 
+function getTaskCenterDrawer() {
+  const drawer = screen.getByRole('heading', { name: '任务中心' }).closest('aside');
+  expect(drawer).not.toBeNull();
+  return drawer as HTMLElement;
+}
+
+function clickTaskCenterRefresh() {
+  fireEvent.click(within(getTaskCenterDrawer()).getByRole('button', { name: '刷新' }));
+}
+
 const systemSummary = {
   ok: false,
   version: '0.1.0',
@@ -84,6 +94,35 @@ const systemSummary = {
     server_version: 'PostgreSQL 16',
     pool_size: 5,
     idle_connections: 2,
+    warning: null
+  },
+  emby: {
+    base_url: 'http://emby:8096/emby',
+    configured: true,
+    http_status: 200,
+    online: true,
+    operating_system: 'Linux',
+    server_id: 'emby-server',
+    server_name: 'NAS Emby',
+    status: 'ok',
+    version: '4.9.5',
+    warning: null
+  },
+  docker: {
+    available: true,
+    configured: true,
+    containers: [{
+      id: 'container-1',
+      image: 'emby-manager:latest',
+      name: 'emby-manager',
+      ports: '8097/tcp',
+      state: 'running',
+      status: 'Up'
+    }],
+    docker_bin: '/usr/local/bin/docker',
+    running: 1,
+    status: 'ok',
+    total: 1,
     warning: null
   },
   host: {
@@ -237,6 +276,85 @@ const gapsSummary = {
   autostrm: cleanupSummary.autostrm,
   todos: [{ severity: 'low', area: 'catalog', message: '缺集只读预检', count: 1, source: 'catalog_items' }],
   warnings: []
+};
+
+const zhuigengStatus = {
+  ok: true,
+  continuing: 1,
+  ended: 1,
+  total: 2,
+  copy_text: '求 示例剧 [tmdb:100] — S01 E3',
+  items: [
+    {
+      lib: '剧集',
+      name: '示例剧',
+      id: 'series-100',
+      folder: '示例剧 [tmdb-100]',
+      tmdb: '100',
+      tmdb_status: 'Returning Series',
+      state: 'continuing',
+      continuing: true,
+      ended: false,
+      local_count: 2,
+      local_latest: '2026-06-21',
+      local_latest_episode: 'S01E02',
+      last_episode_to_air: { season_number: 1, episode_number: 3, air_date: '2026-06-28', name: '第三集' },
+      next_episode_to_air: { season_number: 1, episode_number: 4, air_date: '2026-07-05', name: '第四集' },
+      behind: 1,
+      behind_hint: '落后 1 集',
+      resource_hint: 'S01 E3',
+      err: null
+    },
+    {
+      lib: '剧集',
+      name: '完结剧',
+      id: 'series-200',
+      folder: '完结剧 [tmdb-200]',
+      tmdb: '200',
+      tmdb_status: 'Ended',
+      state: 'ended',
+      continuing: false,
+      ended: true,
+      local_count: 10,
+      local_latest: '2026-01-01',
+      local_latest_episode: 'S01E10',
+      last_episode_to_air: null,
+      next_episode_to_air: null,
+      behind: 0,
+      behind_hint: null,
+      resource_hint: null,
+      err: null
+    }
+  ]
+};
+
+const zhuigengScanAiring = {
+  ok: true,
+  total: 1,
+  note: '最小 TMDb 语义版',
+  copy_text: '求 示例剧 [tmdb:100] — S01 E3',
+  results: [
+    {
+      lib: '剧集',
+      name: '示例剧',
+      id: 'series-100',
+      tmdb: '100',
+      status: 'Returning Series',
+      behind: 1,
+      hint: 'S01 E3',
+      ok: true,
+      err: null
+    }
+  ]
+};
+
+const zhuigengGaps = {
+  ok: true,
+  total: 1,
+  copy_text: '求 示例剧 [tmdb:100] — S01 E3',
+  items: [
+    { lib: '剧集', name: '示例剧', id: 'series-100', tmdb: '100', fmt: 'S01 E3', behind: 1 }
+  ]
 };
 
 describe('App shell', () => {
@@ -769,10 +887,33 @@ describe('App shell', () => {
     await waitFor(() => expect(batchPayloads).toEqual([{ ids: ['item-2'], type: 'Series' }]));
   });
 
-  it('renders zhuigeng readonly and starts real gaps library scans', async () => {
+  it('renders zhuigeng live list and starts real gaps library scans', async () => {
     const calls: string[] = [];
+    let scanAiringCalled = false;
+    let gapsSummaryCalled = false;
     let scanPayload: unknown = null;
     mockApi((url, init) => {
+      if (url.pathname === '/api/v2/zhuigeng') {
+        expect(init?.method || 'GET').toBe('GET');
+        calls.push(url.pathname);
+        return jsonResponse(zhuigengStatus);
+      }
+      if (url.pathname === '/api/v2/zhuigeng/scan-airing') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        scanAiringCalled = true;
+        calls.push(url.pathname);
+        return jsonResponse(zhuigengScanAiring);
+      }
+      if (url.pathname === '/api/v2/zhuigeng/gaps-summary') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        gapsSummaryCalled = true;
+        calls.push(url.pathname);
+        return jsonResponse(zhuigengGaps);
+      }
       if (url.pathname === '/api/v2/gaps/scan') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
@@ -845,8 +986,18 @@ describe('App shell', () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole('button', { name: '追更检查' }));
-    expect(await screen.findByText('追更只读预检')).toBeInTheDocument();
-    expect(screen.getByText(/当前 Rust 版没有独立追更扫描接口/)).toBeInTheDocument();
+    expect(await screen.findByText('追更 copy_text')).toBeInTheDocument();
+    expect(screen.queryByText(/当前 Rust 版没有独立追更扫描接口/)).not.toBeInTheDocument();
+    expect(screen.getByText('示例剧')).toBeInTheDocument();
+    expect(screen.getByText('完结剧')).toBeInTheDocument();
+    expect(screen.getByText('求 示例剧 [tmdb:100] — S01 E3')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'scan-airing' }));
+    await waitFor(() => expect(scanAiringCalled).toBe(true));
+    expect(await screen.findByText('在更扫描结果')).toBeInTheDocument();
+    expect(screen.getByText('最小 TMDb 语义版')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'gaps-summary' }));
+    await waitFor(() => expect(gapsSummaryCalled).toBe(true));
+    expect(await screen.findByText('追更缺集汇总')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '缺集检查' }));
     expect(await screen.findByText('缺集扫描')).toBeInTheDocument();
@@ -861,14 +1012,20 @@ describe('App shell', () => {
     await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(2));
   });
 
-  it('renders cleanup and dedup readonly summaries through cleanup suggest', async () => {
+  it('renders cleanup and dedup duplicates with minimal execute flow', async () => {
     const calls: string[] = [];
     const emptyPayloads: unknown[] = [];
+    let replacePayload: unknown = null;
+    let autoAllCalled = false;
+    let cleanupSuggestCalls = 0;
+    let cleanupTaskStarted = false;
+    let cleanupTaskPolls = 0;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/cleanup/suggest') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        cleanupSuggestCalls += 1;
         calls.push(url.pathname);
         return jsonResponse(cleanupSummary);
       }
@@ -880,6 +1037,7 @@ describe('App shell', () => {
         emptyPayloads.push(payload);
         calls.push(url.pathname);
         if (payload.execute) {
+          cleanupTaskStarted = true;
           return jsonResponse({
             ok: true,
             dry_run: false,
@@ -921,31 +1079,84 @@ describe('App shell', () => {
           task: null
         });
       }
-      if (url.pathname === '/api/v2/catalog/duplicates') {
+      if (url.pathname === '/api/v2/tasks') {
+        if (!cleanupTaskStarted) {
+          return jsonResponse({ active_count: 0, tasks: [] });
+        }
+        cleanupTaskPolls += 1;
+        const done = cleanupTaskPolls >= 2;
+        return jsonResponse({
+          active_count: done ? 0 : 1,
+          tasks: [{
+            id: 'abababab-abab-4aba-8aba-abababababab',
+            kind: 'cleanup_empty_strm_dirs',
+            label: '清理空 STRM 目录',
+            status: done ? 'done' : 'running',
+            progress: done ? 1 : 0,
+            total: 1,
+            source: 'manual',
+            params: { execute: true },
+            status_text: done ? '完成' : '清理中',
+            result: done ? { ok: true, deleted: 1 } : null,
+            error: null,
+            cancel_requested: false,
+            queued_at: '2026-06-28T00:00:00Z',
+            started_at: '2026-06-28T00:00:01Z',
+            ended_at: done ? '2026-06-28T00:00:02Z' : null,
+            updated_at: done ? '2026-06-28T00:00:02Z' : '2026-06-28T00:00:01Z'
+          }]
+        });
+      }
+      if (url.pathname === '/api/v2/dedup/duplicates') {
+        calls.push(url.pathname);
+        return jsonResponse({
+          dups: [{
+            tmdb: '100',
+            keep: { lib: '剧集', folder: '示例剧 [tmdb-100]', score: 10, n: 12 },
+            remove: [{ lib: '剧集', folder: '示例剧 重复 [tmdb-100]', score: 4, n: 12 }]
+          }],
+          review: [{
+            tmdb: '200',
+            why: '分数接近，需要人工确认',
+            rows: [
+              { lib: '剧集', folder: '复核剧 A [tmdb-200]', score: 8, n: 10 },
+              { lib: '剧集', folder: '复核剧 B [tmdb-200]', score: 7, n: 10 }
+            ]
+          }]
+        });
+      }
+      if (url.pathname === '/api/v2/dedup/auto-all') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        autoAllCalled = true;
+        calls.push(url.pathname);
+        return jsonResponse({
+          async_requested: false,
+          total: 1,
+          ok_count: 1,
+          review_count: 1,
+          total_removed_folders: 1,
+          results: [{ tmdb: '100', ok: true, kept: '示例剧 [tmdb-100]', removed: 1, err: null }]
+        });
+      }
+      if (url.pathname === '/api/v2/dedup/replace') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        replacePayload = JSON.parse(String(init?.body));
         calls.push(url.pathname);
         return jsonResponse({
           ok: true,
-          readonly: true,
-          limit: 10,
-          duplicate_link_groups: 1,
-          duplicate_name_groups: 1,
-          link_type_distribution: [{ link_type: 'share115', count: 2 }],
-          link_groups: [{
-            key: 'https://115.com/s/shared',
-            count: 2,
-            link_types: ['share115'],
-            sample_names: ['重复资源 A', '重复资源 B'],
-            sample_sheets: ['电影'],
-            sample_links: ['https://115.com/s/shared']
-          }],
-          name_groups: [{
-            key: '同名资源',
-            count: 2,
-            link_types: ['share115', 'magnet'],
-            sample_names: ['同名资源'],
-            sample_sheets: ['电影'],
-            sample_links: ['https://115.com/s/one', 'magnet:?xt=urn:btih:two']
-          }]
+          lib: '剧集',
+          kept_as: '复核剧 A [tmdb-200]',
+          dropped: '复核剧 B [tmdb-200]',
+          renamed: true,
+          deleted_from: ['/volume1/strm/剧集/复核剧 B [tmdb-200]'],
+          emby_updates: [{ Path: '/strm/剧集/复核剧 A [tmdb-200]', UpdateType: 'Modified' }],
+          notified: true,
+          undo_id: '55555555-5555-4555-8555-555555555555',
+          msg: '替换完成'
         });
       }
       return undefined;
@@ -965,24 +1176,54 @@ describe('App shell', () => {
     fireEvent.click(screen.getByRole('button', { name: '确认清理' }));
     await waitFor(() => expect(emptyPayloads).toEqual([{ execute: false }, { execute: true }]));
     expect(await screen.findByText(/已创建任务：清理空 STRM 目录/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '任务中心' }));
+    await waitFor(() => expect(within(getTaskCenterDrawer()).getByText('清理空 STRM 目录')).toBeInTheDocument());
+    clickTaskCenterRefresh();
+    await waitFor(() => expect(cleanupSuggestCalls).toBeGreaterThanOrEqual(2));
+    await waitFor(() => expect(emptyPayloads).toEqual([{ execute: false }, { execute: true }, { execute: false }]));
+    fireEvent.click(within(getTaskCenterDrawer()).getByRole('button', { name: '关闭' }));
 
     fireEvent.click(screen.getByRole('button', { name: '去重' }));
-    expect(await screen.findByText('去重预检')).toBeInTheDocument();
-    expect(screen.getByText('资源目录重复信号')).toBeInTheDocument();
-    expect(screen.getByText('https://115.com/s/shared')).toBeInTheDocument();
-    expect(screen.getByText('同名资源')).toBeInTheDocument();
+    expect(await screen.findByText('去重闭环')).toBeInTheDocument();
+    expect(screen.getByText(/示例剧 重复 \[tmdb-100\]/)).toBeInTheDocument();
+    expect(screen.getByText('分数接近，需要人工确认')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'auto-all' }));
+    expect(await screen.findByText('确认自动去重')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认执行 auto-all' }));
+    await waitFor(() => expect(autoAllCalled).toBe(true));
+    expect(await screen.findByText('Auto-all 结果')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('替换 lib'), { target: { value: '剧集' } });
+    fireEvent.change(screen.getByLabelText('替换 win_folder'), { target: { value: '复核剧 A [tmdb-200]' } });
+    fireEvent.change(screen.getByLabelText('替换 lose_folder'), { target: { value: '复核剧 B [tmdb-200]' } });
+    fireEvent.change(screen.getByLabelText('替换原因'), { target: { value: '人工复核' } });
+    fireEvent.click(screen.getByRole('button', { name: 'replace' }));
+    expect(await screen.findByText('确认替换重复目录')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认 replace' }));
+    await waitFor(() => expect(replacePayload).toEqual({
+      lib: '剧集',
+      win_folder: '复核剧 A [tmdb-200]',
+      lose_folder: '复核剧 B [tmdb-200]',
+      reason: '人工复核'
+    }));
+    expect(await screen.findByText('Replace 结果')).toBeInTheDocument();
     await waitFor(() => expect(calls).toEqual(expect.arrayContaining([
       '/api/v2/cleanup/suggest',
       '/api/v2/cleanup/empty-dirs',
-      '/api/v2/catalog/duplicates'
+      '/api/v2/dedup/duplicates',
+      '/api/v2/dedup/auto-all',
+      '/api/v2/dedup/replace'
     ])));
   });
 
   it('creates delete and move tasks from the manage panel with csrf', async () => {
     let previewPayload: unknown = null;
     let executePayload: unknown = null;
+    let batchPayload: unknown = null;
     let movePreviewPayload: unknown = null;
     let moveExecutePayload: unknown = null;
+    let undoCalls = 0;
+    let batchTaskStarted = false;
+    let batchTaskPolls = 0;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/libraries') {
         return jsonResponse({
@@ -993,9 +1234,18 @@ describe('App shell', () => {
         });
       }
       if (url.pathname === '/api/v2/manage/undo') {
+        undoCalls += 1;
         return jsonResponse({
-          total: 1,
+          total: undoCalls >= 2 ? 2 : 1,
           items: [
+            ...(undoCalls >= 2 ? [{
+              id: 'abababab-abab-4aba-8aba-abababababab',
+              legacy_id: 'legacy-2',
+              op: 'delete',
+              payload: { lib: '电影', folder: '批量旧电影' },
+              undone: false,
+              created_at: '2026-06-28T00:02:00Z'
+            }] : []),
             {
               id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
               legacy_id: 'legacy-1',
@@ -1005,6 +1255,30 @@ describe('App shell', () => {
               created_at: '2026-06-28T00:00:00Z'
             }
           ]
+        });
+      }
+      if (url.pathname === '/api/v2/tasks' && batchTaskStarted) {
+        batchTaskPolls += 1;
+        const done = batchTaskPolls >= 2;
+        return jsonResponse({
+          active_count: done ? 0 : 1,
+          tasks: [{
+            id: 'babababa-baba-4bab-8bab-babababababa',
+            kind: 'manage_delete_batch_execute',
+            label: '批量删除: 2 项',
+            status: done ? 'done' : 'running',
+            progress: done ? 2 : 1,
+            total: 2,
+            status_text: done ? '完成' : '删除中',
+            cancel_requested: false,
+            queued_at: '2026-06-28T00:02:00Z',
+            started_at: '2026-06-28T00:02:01Z',
+            ended_at: done ? '2026-06-28T00:02:03Z' : null,
+            updated_at: done ? '2026-06-28T00:02:03Z' : '2026-06-28T00:02:02Z',
+            params: { reason: '批量重复' },
+            result: done ? { ok: true, total: 2, ok_count: 2, error_count: 0, results: [] } : null,
+            source: 'api'
+          }]
         });
       }
       if (url.pathname === '/api/v2/manage/delete') {
@@ -1048,6 +1322,30 @@ describe('App shell', () => {
           started_at: null,
           ended_at: null,
           updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
+      if (url.pathname === '/api/v2/manage/delete/batch/execute') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        batchPayload = JSON.parse(String(init?.body));
+        batchTaskStarted = true;
+        return jsonResponse({
+          id: 'babababa-baba-4bab-8bab-babababababa',
+          kind: 'manage_delete_batch_execute',
+          label: '批量删除: 2 项',
+          status: 'pending',
+          progress: 0,
+          total: 2,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:02:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:02:00Z',
           params: {},
           result: null,
           source: 'api'
@@ -1133,6 +1431,27 @@ describe('App shell', () => {
       reason: '重复资源'
     }));
     expect(await screen.findByText('删除: 电影/旧电影')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('批量删除内容'), { target: { value: '电影/批量旧电影/item-batch\n电视剧/批量旧剧' } });
+    fireEvent.change(screen.getByLabelText('批量删除原因'), { target: { value: '批量重复' } });
+    fireEvent.click(screen.getByRole('button', { name: '检查并确认批量删除' }));
+    expect(await screen.findByText('确认批量真实删除')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认批量删除' }));
+
+    await waitFor(() => expect(batchPayload).toEqual({
+      items: [
+        { lib: '电影', folder: '批量旧电影', item_id: 'item-batch', reason: null },
+        { lib: '电视剧', folder: '批量旧剧', item_id: null, reason: null }
+      ],
+      reason: '批量重复'
+    }));
+    expect(await screen.findByText('批量删除: 2 项')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '任务中心' }));
+    await waitFor(() => expect(within(getTaskCenterDrawer()).getByText('批量删除: 2 项')).toBeInTheDocument());
+    clickTaskCenterRefresh();
+    await waitFor(() => expect(undoCalls).toBeGreaterThanOrEqual(2));
+    expect(await screen.findByText('legacy-2')).toBeInTheDocument();
+    fireEvent.click(within(getTaskCenterDrawer()).getByRole('button', { name: '关闭' }));
 
     fireEvent.change(screen.getByLabelText('来源库名'), { target: { value: '电影' } });
     fireEvent.change(screen.getByLabelText('来源 folder'), { target: { value: '旧电影' } });

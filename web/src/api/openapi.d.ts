@@ -276,6 +276,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/dedup/auto-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["auto_all"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/dedup/duplicates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["duplicates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/dedup/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["execute_dedup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/dedup/replace": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["replace_execute"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/gaps/scan": {
         parameters: {
             query?: never;
@@ -316,6 +380,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["libraries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/libraries/items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["library_items"];
         put?: never;
         post?: never;
         delete?: never;
@@ -708,6 +788,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/wizard/add-new": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["add_new"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/zhuigeng": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/zhuigeng/gaps-summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["gaps_summary"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/zhuigeng/scan-airing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["scan_airing"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -728,6 +872,74 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AddNewItem: {
+            file_ids?: string[] | null;
+            kind?: string | null;
+            label?: string | null;
+            pwd?: string | null;
+            url: string;
+        };
+        AddNewPlaceholderReport: {
+            message: string;
+            ok: boolean;
+            status: string;
+            triggered: boolean;
+        };
+        AddNewReport: {
+            check: components["schemas"]["AddNewPlaceholderReport"];
+            ok: boolean;
+            poster: components["schemas"]["AddNewPlaceholderReport"];
+            scan: components["schemas"]["AddNewScanReport"];
+            target: components["schemas"]["AddNewTargetReport"];
+            transfer: components["schemas"]["AddNewTransferSummary"];
+        };
+        AddNewRequest: {
+            cid?: string | null;
+            /** Format: int64 */
+            delay_ms?: number | null;
+            items?: components["schemas"]["AddNewItem"][];
+            lib?: string | null;
+            target?: null | components["schemas"]["AddNewTarget"];
+        };
+        AddNewScanReport: {
+            /** Format: int32 */
+            code?: number | null;
+            /** Format: int64 */
+            delay_ms: number;
+            error?: string | null;
+            item_id?: string | null;
+            lib?: string | null;
+            mode: string;
+            ok: boolean;
+            triggered: boolean;
+            warning?: string | null;
+        };
+        AddNewTarget: {
+            cid?: string | null;
+            lib?: string | null;
+        };
+        AddNewTargetReport: {
+            cid: string;
+            lib?: string | null;
+        };
+        /** @enum {string} */
+        AddNewTransferAction: "save_share" | "offline_download" | "unsupported";
+        AddNewTransferItemReport: {
+            action: components["schemas"]["AddNewTransferAction"];
+            error?: string | null;
+            index: number;
+            label?: string | null;
+            ok: boolean;
+            response?: unknown;
+            url: string;
+        };
+        AddNewTransferSummary: {
+            failed: number;
+            items: components["schemas"]["AddNewTransferItemReport"][];
+            ok: boolean;
+            succeeded: number;
+            total: number;
+        };
         AppLogEntry: {
             /** Format: date-time */
             created_at: string;
@@ -1065,6 +1277,69 @@ export interface components {
             url: string;
             warning?: string | null;
         };
+        DedupAnalysisResponse: {
+            dups: components["schemas"]["DedupGroup"][];
+            review: components["schemas"]["DedupReviewGroup"][];
+        };
+        DedupAutoAllItemResult: {
+            err?: string | null;
+            kept: string;
+            ok: boolean;
+            removed: number;
+            tmdb: string;
+        };
+        DedupAutoAllRequest: {
+            async?: boolean | null;
+            limit?: number | null;
+        };
+        DedupAutoAllResponse: {
+            async_requested: boolean;
+            ok_count: number;
+            results: components["schemas"]["DedupAutoAllItemResult"][];
+            review_count: number;
+            total: number;
+            total_removed_folders: number;
+        };
+        DedupDeleteResult: {
+            deleted_from: string[];
+            emby_updates: components["schemas"]["EmbyUpdate"][];
+            folder: string;
+            lib: string;
+            notified: boolean;
+            /** Format: uuid */
+            undo_id: string;
+        };
+        DedupExecuteRequest: {
+            reason?: string | null;
+            remove: components["schemas"]["DedupFolderRef"][];
+            tmdb?: string | null;
+        };
+        DedupExecuteResponse: {
+            ok: boolean;
+            removed: components["schemas"]["DedupDeleteResult"][];
+            tmdb?: string | null;
+        };
+        DedupFolderRef: {
+            folder: string;
+            lib: string;
+        };
+        DedupGroup: {
+            keep: components["schemas"]["DedupRow"];
+            remove: components["schemas"]["DedupRow"][];
+            tmdb: string;
+        };
+        DedupReviewGroup: {
+            rows: components["schemas"]["DedupRow"][];
+            tmdb: string;
+            why: string;
+        };
+        DedupRow: {
+            folder: string;
+            lib: string;
+            n: number;
+            /** Format: int64 */
+            score: number;
+        };
         DeleteScheduleResponse: {
             ok: boolean;
         };
@@ -1121,6 +1396,10 @@ export interface components {
             name: string;
             paths: string[];
             type: string;
+        };
+        EmbyUpdate: {
+            Path: string;
+            UpdateType: string;
         };
         ExtensionCount: {
             /** Format: int64 */
@@ -1192,6 +1471,23 @@ export interface components {
         };
         LibrariesResponse: {
             libraries: components["schemas"]["EmbyLibrary"][];
+        };
+        LibraryItemEntry: {
+            folder: string;
+            id?: string | null;
+            item_type?: string | null;
+            name: string;
+            path?: string | null;
+            tmdb: string;
+            /** Format: int32 */
+            year?: number | null;
+        };
+        LibraryItemsResponse: {
+            item_types: string;
+            items: components["schemas"]["LibraryItemEntry"][];
+            lib: string;
+            total_record_count?: number | null;
+            truncated: boolean;
         };
         LoadAverage: {
             /** Format: double */
@@ -1421,6 +1717,25 @@ export interface components {
             signals: components["schemas"]["PosterSignal"][];
             tmdb: string;
             type: string;
+        };
+        ReplaceExecuteResponse: {
+            deleted_from: string[];
+            dropped: string;
+            emby_updates: components["schemas"]["EmbyUpdate"][];
+            kept_as: string;
+            lib: string;
+            msg: string;
+            notified: boolean;
+            ok: boolean;
+            renamed: boolean;
+            /** Format: uuid */
+            undo_id: string;
+        };
+        ReplaceRequest: {
+            lib: string;
+            lose_folder: string;
+            reason?: string | null;
+            win_folder: string;
         };
         RunScheduleResponse: {
             task: components["schemas"]["TaskRun"];
@@ -1681,6 +1996,14 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        TmdbEpisodeSummary: {
+            air_date?: string | null;
+            /** Format: int32 */
+            episode_number?: number | null;
+            name?: string | null;
+            /** Format: int32 */
+            season_number?: number | null;
+        };
         UndoEntry: {
             /** Format: date-time */
             created_at: string;
@@ -1744,6 +2067,66 @@ export interface components {
         };
         UsersResponse: {
             users: components["schemas"]["UserSummary"][];
+        };
+        ZhuigengGapRow: {
+            behind: number;
+            fmt: string;
+            id?: string | null;
+            lib: string;
+            name: string;
+            tmdb: string;
+        };
+        ZhuigengGapsSummaryResponse: {
+            copy_text: string;
+            items: components["schemas"]["ZhuigengGapRow"][];
+            ok: boolean;
+            total: number;
+        };
+        ZhuigengItem: {
+            behind: number;
+            behind_hint?: string | null;
+            continuing: boolean;
+            ended: boolean;
+            err?: string | null;
+            folder: string;
+            id?: string | null;
+            last_episode_to_air?: null | components["schemas"]["TmdbEpisodeSummary"];
+            lib: string;
+            local_count: number;
+            local_latest?: string | null;
+            local_latest_episode?: string | null;
+            name: string;
+            next_episode_to_air?: null | components["schemas"]["TmdbEpisodeSummary"];
+            resource_hint?: string | null;
+            state: string;
+            tmdb: string;
+            tmdb_status: string;
+        };
+        ZhuigengScanAiringResponse: {
+            copy_text: string;
+            note: string;
+            ok: boolean;
+            results: components["schemas"]["ZhuigengScanAiringRow"][];
+            total: number;
+        };
+        ZhuigengScanAiringRow: {
+            behind: number;
+            err?: string | null;
+            hint?: string | null;
+            id?: string | null;
+            lib: string;
+            name: string;
+            ok: boolean;
+            status: string;
+            tmdb: string;
+        };
+        ZhuigengStatusResponse: {
+            continuing: number;
+            copy_text: string;
+            ended: number;
+            items: components["schemas"]["ZhuigengItem"][];
+            ok: boolean;
+            total: number;
         };
     };
     responses: never;
@@ -2138,6 +2521,94 @@ export interface operations {
             };
         };
     };
+    auto_all: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DedupAutoAllRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DedupAutoAllResponse"];
+                };
+            };
+        };
+    };
+    duplicates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DedupAnalysisResponse"];
+                };
+            };
+        };
+    };
+    execute_dedup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DedupExecuteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DedupExecuteResponse"];
+                };
+            };
+        };
+    };
+    replace_execute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplaceRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReplaceExecuteResponse"];
+                };
+            };
+        };
+    };
     gaps_summary: {
         parameters: {
             query?: never;
@@ -2195,6 +2666,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LibrariesResponse"];
+                };
+            };
+        };
+    };
+    library_items: {
+        parameters: {
+            query: {
+                lib: string;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryItemsResponse"];
                 };
             };
         };
@@ -2796,6 +3289,86 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UpdateUserPolicyResponse"];
+                };
+            };
+        };
+    };
+    add_new: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AddNewRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZhuigengStatusResponse"];
+                };
+            };
+        };
+    };
+    gaps_summary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZhuigengGapsSummaryResponse"];
+                };
+            };
+        };
+    };
+    scan_airing: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZhuigengScanAiringResponse"];
                 };
             };
         };
