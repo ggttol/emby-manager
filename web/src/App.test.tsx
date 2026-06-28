@@ -557,6 +557,103 @@ describe('App shell', () => {
     await waitFor(() => expect(scanPayload).toEqual({ lib: '电影' }));
   });
 
+  it('loads settings, fills cid matches, and saves config with csrf', async () => {
+    let savedPayload: unknown = null;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/config' && (!init?.method || init.method === 'GET')) {
+        return jsonResponse({
+          settings: {
+            emby_url: 'http://emby.local:8096/emby',
+            api_key: '***',
+            c115_cookie: '***',
+            c115_cid_map: { 电影: '12345' },
+            trusted_proxies: ['192.168.2.1'],
+            auto_strm_enabled: false,
+            auto_strm_fullauto: false,
+            cd2_mount_prefix: '/CloudNAS/CloudDrive',
+            auto_strm_debounce_sec: 8,
+            custom_flag: true
+          }
+        });
+      }
+      if (url.pathname === '/api/v2/libraries') {
+        return jsonResponse({
+          libraries: [
+            { id: 'movie-lib', name: '电影', type: 'movies', paths: ['/strm/电影'] },
+            { id: 'tv-lib', name: '电视剧', type: 'tvshows', paths: ['/strm/电视剧'] }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/c115/auto-cid') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        return jsonResponse({
+          ok: true,
+          current: { 电影: '12345' },
+          scanned: 6,
+          matches: {
+            电影: [{ cid: '12345', path: '/电影' }],
+            电视剧: [{ cid: '67890', path: '/电视剧' }]
+          }
+        });
+      }
+      if (url.pathname === '/api/v2/config' && init?.method === 'PUT') {
+        const headers = init.headers as Headers;
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        savedPayload = JSON.parse(String(init.body));
+        return jsonResponse({
+          settings: {
+            emby_url: 'http://emby.new:8096/emby',
+            api_key: '***',
+            c115_cookie: '***',
+            c115_cid_map: { 电影: '12345', 电视剧: '67890' },
+            trusted_proxies: ['192.168.2.1', '10.0.0.1'],
+            auto_strm_enabled: true,
+            auto_strm_fullauto: false,
+            cd2_mount_prefix: '/CloudNAS/CloudDrive',
+            auto_strm_debounce_sec: 12,
+            custom_flag: true
+          }
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '设置' }));
+    expect(await screen.findByDisplayValue('http://emby.local:8096/emby')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Emby 地址'), { target: { value: 'http://emby.new:8096/emby' } });
+    fireEvent.change(screen.getByLabelText('115 Cookie'), { target: { value: 'UID=1; CID=2; SEID=3' } });
+    fireEvent.change(screen.getByLabelText('反代信任 IP'), { target: { value: '192.168.2.1, 10.0.0.1' } });
+    fireEvent.click(screen.getByLabelText('启用自动 strm'));
+    fireEvent.change(screen.getByLabelText('自动 strm 防抖秒数'), { target: { value: '12' } });
+    fireEvent.click(screen.getByRole('button', { name: /自动检测/ }));
+
+    await screen.findByText('自动检测扫描 6 个目录，单匹配且空 cid 的行已填入。');
+    expect(screen.getByLabelText('电视剧 cid')).toHaveValue('67890');
+
+    fireEvent.click(screen.getByRole('button', { name: '保存全部' }));
+
+    await waitFor(() => expect(savedPayload).toEqual({
+      settings: {
+        custom_flag: true,
+        emby_url: 'http://emby.new:8096/emby',
+        api_key: '***',
+        c115_cookie: 'UID=1; CID=2; SEID=3',
+        c115_cid_map: { 电影: '12345', 电视剧: '67890' },
+        trusted_proxies: ['192.168.2.1', '10.0.0.1'],
+        auto_strm_enabled: true,
+        auto_strm_fullauto: false,
+        cd2_mount_prefix: '/CloudNAS/CloudDrive',
+        auto_strm_debounce_sec: 12
+      }
+    }));
+    expect(await screen.findByText('配置已保存')).toBeInTheDocument();
+  });
+
   it('shows login panel and enters the shell after login', async () => {
     mockApi((url) => {
       if (url.pathname === '/api/v2/auth/me') {

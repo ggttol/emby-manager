@@ -24,6 +24,7 @@ import { TaskCenter } from './components/TaskCenter';
 import { ToastProvider, useToast } from './components/Toast';
 import { C115Panel } from './components/C115Panel';
 import { CatalogPanel } from './components/CatalogPanel';
+import { SettingsPanel } from './components/SettingsPanel';
 import { UsersPanel } from './components/UsersPanel';
 
 type Tab = {
@@ -172,6 +173,14 @@ function TabPanel({ tab }: { tab: Tab }) {
     return (
       <section className="panel">
         <C115Panel />
+      </section>
+    );
+  }
+
+  if (tab.id === 'settings') {
+    return (
+      <section className="panel">
+        <SettingsPanel />
       </section>
     );
   }

@@ -1094,6 +1094,101 @@ main {
   margin-top: 0;
 }
 
+.settingsPanel {
+  display: grid;
+  gap: 14px;
+}
+
+.settingsToolbar,
+.settingsBlockHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settingsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.settingsBlock {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.settingsBlock h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.settingsBlock label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settingsStatus,
+.settingsHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.settingsSecret {
+  min-height: 88px;
+  resize: vertical;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.cidRows {
+  display: grid;
+  gap: 8px;
+}
+
+.cidRow {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) minmax(130px, 180px) auto;
+  gap: 8px;
+  align-items: start;
+}
+
+.cidRow small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.settingsSwitch {
+  display: inline-flex !important;
+  color: var(--muted-strong) !important;
+}
+
+.settingsInlineNotice {
+  margin-top: 0;
+  font-size: 13px;
+}
+
+.settingsJson {
+  min-height: 160px;
+  resize: vertical;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .catalogTable th:first-child,
 .catalogTable td:first-child {
   width: 64px;
@@ -1349,6 +1444,10 @@ main {
   .c115OfflineBox,
   .c115SnapHead,
   .c115FileTools,
+  .settingsToolbar,
+  .settingsBlockHead,
+  .settingsGrid,
+  .cidRow,
   .modalActions {
     align-items: stretch;
     flex-direction: column;
