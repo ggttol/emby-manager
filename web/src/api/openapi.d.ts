@@ -1425,6 +1425,7 @@ export interface components {
             directories: number;
             /** Format: int64 */
             empty_directories: number;
+            empty_directory_samples: string[];
             entry_limit: number;
             exists: boolean;
             extension_counts: components["schemas"]["ExtensionCount"][];
@@ -1432,6 +1433,7 @@ export interface components {
             files: number;
             is_dir: boolean;
             max_depth: number;
+            other_file_samples: string[];
             /** Format: int64 */
             other_files: number;
             root: string;

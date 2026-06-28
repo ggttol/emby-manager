@@ -176,6 +176,8 @@ const strmReadonly = {
   other_files: 1,
   extension_counts: [{ extension: 'srt', count: 7 }],
   samples: [{ kind: 'subtitle', rel_path: '电影/A.srt' }],
+  empty_directory_samples: ['电影/空目录'],
+  other_file_samples: ['电影/poster.jpg'],
   truncated: false,
   warnings: []
 };
@@ -903,6 +905,8 @@ describe('App shell', () => {
     expect(await screen.findByText('智能清理预检')).toBeInTheDocument();
     expect(screen.getByText('存在失败任务')).toBeInTheDocument();
     expect(screen.getByText(/当前 Rust 版智能清理只读预检/)).toBeInTheDocument();
+    expect(screen.getByText('电影/空目录')).toBeInTheDocument();
+    expect(screen.getByText('电影/poster.jpg')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '去重' }));
     expect(await screen.findByText('去重预检')).toBeInTheDocument();

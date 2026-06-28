@@ -251,6 +251,8 @@ function CatalogDuplicateDetails({ data }: { data?: CatalogDuplicatesResponse | 
 }
 
 function StrmBlock({ strm }: { strm?: StrmReadOnlyOverview }) {
+  const emptySamples = strm?.empty_directory_samples || [];
+  const otherSamples = strm?.other_file_samples || [];
   return (
     <section className="readonlyBlock">
       <h2>strm 只读信号</h2>
@@ -269,6 +271,18 @@ function StrmBlock({ strm }: { strm?: StrmReadOnlyOverview }) {
         ))}
         {strm && strm.samples.length === 0 && <div className="empty inlineEmpty">没有样例</div>}
         {!strm && <div className="empty inlineEmpty">等待 strm 数据</div>}
+      </div>
+      <div className="sampleColumns">
+        <div>
+          <strong>空目录样例</strong>
+          {emptySamples.map((item) => <code key={`empty-${item}`}>{item}</code>)}
+          {strm && emptySamples.length === 0 && <small>暂无</small>}
+        </div>
+        <div>
+          <strong>非 STRM 文件样例</strong>
+          {otherSamples.map((item) => <code key={`other-${item}`}>{item}</code>)}
+          {strm && otherSamples.length === 0 && <small>暂无</small>}
+        </div>
       </div>
     </section>
   );
@@ -338,6 +352,9 @@ function CleanupLayout({
       {variant === 'dedup' && <CatalogDuplicateDetails data={duplicates} />}
       <div className="readonlySplit">
         <CatalogBlock catalog={data?.catalog} />
+        <StrmBlock strm={data?.strm} />
+      </div>
+      <div className="readonlySplit">
         <section className="readonlyBlock">
           <h2>运行健康</h2>
           <div className="miniStats">

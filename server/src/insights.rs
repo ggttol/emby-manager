@@ -127,6 +127,8 @@ pub struct StrmReadOnlyOverview {
     pub other_files: i64,
     pub extension_counts: Vec<ExtensionCount>,
     pub samples: Vec<StrmSignalSample>,
+    pub empty_directory_samples: Vec<String>,
+    pub other_file_samples: Vec<String>,
     pub truncated: bool,
     pub warnings: Vec<String>,
 }
@@ -599,6 +601,8 @@ pub fn strm_readonly_overview(root: &Path) -> StrmReadOnlyOverview {
         other_files: 0,
         extension_counts: Vec::new(),
         samples: Vec::new(),
+        empty_directory_samples: Vec::new(),
+        other_file_samples: Vec::new(),
         truncated: false,
         warnings: Vec::new(),
     };
@@ -644,6 +648,7 @@ pub fn strm_readonly_overview(root: &Path) -> StrmReadOnlyOverview {
             if is_empty_dir(path) {
                 overview.empty_directories += 1;
                 push_sample(&mut overview.samples, "empty_dir", &rel_path);
+                push_text_sample(&mut overview.empty_directory_samples, &rel_path);
             }
             continue;
         }
@@ -665,6 +670,7 @@ pub fn strm_readonly_overview(root: &Path) -> StrmReadOnlyOverview {
         } else {
             overview.other_files += 1;
             push_sample(&mut overview.samples, "other_file", &rel_path);
+            push_text_sample(&mut overview.other_file_samples, &rel_path);
         }
     }
     overview.extension_counts = extension_counts
@@ -702,6 +708,13 @@ fn push_sample(samples: &mut Vec<StrmSignalSample>, kind: &str, rel_path: &str) 
         kind: kind.to_string(),
         rel_path: rel_path.to_string(),
     });
+}
+
+fn push_text_sample(samples: &mut Vec<String>, rel_path: &str) {
+    if samples.len() >= STRM_SUMMARY_SAMPLE_LIMIT {
+        return;
+    }
+    samples.push(rel_path.to_string());
 }
 
 fn gaps_todos(

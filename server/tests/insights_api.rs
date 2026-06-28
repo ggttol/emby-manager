@@ -97,6 +97,11 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
     assert_eq!(cleanup["complete_business_port"], false);
     assert_eq!(cleanup["catalog"]["duplicate_links"], 1);
     assert_eq!(cleanup["logs"]["errors_7d"], 1);
+    assert_eq!(cleanup["strm"]["empty_directory_samples"][0], "Empty");
+    assert_eq!(
+        cleanup["strm"]["other_file_samples"][0],
+        "Shows/Season 1/poster.jpg"
+    );
     assert!(
         cleanup["todos"]
             .as_array()
