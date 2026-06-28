@@ -1,6 +1,7 @@
 use axum::{
     Router,
     body::{Body, to_bytes},
+    extract::ConnectInfo,
     http::{
         HeaderMap, Method, StatusCode,
         header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE},
@@ -9,7 +10,11 @@ use axum::{
 use emby_manager::{api, auth, db, settings::Settings};
 use serde_json::{Value, json};
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    net::{IpAddr, SocketAddr},
+    path::PathBuf,
+};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -192,6 +197,74 @@ async fn login_rate_limits_repeated_password_failures() {
 }
 
 #[tokio::test]
+async fn login_uses_forwarded_ip_only_from_trusted_proxy() {
+    let Some(database_url) = auth_test_database_url() else {
+        eprintln!(
+            "skipping auth DB security test; set EMBY_MANAGER_AUTH_TEST_DATABASE_URL to enable it"
+        );
+        return;
+    };
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .expect("connect auth security test database");
+    db::migrate(&pool)
+        .await
+        .expect("run auth security migrations");
+    sqlx::query(
+        "INSERT INTO app_settings(key, value, updated_at) VALUES ('trusted_proxies', $1, now())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+    )
+    .bind(json!(["10.0.0.1"]))
+    .execute(&pool)
+    .await
+    .expect("write trusted proxy setting");
+
+    let username = create_test_user(&pool).await;
+    let app = api::router(pool.clone(), test_settings());
+
+    let (status, _, body) = send_with_peer(
+        &app,
+        Method::POST,
+        "/api/v2/auth/login",
+        Some(json!({
+            "username": username,
+            "password": "secret"
+        })),
+        &[
+            ("x-forwarded-for", "203.0.113.10, 10.0.0.2".to_string()),
+            ("x-real-ip", "203.0.113.11".to_string()),
+        ],
+        Some(socket_addr("10.0.0.1")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        stored_session_ip(&pool, body["token"].as_str().unwrap()).await,
+        "203.0.113.10"
+    );
+
+    let (status, _, body) = send_with_peer(
+        &app,
+        Method::POST,
+        "/api/v2/auth/login",
+        Some(json!({
+            "username": username,
+            "password": "secret"
+        })),
+        &[("x-forwarded-for", "203.0.113.99".to_string())],
+        Some(socket_addr("198.51.100.20")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        stored_session_ip(&pool, body["token"].as_str().unwrap()).await,
+        "198.51.100.20"
+    );
+}
+
+#[tokio::test]
 async fn authenticated_user_can_change_password_and_expire_other_sessions() {
     let Some(database_url) = auth_test_database_url() else {
         eprintln!(
@@ -370,6 +443,17 @@ async fn send(
     body: Option<Value>,
     headers: &[(&str, String)],
 ) -> (StatusCode, HeaderMap, Value) {
+    send_with_peer(app, method, uri, body, headers, None).await
+}
+
+async fn send_with_peer(
+    app: &Router,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+    headers: &[(&str, String)],
+    peer: Option<SocketAddr>,
+) -> (StatusCode, HeaderMap, Value) {
     let body = body.map(|value| value.to_string()).unwrap_or_default();
     let mut builder = axum::http::Request::builder().method(method).uri(uri);
     if !body.is_empty() {
@@ -377,6 +461,9 @@ async fn send(
     }
     for (name, value) in headers {
         builder = builder.header(*name, value.as_str());
+    }
+    if let Some(peer) = peer {
+        builder = builder.extension(ConnectInfo(peer));
     }
 
     let response = app
@@ -399,6 +486,18 @@ async fn send(
         serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}))
     };
     (status, headers, body)
+}
+
+async fn stored_session_ip(pool: &PgPool, token: &str) -> String {
+    sqlx::query_scalar("SELECT ip FROM sessions WHERE token = $1")
+        .bind(token)
+        .fetch_one(pool)
+        .await
+        .expect("fetch session ip")
+}
+
+fn socket_addr(ip: &str) -> SocketAddr {
+    SocketAddr::new(ip.parse::<IpAddr>().unwrap(), 12345)
 }
 
 fn request_cookie(headers: &HeaderMap) -> String {

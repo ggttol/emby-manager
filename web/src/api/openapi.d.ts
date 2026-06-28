@@ -797,8 +797,24 @@ export interface paths {
         };
         get: operations["list_users"];
         put?: never;
-        post?: never;
+        post: operations["create_user"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete: operations["delete_user"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1382,6 +1398,14 @@ export interface components {
                 [key: string]: unknown;
             };
         };
+        CreateUserRequest: {
+            name: string;
+            password?: string | null;
+        };
+        CreateUserResponse: {
+            ok: boolean;
+            user: components["schemas"]["UserSummary"];
+        };
         DatabaseSummary: {
             configured: boolean;
             current_database?: string | null;
@@ -1457,6 +1481,11 @@ export interface components {
             score: number;
         };
         DeleteScheduleResponse: {
+            ok: boolean;
+        };
+        DeleteUserResponse: {
+            /** Format: int32 */
+            code: number;
             ok: boolean;
         };
         DiskSummary: {
@@ -2168,6 +2197,7 @@ export interface components {
             SimultaneousStreamLimit?: number | null;
         };
         UserSummary: {
+            admin: boolean;
             disabled: boolean;
             id: string;
             last_activity_date?: string | null;
@@ -3394,6 +3424,51 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UsersResponse"];
+                };
+            };
+        };
+    };
+    create_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUserRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateUserResponse"];
+                };
+            };
+        };
+    };
+    delete_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Emby user id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteUserResponse"];
                 };
             };
         };

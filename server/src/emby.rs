@@ -128,6 +128,22 @@ struct RemoteSearchApplyRequest<'a> {
     provider_ids: BTreeMap<&'static str, &'a str>,
 }
 
+#[derive(Debug, Serialize)]
+struct EmbyCreateUserRequest<'a> {
+    #[serde(rename = "Name")]
+    name: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbySetPasswordRequest<'a> {
+    #[serde(rename = "Id")]
+    id: &'a str,
+    #[serde(rename = "CurrentPw")]
+    current_pw: &'a str,
+    #[serde(rename = "NewPw")]
+    new_pw: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct EmbyLibrary {
     pub id: Option<String>,
@@ -151,6 +167,8 @@ pub struct EmbyUser {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct EmbyUserPolicy {
+    #[serde(rename = "IsAdministrator")]
+    pub is_administrator: Option<bool>,
     #[serde(rename = "IsDisabled")]
     pub is_disabled: Option<bool>,
     #[serde(rename = "RemoteClientBitrateLimit")]
@@ -572,6 +590,53 @@ impl EmbyClient {
         Ok(status.as_u16())
     }
 
+    pub async fn create_user(
+        &self,
+        name: &str,
+        password: Option<&str>,
+    ) -> anyhow::Result<EmbyUser> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("user name is required for Emby user creation");
+        }
+        self.post_json_status("/Users/New", &EmbyCreateUserRequest { name })
+            .await?;
+        let created = self
+            .users()
+            .await?
+            .into_iter()
+            .find(|user| user.name == name)
+            .with_context(|| format!("Emby user {name} was not found after creation"))?;
+        if let Some(password) = password.filter(|value| !value.is_empty()) {
+            self.set_user_password(&created.id, password).await?;
+        }
+        Ok(created)
+    }
+
+    pub async fn set_user_password(&self, user_id: &str, password: &str) -> anyhow::Result<u16> {
+        if user_id.trim().is_empty() {
+            bail!("user_id is required for Emby password update");
+        }
+        let path = format!("/Users/{}/Password", urlencoding::encode(user_id.trim()));
+        self.post_json_status(
+            &path,
+            &EmbySetPasswordRequest {
+                id: user_id.trim(),
+                current_pw: "",
+                new_pw: password,
+            },
+        )
+        .await
+    }
+
+    pub async fn delete_user(&self, user_id: &str) -> anyhow::Result<u16> {
+        if user_id.trim().is_empty() {
+            bail!("user_id is required for Emby user deletion");
+        }
+        let path = format!("/Users/{}", urlencoding::encode(user_id.trim()));
+        self.delete_status(&path).await
+    }
+
     async fn post_empty(&self, path: &str, params: &[(&str, &str)]) -> anyhow::Result<u16> {
         if !self.has_api_key() {
             bail!("api_key is not configured for Emby requests");
@@ -650,6 +715,24 @@ impl EmbyClient {
             .post(url)
             .query(&[("api_key", self.api_key.as_str())])
             .json(body)
+            .send()
+            .await
+            .with_context(|| format!("failed to call Emby {path}"))?
+            .error_for_status()
+            .with_context(|| format!("Emby {path} returned an error"))?
+            .status();
+        Ok(status.as_u16())
+    }
+
+    async fn delete_status(&self, path: &str) -> anyhow::Result<u16> {
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let url = format!("{}{}", self.base_url, path);
+        let status = self
+            .http
+            .delete(url)
+            .query(&[("api_key", self.api_key.as_str())])
             .send()
             .await
             .with_context(|| format!("failed to call Emby {path}"))?

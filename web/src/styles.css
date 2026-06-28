@@ -939,6 +939,25 @@ main {
   font-size: 14px;
 }
 
+.userCreateForm {
+  display: flex;
+  flex: 1 1 520px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.userCreateForm .input {
+  width: auto;
+}
+
+.userCreateName,
+.userCreatePassword {
+  flex: 1 1 150px;
+  max-width: 220px;
+}
+
 .usersTableWrap {
   width: 100%;
   overflow-x: auto;
@@ -946,7 +965,7 @@ main {
 }
 
 .usersTable {
-  min-width: 860px;
+  min-width: 940px;
 }
 
 .catalogPanel {
@@ -2719,6 +2738,12 @@ main {
   white-space: nowrap;
 }
 
+.userActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .compactInput {
   width: 132px;
   min-height: 34px;
@@ -2849,6 +2874,8 @@ main {
   .c115SnapHead,
   .c115FileTools,
   .settingsToolbar,
+  .userCreateForm,
+  .userActions,
   .settingsBlockHead,
   .settingsGrid,
   .cidRow,

@@ -10,16 +10,21 @@ use argon2::{
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Extension, State},
-    http::{HeaderMap, Method, Request, StatusCode, header},
+    extract::{ConnectInfo, Extension, FromRequestParts, State},
+    http::{HeaderMap, Method, Request, StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::Sha256;
 use sqlx::PgPool;
+use std::{
+    convert::Infallible,
+    net::{IpAddr, SocketAddr},
+};
 use uuid::Uuid;
 
 const LOGIN_WINDOW_SQL: &str = "5 minutes";
@@ -117,13 +122,16 @@ pub async fn ensure_default_admin(pool: &PgPool, settings: &Settings) -> anyhow:
 }
 
 #[utoipa::path(post, path = "/api/v2/auth/login", tag = "auth", request_body = LoginRequest, responses((status = 200, body = LoginResponse)))]
-pub async fn login(
+pub(crate) async fn login(
     State(state): State<AppState>,
+    PeerIp(peer_ip): PeerIp,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> AppResult<impl IntoResponse> {
     let username = req.username.trim().to_string();
-    let buckets = login_rate_buckets(&username, &headers);
+    let trusted_proxies = trusted_proxy_ips(&state.pool).await?;
+    let client_ip = client_ip_for_request(&headers, peer_ip, &trusted_proxies);
+    let buckets = login_rate_buckets(&username, client_ip);
     prune_login_attempts(&state.pool).await?;
     ensure_login_allowed(&state.pool, &buckets).await?;
     let row: Option<(Uuid, String, bool)> =
@@ -157,7 +165,7 @@ pub async fn login(
     .bind(&token)
     .bind(user_id)
     .bind(&csrf)
-    .bind("")
+    .bind(client_ip.map(|ip| ip.to_string()).unwrap_or_default())
     .bind(expires_at)
     .execute(&state.pool)
     .await?;
@@ -177,7 +185,26 @@ pub async fn login(
     ))
 }
 
-fn login_rate_buckets(username: &str, headers: &HeaderMap) -> Vec<String> {
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PeerIp(Option<IpAddr>);
+
+impl<S> FromRequestParts<S> for PeerIp
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(addr)| addr.ip()),
+        ))
+    }
+}
+
+fn login_rate_buckets(username: &str, client_ip: Option<IpAddr>) -> Vec<String> {
     let normalized_username = username
         .trim()
         .to_ascii_lowercase()
@@ -185,21 +212,82 @@ fn login_rate_buckets(username: &str, headers: &HeaderMap) -> Vec<String> {
         .collect::<Vec<_>>()
         .join(" ");
     let mut buckets = vec![format!("user:{normalized_username}")];
-    if let Some(ip) = best_effort_client_ip(headers) {
+    if let Some(ip) = client_ip {
         buckets.push(format!("ip:{ip}"));
     }
     buckets
 }
 
-fn best_effort_client_ip(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("x-real-ip")
-        .or_else(|| headers.get("x-forwarded-for"))
+async fn trusted_proxy_ips(pool: &PgPool) -> Result<Vec<IpAddr>, sqlx::Error> {
+    let value: Option<Value> =
+        sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'trusted_proxies'")
+            .fetch_optional(pool)
+            .await?;
+    Ok(parse_trusted_proxy_ips(value.as_ref()))
+}
+
+fn parse_trusted_proxy_ips(value: Option<&Value>) -> Vec<IpAddr> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .filter_map(parse_ip_header_value)
+            .collect(),
+        Some(Value::String(raw)) => raw
+            .split(|ch: char| ch == ',' || ch == '，' || ch.is_whitespace())
+            .filter_map(parse_ip_header_value)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn client_ip_for_request(
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+    trusted_proxies: &[IpAddr],
+) -> Option<IpAddr> {
+    let Some(peer_ip) = peer_ip else {
+        return None;
+    };
+    if !trusted_proxies.contains(&peer_ip) {
+        return Some(peer_ip);
+    }
+    Some(forwarded_client_ip(headers).unwrap_or(peer_ip))
+}
+
+fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    if let Some(ip) = headers
+        .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.chars().take(96).collect())
+        .and_then(|value| value.split(',').find_map(parse_ip_header_value))
+    {
+        return Some(ip);
+    }
+    if let Some(ip) = headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_ip_header_value)
+    {
+        return Some(ip);
+    }
+    None
+}
+
+fn parse_ip_header_value(value: &str) -> Option<IpAddr> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(ip) = trimmed.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    if let Ok(addr) = trimmed.parse::<SocketAddr>() {
+        return Some(addr.ip());
+    }
+    trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.split_once(']'))
+        .and_then(|(ip, _)| ip.parse::<IpAddr>().ok())
 }
 
 async fn prune_login_attempts(pool: &PgPool) -> Result<(), sqlx::Error> {
@@ -557,11 +645,95 @@ fn verify_legacy_pbkdf2(plain: &str, stored: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    fn ip(value: &str) -> IpAddr {
+        value.parse().unwrap()
+    }
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(*name, value.parse().unwrap());
+        }
+        headers
+    }
 
     #[test]
     fn verifies_legacy_python_pbkdf2_hash() {
         let stored = "pbkdf2_sha256$200000$000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f$2f9a5868926f81696e0202fe00533133713115e866c99c0b62def7943d448a2c";
         assert!(verify_password("secret", stored));
         assert!(!verify_password("wrong", stored));
+    }
+
+    #[test]
+    fn untrusted_peer_cannot_spoof_forwarded_headers() {
+        let headers = headers(&[
+            ("x-forwarded-for", "203.0.113.10, 10.0.0.1"),
+            ("x-real-ip", "203.0.113.11"),
+        ]);
+
+        let actual = client_ip_for_request(&headers, Some(ip("198.51.100.20")), &[ip("10.0.0.1")]);
+
+        assert_eq!(actual, Some(ip("198.51.100.20")));
+    }
+
+    #[test]
+    fn trusted_peer_uses_first_valid_x_forwarded_for() {
+        let headers = headers(&[
+            ("x-forwarded-for", "unknown, 203.0.113.10:443, 198.51.100.9"),
+            ("x-real-ip", "203.0.113.11"),
+        ]);
+
+        let actual = client_ip_for_request(&headers, Some(ip("10.0.0.1")), &[ip("10.0.0.1")]);
+
+        assert_eq!(actual, Some(ip("203.0.113.10")));
+    }
+
+    #[test]
+    fn trusted_peer_falls_back_to_x_real_ip() {
+        let headers = headers(&[("x-real-ip", "2001:db8::8")]);
+
+        let actual = client_ip_for_request(&headers, Some(ip("10.0.0.1")), &[ip("10.0.0.1")]);
+
+        assert_eq!(actual, Some(ip("2001:db8::8")));
+    }
+
+    #[test]
+    fn invalid_forwarded_headers_fall_back_to_peer_ip() {
+        let headers = headers(&[("x-forwarded-for", "unknown, nope"), ("x-real-ip", "bad")]);
+
+        let actual = client_ip_for_request(&headers, Some(ip("10.0.0.1")), &[ip("10.0.0.1")]);
+
+        assert_eq!(actual, Some(ip("10.0.0.1")));
+    }
+
+    #[test]
+    fn parses_trusted_proxy_settings_from_array_or_text() {
+        assert_eq!(
+            parse_trusted_proxy_ips(Some(&json!(["192.168.2.1", "bad", "[2001:db8::1]"]))),
+            vec![ip("192.168.2.1"), ip("2001:db8::1")]
+        );
+        assert_eq!(
+            parse_trusted_proxy_ips(Some(&json!("192.168.2.1, 10.0.0.1\n2001:db8::2"))),
+            vec![ip("192.168.2.1"), ip("10.0.0.1"), ip("2001:db8::2")]
+        );
+    }
+
+    #[test]
+    fn parses_ip_header_values_with_socket_forms() {
+        assert_eq!(
+            parse_ip_header_value("203.0.113.10:443"),
+            Some(ip("203.0.113.10"))
+        );
+        assert_eq!(
+            parse_ip_header_value("[2001:db8::5]:443"),
+            Some(ip("2001:db8::5"))
+        );
+        assert_eq!(
+            parse_ip_header_value("[2001:db8::6]"),
+            Some(ip("2001:db8::6"))
+        );
+        assert_eq!(parse_ip_header_value("unknown"), None);
     }
 }

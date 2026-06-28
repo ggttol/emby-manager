@@ -7,7 +7,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Path, State},
-    routing::get,
+    routing::{delete, get},
 };
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +23,7 @@ pub struct UsersResponse {
 pub struct UserSummary {
     pub id: String,
     pub name: String,
+    pub admin: bool,
     pub disabled: bool,
     pub last_activity_date: Option<String>,
     pub policy: UserPolicySummary,
@@ -44,23 +45,62 @@ pub struct UpdateUserPolicyRequest {
     pub disabled: Option<bool>,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateUserRequest {
+    pub name: String,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CreateUserResponse {
+    pub ok: bool,
+    pub user: UserSummary,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UpdateUserPolicyResponse {
     pub ok: bool,
     pub user: UserSummary,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DeleteUserResponse {
+    pub ok: bool,
+    pub code: u16,
+}
+
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/v2/users", get(list_users)).route(
-        "/api/v2/users/{id}/policy",
-        get(get_user_policy).put(update_user_policy),
-    )
+    Router::new()
+        .route("/api/v2/users", get(list_users).post(create_user))
+        .route("/api/v2/users/{id}", delete(delete_user))
+        .route(
+            "/api/v2/users/{id}/policy",
+            get(get_user_policy).put(update_user_policy),
+        )
 }
 
 #[utoipa::path(get, path = "/api/v2/users", tag = "users", responses((status = 200, body = UsersResponse)))]
 pub async fn list_users(State(state): State<AppState>) -> AppResult<Json<UsersResponse>> {
     let client = emby_client_from_config(&state).await?;
     Ok(Json(list_users_with_client(&client).await?))
+}
+
+#[utoipa::path(post, path = "/api/v2/users", tag = "users", request_body = CreateUserRequest, responses((status = 200, body = CreateUserResponse)))]
+pub async fn create_user(
+    State(state): State<AppState>,
+    Json(req): Json<CreateUserRequest>,
+) -> AppResult<Json<CreateUserResponse>> {
+    let client = emby_client_from_config(&state).await?;
+    Ok(Json(create_user_with_client(&client, req).await?))
+}
+
+#[utoipa::path(delete, path = "/api/v2/users/{id}", tag = "users", params(("id" = String, Path, description = "Emby user id")), responses((status = 200, body = DeleteUserResponse)))]
+pub async fn delete_user(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> AppResult<Json<DeleteUserResponse>> {
+    let client = emby_client_from_config(&state).await?;
+    Ok(Json(delete_user_with_client(&client, &id).await?))
 }
 
 #[utoipa::path(get, path = "/api/v2/users/{id}/policy", tag = "users", params(("id" = String, Path, description = "Emby user id")), responses((status = 200, body = UserSummary)))]
@@ -96,6 +136,25 @@ pub async fn get_user_policy_with_client(client: &EmbyClient, id: &str) -> AppRe
     Ok(UserSummary::from(user))
 }
 
+pub async fn create_user_with_client(
+    client: &EmbyClient,
+    req: CreateUserRequest,
+) -> AppResult<CreateUserResponse> {
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(AppError::BadRequest("用户名不能为空".to_string()));
+    }
+    if client.users().await?.iter().any(|user| user.name == name) {
+        return Err(AppError::Conflict("已存在同名用户".to_string()));
+    }
+    let password = req.password.as_deref().filter(|value| !value.is_empty());
+    let user = client.create_user(name, password).await?;
+    Ok(CreateUserResponse {
+        ok: true,
+        user: UserSummary::from(user),
+    })
+}
+
 pub async fn update_user_policy_with_client(
     client: &EmbyClient,
     id: &str,
@@ -109,6 +168,18 @@ pub async fn update_user_policy_with_client(
         ok: true,
         user: UserSummary::from(updated),
     })
+}
+
+pub async fn delete_user_with_client(
+    client: &EmbyClient,
+    id: &str,
+) -> AppResult<DeleteUserResponse> {
+    let user = client.user(id).await?;
+    if user.policy.is_administrator.unwrap_or(false) {
+        return Err(AppError::BadRequest("不能删除管理员用户".to_string()));
+    }
+    let code = client.delete_user(id).await?;
+    Ok(DeleteUserResponse { ok: true, code })
 }
 
 async fn emby_client_from_config(state: &AppState) -> AppResult<EmbyClient> {
@@ -160,6 +231,7 @@ impl From<EmbyUser> for UserSummary {
         Self {
             id: user.id,
             name: user.name,
+            admin: user.policy.is_administrator.unwrap_or(false),
             disabled: user.policy.is_disabled.unwrap_or(false),
             last_activity_date: user.last_activity_date,
             policy: UserPolicySummary {
@@ -179,6 +251,7 @@ mod tests {
     #[test]
     fn merge_policy_preserves_unknown_fields_and_converts_mbps() {
         let mut policy = EmbyUserPolicy {
+            is_administrator: None,
             is_disabled: Some(false),
             remote_client_bitrate_limit: Some(1_000_000),
             simultaneous_stream_limit: Some(2),

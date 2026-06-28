@@ -1591,25 +1591,62 @@ describe('App shell', () => {
     expect(await screen.findByText('移动: 电影/旧电影 -> 电视剧/归档电影')).toBeInTheDocument();
   });
 
-  it('loads and saves Emby user policy from the users tab', async () => {
+  it('creates, saves, and deletes Emby users from the users tab with csrf', async () => {
+    const rootUser = {
+      id: 'root',
+      name: 'Root',
+      admin: true,
+      disabled: false,
+      last_activity_date: null,
+      remote_bitrate_mbps: null,
+      policy: {
+        RemoteClientBitrateLimit: null,
+        SimultaneousStreamLimit: null
+      }
+    };
+    const aliceUser = {
+      id: 'user/1',
+      name: 'Alice',
+      admin: false,
+      disabled: false,
+      last_activity_date: '2026-06-28T08:00:00Z',
+      remote_bitrate_mbps: 25,
+      policy: {
+        RemoteClientBitrateLimit: 25_000_000,
+        SimultaneousStreamLimit: 2
+      }
+    };
+    const bobUser = {
+      id: 'user/2',
+      name: 'Bob',
+      admin: false,
+      disabled: false,
+      last_activity_date: null,
+      remote_bitrate_mbps: null,
+      policy: {
+        RemoteClientBitrateLimit: null,
+        SimultaneousStreamLimit: null
+      }
+    };
+
+    let users = [rootUser, aliceUser];
+    let createdPayload: unknown = null;
     let savedPayload: unknown = null;
+    let deletedPath = '';
+    let createCsrf = '';
+    let deleteCsrf = '';
     mockApi((url, init) => {
-      if (url.pathname === '/api/v2/users') {
-        return jsonResponse({
-          users: [
-            {
-              id: 'user/1',
-              name: 'Alice',
-              disabled: false,
-              last_activity_date: '2026-06-28T08:00:00Z',
-              remote_bitrate_mbps: 25,
-              policy: {
-                RemoteClientBitrateLimit: 25_000_000,
-                SimultaneousStreamLimit: 2
-              }
-            }
-          ]
-        });
+      const method = (init?.method || 'GET').toUpperCase();
+      if (url.pathname === '/api/v2/users' && method === 'GET') {
+        return jsonResponse({ users });
+      }
+      if (url.pathname === '/api/v2/users' && method === 'POST') {
+        const headers = init?.headers as Headers;
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        createCsrf = headers.get('X-CSRF-Token') || '';
+        createdPayload = JSON.parse(String(init?.body));
+        users = [...users, bobUser];
+        return jsonResponse({ ok: true, user: bobUser });
       }
       if (url.pathname === '/api/v2/users/user%2F1/policy') {
         const headers = init?.headers as Headers;
@@ -1621,6 +1658,7 @@ describe('App shell', () => {
           user: {
             id: 'user/1',
             name: 'Alice',
+            admin: false,
             disabled: true,
             last_activity_date: '2026-06-28T08:00:00Z',
             remote_bitrate_mbps: 12.5,
@@ -1631,6 +1669,14 @@ describe('App shell', () => {
           }
         });
       }
+      if (url.pathname === '/api/v2/users/user%2F2' && method === 'DELETE') {
+        const headers = init?.headers as Headers;
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        deleteCsrf = headers.get('X-CSRF-Token') || '';
+        deletedPath = url.pathname;
+        users = users.filter((user) => user.id !== 'user/2');
+        return jsonResponse({ ok: true, code: 204 });
+      }
       return undefined;
     });
 
@@ -1638,11 +1684,25 @@ describe('App shell', () => {
 
     fireEvent.click(await screen.findByRole('button', { name: '用户' }));
     expect(await screen.findByText('Alice')).toBeInTheDocument();
+    expect(screen.getByText('Root')).toBeInTheDocument();
+    const rootRow = screen.getByText('Root').closest('tr');
+    expect(rootRow).not.toBeNull();
+    expect(within(rootRow as HTMLElement).queryByRole('button', { name: '删除 Root' })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('新用户用户名'), { target: { value: 'Bob' } });
+    fireEvent.click(screen.getByRole('button', { name: '新建用户' }));
+
+    await waitFor(() => expect(createdPayload).toEqual({ name: 'Bob', password: null }));
+    expect(createCsrf).toBe('csrf-me');
+    expect(await screen.findByText('Bob')).toBeInTheDocument();
+    expect(await screen.findByText('已创建 Bob，复制用户名给亲友即可')).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('Alice 远程限速 Mbps'), { target: { value: '12.5' } });
     fireEvent.change(screen.getByLabelText('Alice 同时播放数'), { target: { value: '3' } });
-    fireEvent.click(screen.getByRole('checkbox'));
-    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+    const aliceRow = screen.getByText('Alice').closest('tr');
+    expect(aliceRow).not.toBeNull();
+    fireEvent.click(within(aliceRow as HTMLElement).getByRole('checkbox'));
+    fireEvent.click(within(aliceRow as HTMLElement).getByRole('button', { name: '保存' }));
 
     await waitFor(() => expect(savedPayload).toEqual({
       remote_bitrate_mbps: 12.5,
@@ -1650,6 +1710,17 @@ describe('App shell', () => {
       disabled: true
     }));
     expect(await screen.findByText('已保存 Alice 的用户策略')).toBeInTheDocument();
+
+    const bobRow = screen.getByText('Bob').closest('tr');
+    expect(bobRow).not.toBeNull();
+    fireEvent.click(within(bobRow as HTMLElement).getByRole('button', { name: '删除 Bob' }));
+    expect(await screen.findByText('删除「Bob」后不可恢复。')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认删除 Bob' }));
+
+    await waitFor(() => expect(deletedPath).toBe('/api/v2/users/user%2F2'));
+    expect(deleteCsrf).toBe('csrf-me');
+    await waitFor(() => expect(screen.queryByText('Bob')).not.toBeInTheDocument());
+    expect(await screen.findByText('已删除 Bob')).toBeInTheDocument();
   });
 
   it('searches catalog and creates catalog transfer execute tasks with csrf', async () => {

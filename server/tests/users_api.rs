@@ -1,7 +1,11 @@
 use emby_manager::{
     emby::EmbyClient,
+    error::AppError,
     openapi::ApiDoc,
-    users::{UpdateUserPolicyRequest, list_users_with_client, update_user_policy_with_client},
+    users::{
+        CreateUserRequest, UpdateUserPolicyRequest, create_user_with_client,
+        delete_user_with_client, list_users_with_client, update_user_policy_with_client,
+    },
 };
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -40,6 +44,7 @@ async fn lists_users_from_fake_emby() {
     assert_eq!(response.users.len(), 2);
     assert_eq!(response.users[0].id, "u1");
     assert_eq!(response.users[0].name, "Alice");
+    assert!(!response.users[0].admin);
     assert!(!response.users[0].disabled);
     assert_eq!(
         response.users[0].last_activity_date.as_deref(),
@@ -61,6 +66,173 @@ async fn lists_users_from_fake_emby() {
     assert_eq!(requests.len(), 1);
     assert!(
         requests[0].starts_with("GET /Users?api_key=secret-key HTTP/1.1"),
+        "{}",
+        requests[0]
+    );
+}
+
+#[tokio::test]
+async fn creates_user_and_sets_password_after_readback() {
+    let before = r#"[
+        {"Id": "u1", "Name": "Alice", "Policy": {"IsAdministrator": false}}
+    ]"#;
+    let after = r#"[
+        {"Id": "u1", "Name": "Alice", "Policy": {"IsAdministrator": false}},
+        {"Id": "user/3", "Name": "Carol", "Policy": {"IsAdministrator": false, "IsDisabled": false}}
+    ]"#;
+    let (base_url, requests, handle) = spawn_fake_emby(vec![
+        fake_response(200, before),
+        fake_response(204, ""),
+        fake_response(200, after),
+        fake_response(204, ""),
+    ])
+    .await;
+    let client = EmbyClient::new(base_url, "secret-key", reqwest::Client::new());
+
+    let response = create_user_with_client(
+        &client,
+        CreateUserRequest {
+            name: "  Carol  ".to_string(),
+            password: Some("pw123".to_string()),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(response.ok);
+    assert_eq!(response.user.id, "user/3");
+    assert_eq!(response.user.name, "Carol");
+    assert!(!response.user.admin);
+
+    timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(
+        requests[0].starts_with("GET /Users?api_key=secret-key "),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[1].starts_with("POST /Users/New?api_key=secret-key "),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        requests[2].starts_with("GET /Users?api_key=secret-key "),
+        "{}",
+        requests[2]
+    );
+    assert!(
+        requests[3].starts_with("POST /Users/user%2F3/Password?api_key=secret-key "),
+        "{}",
+        requests[3]
+    );
+    let create_payload: Value = serde_json::from_str(request_body(&requests[1])).unwrap();
+    assert_eq!(create_payload["Name"], "Carol");
+    let password_payload: Value = serde_json::from_str(request_body(&requests[3])).unwrap();
+    assert_eq!(password_payload["Id"], "user/3");
+    assert_eq!(password_payload["CurrentPw"], "");
+    assert_eq!(password_payload["NewPw"], "pw123");
+}
+
+#[tokio::test]
+async fn create_user_rejects_empty_or_duplicate_name() {
+    let (base_url, requests, handle) = spawn_fake_emby(vec![fake_response(
+        200,
+        r#"[{"Id":"u1","Name":"Alice","Policy":{}}]"#,
+    )])
+    .await;
+    let client = EmbyClient::new(base_url, "secret-key", reqwest::Client::new());
+
+    let err = create_user_with_client(
+        &client,
+        CreateUserRequest {
+            name: " ".to_string(),
+            password: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AppError::BadRequest(_)));
+
+    let err = create_user_with_client(
+        &client,
+        CreateUserRequest {
+            name: "Alice".to_string(),
+            password: None,
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, AppError::Conflict(_)));
+
+    timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn deletes_non_admin_user_with_encoded_id() {
+    let user = r#"{
+        "Id": "user/3",
+        "Name": "Carol",
+        "Policy": {"IsAdministrator": false}
+    }"#;
+    let (base_url, requests, handle) =
+        spawn_fake_emby(vec![fake_response(200, user), fake_response(204, "")]).await;
+    let client = EmbyClient::new(base_url, "secret-key", reqwest::Client::new());
+
+    let response = delete_user_with_client(&client, "user/3").await.unwrap();
+
+    assert!(response.ok);
+    assert_eq!(response.code, 204);
+
+    timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0].starts_with("GET /Users/user%2F3?api_key=secret-key "),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[1].starts_with("DELETE /Users/user%2F3?api_key=secret-key "),
+        "{}",
+        requests[1]
+    );
+}
+
+#[tokio::test]
+async fn delete_user_rejects_admin_before_delete() {
+    let user = r#"{
+        "Id": "admin/1",
+        "Name": "Admin",
+        "Policy": {"IsAdministrator": true}
+    }"#;
+    let (base_url, requests, handle) = spawn_fake_emby(vec![fake_response(200, user)]).await;
+    let client = EmbyClient::new(base_url, "secret-key", reqwest::Client::new());
+
+    let err = delete_user_with_client(&client, "admin/1")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, AppError::BadRequest(_)));
+    timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].starts_with("GET /Users/admin%2F1?api_key=secret-key "),
         "{}",
         requests[0]
     );
@@ -152,9 +324,13 @@ fn openapi_registers_user_policy_routes() {
     let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
     let paths = doc["paths"].as_object().unwrap();
     assert!(paths.contains_key("/api/v2/users"));
+    assert!(paths.contains_key("/api/v2/users/{id}"));
     assert!(paths.contains_key("/api/v2/users/{id}/policy"));
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();
+    assert!(schemas.contains_key("CreateUserRequest"));
+    assert!(schemas.contains_key("CreateUserResponse"));
+    assert!(schemas.contains_key("DeleteUserResponse"));
     assert!(schemas.contains_key("UsersResponse"));
     assert!(schemas.contains_key("UserSummary"));
     assert!(schemas.contains_key("UserPolicySummary"));
