@@ -464,6 +464,105 @@ describe('App shell', () => {
     await waitFor(() => expect(requestedLibs).toContain('电影'));
   });
 
+  it('loads scan workspace and creates library/item refresh tasks with csrf', async () => {
+    const strmLibs: Array<string | null> = [];
+    const scanPayloads: unknown[] = [];
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      if (url.pathname === '/api/v2/libraries') {
+        return jsonResponse({
+          libraries: [
+            { id: 'movie-lib', name: '电影', type: 'movies', paths: ['/strm/电影'] },
+            { id: 'show-lib', name: '电视剧', type: 'tvshows', paths: ['/strm/电视剧'] }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/libraries/strm') {
+        strmLibs.push(url.searchParams.get('lib'));
+        expect(url.searchParams.get('overview')).toBe('true');
+        return jsonResponse({
+          base: '/volume1/strm/电影',
+          items: [
+            { name: 'Movie.strm', rel_path: 'Movie/Movie.strm', is_dir: false, size: 128 },
+            { name: 'Season 1', rel_path: 'Show/Season 1', is_dir: true, size: 0 }
+          ],
+          truncated: false,
+          overview: {
+            base: '/volume1/strm/电影',
+            max_depth: 8,
+            entry_limit: 100000,
+            directories: 3,
+            files: 4,
+            strm_files: 2,
+            subtitle_files: 1,
+            other_files: 1,
+            strm_bytes: 256,
+            subtitle_bytes: 32,
+            subtitle_extensions: [{ extension: 'srt', count: 1 }],
+            samples: [{ rel_path: 'Movie/Movie.strm', kind: 'strm', extension: 'strm', size: 128 }],
+            truncated: false,
+            warnings: []
+          }
+        });
+      }
+      if (url.pathname === '/api/v2/libraries/scan') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        scanPayloads.push(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+          kind: 'scan_library',
+          label: '扫描库: 电影',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '扫描' }));
+    expect(await screen.findByText('扫描工作台')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('扫描目标库'), { target: { value: '电影' } });
+    expect((await screen.findAllByText('Movie/Movie.strm')).length).toBeGreaterThan(0);
+    await waitFor(() => expect(strmLibs).toContain('电影'));
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新选中库' }));
+    await waitFor(() => expect(scanPayloads[0]).toEqual({ lib: '电影', recursive: true, full: false }));
+
+    fireEvent.change(screen.getByLabelText('Emby ItemId'), { target: { value: 'item-1' } });
+    fireEvent.click(screen.getByRole('button', { name: '刷新 ItemId' }));
+    await waitFor(() => expect(scanPayloads[1]).toEqual({
+      item_id: 'item-1',
+      lib: '电影',
+      recursive: true,
+      full: false
+    }));
+  });
+
   it('loads and saves Emby user policy from the users tab', async () => {
     let savedPayload: unknown = null;
     mockApi((url, init) => {

@@ -26,6 +26,7 @@ import { C115Panel } from './components/C115Panel';
 import { CatalogPanel } from './components/CatalogPanel';
 import { LogsPanel } from './components/LogsPanel';
 import { DashboardPanel, SubtitlesPanel, SystemPanel } from './components/ReadOnlyPanels';
+import { ScanPanel } from './components/ScanPanel';
 import { SchedulesPanel } from './components/SchedulesPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { UsersPanel } from './components/UsersPanel';
@@ -160,6 +161,14 @@ function TabPanel({ tab }: { tab: Tab }) {
     return (
       <section className="panel">
         <DashboardPanel />
+      </section>
+    );
+  }
+
+  if (tab.id === 'scan') {
+    return (
+      <section className="panel">
+        <ScanPanel />
       </section>
     );
   }

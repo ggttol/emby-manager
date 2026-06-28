@@ -1786,6 +1786,121 @@ main {
   padding: 14px;
 }
 
+.scanPanel {
+  display: grid;
+  gap: 14px;
+}
+
+.scanToolbar,
+.scanActions,
+.scanLibraryCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.scanToolbar > div,
+.scanLibraryCard > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.scanToolbar strong,
+.scanLibraryCard strong {
+  font-size: 15px;
+}
+
+.scanToolbar span,
+.scanLibraryCard span,
+.scanLibraryCard code {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.scanLibraryCard code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scanNotice {
+  margin-top: 0;
+}
+
+.scanGrid {
+  display: grid;
+  grid-template-columns: minmax(180px, 250px) minmax(180px, 1fr) auto auto auto;
+  align-items: end;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.scanGrid label:not(.switchRow) {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.scanSwitch {
+  align-self: end;
+}
+
+.scanActions {
+  justify-content: flex-start;
+}
+
+.scanLibraryCard {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.scanSplit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
+  gap: 12px;
+}
+
+.scanList {
+  display: grid;
+  gap: 8px;
+  max-height: 380px;
+  overflow: auto;
+}
+
+.scanList article {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  align-items: start;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.scanList strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.scanList small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .dangerText {
   color: var(--danger) !important;
 }
@@ -2067,6 +2182,11 @@ main {
   .readonlyFilter,
   .readonlySplit,
   .metaColumns,
+  .scanToolbar,
+  .scanActions,
+  .scanLibraryCard,
+  .scanGrid,
+  .scanSplit,
   .modalActions {
     align-items: stretch;
     flex-direction: column;
