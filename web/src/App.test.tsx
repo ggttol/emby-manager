@@ -574,6 +574,7 @@ describe('App shell', () => {
 
     fireEvent.change(screen.getByLabelText('扫描目录关键词'), { target: { value: 'Movie' } });
     fireEvent.click(screen.getByLabelText('首次无 tmdbid 也生成'));
+    fireEvent.click(screen.getByLabelText('清理孤儿 STRM'));
     fireEvent.click(screen.getByRole('button', { name: '生成缺失 STRM' }));
     await waitFor(() => expect(scanPayloads[1]).toEqual({
       lib: '电影',
@@ -581,7 +582,8 @@ describe('App shell', () => {
       full: false,
       generate_strm: true,
       keyword: 'Movie',
-      fullauto: true
+      fullauto: true,
+      cleanup_orphans: true
     }));
 
     fireEvent.change(screen.getByLabelText('Emby ItemId'), { target: { value: 'item-1' } });

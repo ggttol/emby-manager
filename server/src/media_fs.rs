@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::mpsc,
+    thread,
 };
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
@@ -103,6 +105,7 @@ pub struct ScanLibraryRequest {
     pub generate_strm: Option<bool>,
     pub keyword: Option<String>,
     pub fullauto: Option<bool>,
+    pub cleanup_orphans: Option<bool>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -131,6 +134,8 @@ pub struct StrmGenerateResult {
     pub new_count: usize,
     pub new_folders: BTreeMap<String, usize>,
     pub attention: Vec<String>,
+    pub orphans_cleaned: usize,
+    pub orphan_cleanup_skipped: bool,
     pub permissions_fixed: usize,
     pub refreshed: bool,
     pub refresh_code: Option<u16>,
@@ -785,6 +790,15 @@ async fn run_strm_generate_task(
         req.keyword.as_deref().and_then(non_empty_trimmed),
         req.fullauto.unwrap_or(false),
     )?;
+    if req.cleanup_orphans.unwrap_or(false) {
+        let cleaned = cleanup_orphan_strm_for_library(
+            state,
+            &lib,
+            req.keyword.as_deref().and_then(non_empty_trimmed),
+            &mut strm,
+        )?;
+        strm.orphans_cleaned = cleaned;
+    }
     tasks::set_progress(&state.pool, id, 1, "STRM 生成完成").await?;
     if tasks::cancel_requested(&state.pool, id).await {
         tasks::finish_cancelled(&state.pool, id).await?;
@@ -792,7 +806,7 @@ async fn run_strm_generate_task(
     }
 
     let mut items = Vec::new();
-    if strm.new_count > 0 || strm.permissions_fixed > 0 {
+    if strm.new_count > 0 || strm.orphans_cleaned > 0 || strm.permissions_fixed > 0 {
         let plan = resolve_scan_plan(client, &req).await?;
         match plan {
             ScanPlan::Items(targets) => {
@@ -993,10 +1007,97 @@ fn generate_missing_strm_for_library(
         new_count,
         new_folders,
         attention,
+        orphans_cleaned: 0,
+        orphan_cleanup_skipped: false,
         permissions_fixed: 0,
         refreshed: false,
         refresh_code: None,
     })
+}
+
+fn cleanup_orphan_strm_for_library(
+    state: &AppState,
+    lib: &str,
+    keyword: Option<&str>,
+    result: &mut StrmGenerateResult,
+) -> AppResult<usize> {
+    let lib = required_segment(lib, "lib")?;
+    let strm_base = safe_under(&state.settings.strm_root, lib)?;
+    if !strm_base.is_dir() {
+        return Ok(0);
+    }
+    if !mount_alive(&state.settings.cd_root, std::time::Duration::from_secs(5)) {
+        result.orphan_cleanup_skipped = true;
+        result
+            .attention
+            .push("跳过清孤儿: 媒体根探测失败，防止误删整库 STRM".to_string());
+        return Ok(0);
+    }
+    let keyword = keyword.unwrap_or_default().trim();
+    let mut cleaned = 0usize;
+    for entry in WalkDir::new(&strm_base)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() || !has_extension(entry.path(), "strm") {
+            continue;
+        }
+        if !keyword.is_empty() && !strm_path_matches_keyword(&strm_base, entry.path(), keyword) {
+            continue;
+        }
+        let content = match std::fs::read_to_string(entry.path()) {
+            Ok(content) => content.trim().to_string(),
+            Err(_) => continue,
+        };
+        let Some(rel_media) = content.strip_prefix("/media/") else {
+            continue;
+        };
+        let target = match safe_under(&state.settings.cd_root, rel_media) {
+            Ok(target) => target,
+            Err(_) => continue,
+        };
+        if target.exists() {
+            continue;
+        }
+        if cleaned >= 30
+            && (cleaned - 30).is_multiple_of(25)
+            && !mount_alive(&state.settings.cd_root, std::time::Duration::from_secs(5))
+        {
+            result.orphan_cleanup_skipped = true;
+            result.attention.push(format!(
+                "清孤儿中止: 已删 {cleaned} 个且媒体根复探失败，防止误删整库 STRM"
+            ));
+            return Ok(cleaned);
+        }
+        std::fs::remove_file(entry.path()).map_err(|err| AppError::Anyhow(err.into()))?;
+        cleaned += 1;
+    }
+    Ok(cleaned)
+}
+
+fn strm_path_matches_keyword(strm_base: &Path, path: &Path, keyword: &str) -> bool {
+    path.strip_prefix(strm_base)
+        .ok()
+        .and_then(|rel| rel.components().next())
+        .map(|component| component.as_os_str().to_string_lossy().contains(keyword))
+        .unwrap_or(false)
+}
+
+fn mount_alive(root: &Path, timeout: std::time::Duration) -> bool {
+    let root = root.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let ok = root
+            .is_dir()
+            .then(|| std::fs::read_dir(root).map(|mut entries| entries.next().is_some()))
+            .transpose()
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        let _ = tx.send(ok);
+    });
+    rx.recv_timeout(timeout).unwrap_or(false)
 }
 
 fn missing_strm_in_top(
@@ -1456,12 +1557,79 @@ mod tests {
         );
         assert!(!strm_root.join("电影/No Match/Loose.strm").exists());
 
-        let result = generate_missing_strm_for_library(&state, "电影", Some("No"), true).unwrap();
+        let mut result =
+            generate_missing_strm_for_library(&state, "电影", Some("No"), true).unwrap();
         assert_eq!(result.matched, 1);
         assert_eq!(result.new_count, 1);
         assert_eq!(
             std::fs::read_to_string(strm_root.join("电影/No Match/Loose.strm")).unwrap(),
             "/media/电影/No Match/Loose.mp4"
         );
+
+        std::fs::create_dir_all(strm_root.join("电影/Orphan")).unwrap();
+        std::fs::write(
+            strm_root.join("电影/Orphan/Gone.strm"),
+            "/media/电影/Orphan/Gone.mkv",
+        )
+        .unwrap();
+        std::fs::write(
+            strm_root.join("电影/Orphan/External.strm"),
+            "http://example",
+        )
+        .unwrap();
+        let cleaned = cleanup_orphan_strm_for_library(&state, "电影", None, &mut result).unwrap();
+        assert_eq!(cleaned, 1);
+        assert!(!strm_root.join("电影/Orphan/Gone.strm").exists());
+        assert!(strm_root.join("电影/Orphan/External.strm").exists());
+    }
+
+    #[tokio::test]
+    async fn orphan_cleanup_skips_when_media_mount_probe_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd_root = tmp.path().join("empty-cd");
+        let strm_root = tmp.path().join("strm");
+        std::fs::create_dir_all(&cd_root).unwrap();
+        std::fs::create_dir_all(strm_root.join("电影/Orphan")).unwrap();
+        std::fs::write(
+            strm_root.join("电影/Orphan/Gone.strm"),
+            "/media/电影/Orphan/Gone.mkv",
+        )
+        .unwrap();
+
+        let state = AppState::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused")
+                .unwrap(),
+            crate::settings::Settings {
+                host: "127.0.0.1".to_string(),
+                port: 8098,
+                database_url: "postgres://unused".to_string(),
+                web_dist: tmp.path().to_path_buf(),
+                legacy_dir: tmp.path().to_path_buf(),
+                bootstrap_password: "admin".to_string(),
+                cd_root,
+                strm_root: strm_root.clone(),
+                docker_bin: tmp.path().join("docker"),
+                task_concurrency: 1,
+            },
+        );
+        let mut result = StrmGenerateResult {
+            lib: "电影".to_string(),
+            keyword: String::new(),
+            matched: 0,
+            new_count: 0,
+            new_folders: BTreeMap::new(),
+            attention: Vec::new(),
+            orphans_cleaned: 0,
+            orphan_cleanup_skipped: false,
+            permissions_fixed: 0,
+            refreshed: false,
+            refresh_code: None,
+        };
+
+        let cleaned = cleanup_orphan_strm_for_library(&state, "电影", None, &mut result).unwrap();
+        assert_eq!(cleaned, 0);
+        assert!(result.orphan_cleanup_skipped);
+        assert!(strm_root.join("电影/Orphan/Gone.strm").exists());
     }
 }

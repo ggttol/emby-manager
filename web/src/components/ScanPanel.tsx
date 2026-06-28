@@ -52,6 +52,7 @@ export function ScanPanel() {
   const [recursive, setRecursive] = useState(true);
   const [full, setFull] = useState(false);
   const [fullauto, setFullauto] = useState(false);
+  const [cleanupOrphans, setCleanupOrphans] = useState(false);
   const [strm, setStrm] = useState<StrmListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [overviewLoading, setOverviewLoading] = useState(false);
@@ -139,7 +140,8 @@ export function ScanPanel() {
           full,
           generate_strm: true,
           keyword: keyword.trim() || null,
-          fullauto
+          fullauto,
+          cleanup_orphans: cleanupOrphans
         };
       } else if (mode === 'item') {
         const id = itemId.trim();
@@ -238,6 +240,10 @@ export function ScanPanel() {
         <label className="switchRow scanSwitch">
           <input type="checkbox" checked={fullauto} onChange={(event) => setFullauto(event.target.checked)} />
           <span>首次无 tmdbid 也生成</span>
+        </label>
+        <label className="switchRow scanSwitch">
+          <input type="checkbox" checked={cleanupOrphans} onChange={(event) => setCleanupOrphans(event.target.checked)} />
+          <span>清理孤儿 STRM</span>
         </label>
         <button className="btn ghost" disabled={overviewLoading}>
           <FileSearch size={16} />

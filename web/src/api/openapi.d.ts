@@ -1295,6 +1295,7 @@ export interface components {
             name: string;
         };
         ScanLibraryRequest: {
+            cleanup_orphans?: boolean | null;
             full?: boolean | null;
             fullauto?: boolean | null;
             generate_strm?: boolean | null;
@@ -1391,6 +1392,8 @@ export interface components {
             new_folders: {
                 [key: string]: number;
             };
+            orphan_cleanup_skipped: boolean;
+            orphans_cleaned: number;
             permissions_fixed: number;
             /** Format: int32 */
             refresh_code?: number | null;
