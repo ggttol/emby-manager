@@ -753,8 +753,9 @@ describe('App shell', () => {
     await waitFor(() => expect(batchPayloads).toEqual([{ ids: ['item-2'], type: 'Series' }]));
   });
 
-  it('renders zhuigeng and gaps readonly panels through the gaps scan api', async () => {
+  it('renders zhuigeng readonly and starts real gaps library scans', async () => {
     const calls: string[] = [];
+    let scanPayload: unknown = null;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/gaps/scan') {
         const headers = init?.headers as Headers;
@@ -762,6 +763,65 @@ describe('App shell', () => {
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
         calls.push(url.pathname);
         return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/libraries') {
+        return jsonResponse({
+          libraries: [
+            { id: 'lib-shows', name: '剧集', type: 'tvshows', paths: ['/strm/剧集'] },
+            { id: 'lib-movies', name: '电影', type: 'movies', paths: ['/strm/电影'] }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/gaps/scan-lib') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        scanPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: '44444444-4444-4444-8444-444444444444',
+          kind: 'gaps_scan_lib',
+          label: '全库缺集扫描 剧集',
+          source: 'manual',
+          params: { lib: '剧集' },
+          status: 'running',
+          progress: 0,
+          total: 2,
+          status_text: '扫 剧集',
+          result: null,
+          error: null,
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:03:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:03:00Z'
+        });
+      }
+      if (url.pathname === '/api/v2/tasks/44444444-4444-4444-8444-444444444444') {
+        return jsonResponse({
+          id: '44444444-4444-4444-8444-444444444444',
+          kind: 'gaps_scan_lib',
+          label: '全库缺集扫描 剧集',
+          source: 'manual',
+          params: { lib: '剧集' },
+          status: 'done',
+          progress: 2,
+          total: 2,
+          status_text: '全库缺集扫描完成',
+          result: {
+            ok: true,
+            lib: '剧集',
+            analyzed: 2,
+            total: 1,
+            copy_text: '求 剧 A [tmdb:123] — S01 E2',
+            items: [{ name: '剧 A', id: 'series-a', tmdb: '123', fmt: 'S01 E2', gap_count: 1, behind: 0, score: 1, err: null }]
+          },
+          error: null,
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:03:00Z',
+          started_at: '2026-06-28T00:03:01Z',
+          ended_at: '2026-06-28T00:03:02Z',
+          updated_at: '2026-06-28T00:03:02Z'
+        });
       }
       return undefined;
     });
@@ -771,10 +831,17 @@ describe('App shell', () => {
     fireEvent.click(await screen.findByRole('button', { name: '追更检查' }));
     expect(await screen.findByText('追更只读预检')).toBeInTheDocument();
     expect(screen.getByText(/当前 Rust 版没有独立追更扫描接口/)).toBeInTheDocument();
-    expect(screen.getByText('缺集只读预检')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '缺集检查' }));
-    expect(await screen.findByText('当前 Rust 版不会连接 TMDb/Emby 推断真实缺集集号，只展示可用的只读预检信号。')).toBeInTheDocument();
+    expect(await screen.findByText('缺集扫描')).toBeInTheDocument();
+    expect(await screen.findByText('全库扫描只读 Emby 元数据，不修改媒体文件、不写 STRM、不调用 115。')).toBeInTheDocument();
+    expect(await screen.findByRole('combobox', { name: '选择剧集库' })).toHaveValue('剧集');
+    fireEvent.click(screen.getByRole('button', { name: '全库扫描' }));
+    await waitFor(() => expect(scanPayload).toEqual({ lib: '剧集' }));
+    expect(await screen.findByText('全库缺集扫描 剧集')).toBeInTheDocument();
+    expect(await screen.findByText('全库缺集报告', undefined, { timeout: 2500 })).toBeInTheDocument();
+    expect(screen.getByText('剧 A')).toBeInTheDocument();
+    expect(screen.getByText('S01 E2')).toBeInTheDocument();
     await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(2));
   });
 

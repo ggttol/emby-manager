@@ -14,6 +14,7 @@ use crate::{
     },
     config_store::{ConfigResponse, ConfigUpdateRequest},
     emby::EmbyLibrary,
+    gaps::{GapsScanLibRequest, GapsScanLibResult, GapsScanRow, SeasonGaps, SeriesGaps},
     insights::{
         AutostrmLibraryStat, AutostrmSeenStats, AutostrmSnapshot, AutostrmStatusResponse,
         AutostrmUnmatchedStats, CatalogInsight, CleanupSummaryResponse, ExtensionCount,
@@ -85,6 +86,7 @@ use utoipa::OpenApi;
         crate::c115::offline,
         crate::c115::auto_cid,
         crate::insights::gaps_summary,
+        crate::gaps::scan_library_gaps,
         crate::insights::cleanup_summary,
         crate::insights::autostrm_status,
         crate::users::list_users,
@@ -168,6 +170,11 @@ use utoipa::OpenApi;
         InsightMeta,
         InsightTodo,
         GapsSummaryResponse,
+        GapsScanLibRequest,
+        GapsScanLibResult,
+        GapsScanRow,
+        SeriesGaps,
+        SeasonGaps,
         CleanupSummaryResponse,
         AutostrmStatusResponse,
         TaskHistorySummary,
@@ -202,6 +209,7 @@ use utoipa::OpenApi;
         (name = "logs", description = "Application log APIs"),
         (name = "c115", description = "115 webapi APIs"),
         (name = "insights", description = "Read-only task and cleanup insights"),
+        (name = "gaps", description = "Episode gap scanning APIs"),
         (name = "autostrm", description = "Auto STRM status APIs"),
         (name = "users", description = "Emby user policy APIs")
     )

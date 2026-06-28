@@ -1,6 +1,7 @@
 use crate::{
-    auth, c115, catalog, config_store, error::AppResult, insights, logs, media_fs, openapi::ApiDoc,
-    posters, scheduler, settings::Settings, state::AppState, system, tasks, undo, users,
+    auth, c115, catalog, config_store, error::AppResult, gaps, insights, logs, media_fs,
+    openapi::ApiDoc, posters, scheduler, settings::Settings, state::AppState, system, tasks, undo,
+    users,
 };
 use axum::{
     Json, Router,
@@ -54,6 +55,7 @@ pub fn router(pool: PgPool, settings: Settings) -> Router {
         .merge(undo::router())
         .merge(logs::router())
         .merge(insights::router())
+        .merge(gaps::router())
         .merge(posters::router())
         .merge(users::router())
         .with_state(state);

@@ -53,6 +53,20 @@ pub struct EmbyItem {
     pub provider_ids: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EmbyEpisode {
+    #[serde(rename = "Id")]
+    pub id: Option<String>,
+    #[serde(rename = "Name")]
+    pub name: Option<String>,
+    #[serde(rename = "ParentIndexNumber")]
+    pub parent_index_number: Option<i32>,
+    #[serde(rename = "IndexNumber")]
+    pub index_number: Option<i32>,
+    #[serde(rename = "LocationType")]
+    pub location_type: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct EmbyItemsResult {
     pub items: Vec<EmbyItem>,
@@ -66,6 +80,12 @@ struct EmbyItemsPage {
     items: Vec<EmbyItem>,
     #[serde(rename = "TotalRecordCount")]
     total_record_count: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbyEpisodesPage {
+    #[serde(rename = "Items", default)]
+    items: Vec<EmbyEpisode>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
@@ -228,6 +248,65 @@ impl EmbyClient {
             total_record_count,
             truncated,
         })
+    }
+
+    pub async fn series(&self, parent_id: &str, limit: usize) -> anyhow::Result<Vec<EmbyItem>> {
+        if parent_id.trim().is_empty() {
+            bail!("parent_id is required for Emby series listing");
+        }
+        let limit = limit.clamp(1, 100_000);
+        let mut start = 0usize;
+        let mut items = Vec::new();
+        let mut total_record_count = None;
+
+        while items.len() < limit {
+            let page_limit = (limit - items.len()).min(1000);
+            let page = self
+                .items_page(parent_id, "Series", "ProviderIds", start, page_limit)
+                .await?;
+            if total_record_count.is_none() {
+                total_record_count = page.total_record_count;
+            }
+            if page.items.is_empty() {
+                break;
+            }
+            start += page.items.len();
+            items.extend(page.items);
+            if let Some(total) = total_record_count
+                && start >= total
+            {
+                break;
+            }
+        }
+
+        Ok(items)
+    }
+
+    pub async fn episodes(&self, series_id: &str) -> anyhow::Result<Vec<EmbyEpisode>> {
+        if series_id.trim().is_empty() {
+            bail!("series_id is required for Emby episode listing");
+        }
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let path = format!("/Shows/{}/Episodes", urlencoding::encode(series_id.trim()));
+        let url = format!("{}{}", self.base_url, path);
+        Ok(self
+            .http
+            .get(url)
+            .query(&[
+                ("api_key", self.api_key.as_str()),
+                ("Fields", "ParentIndexNumber,IndexNumber,LocationType"),
+                ("Limit", "6000"),
+            ])
+            .send()
+            .await
+            .with_context(|| format!("failed to call Emby {path}"))?
+            .error_for_status()
+            .with_context(|| format!("Emby {path} returned an error"))?
+            .json::<EmbyEpisodesPage>()
+            .await?
+            .items)
     }
 
     pub async fn refresh_library(&self) -> anyhow::Result<u16> {

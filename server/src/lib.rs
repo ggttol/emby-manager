@@ -6,6 +6,7 @@ pub mod config_store;
 pub mod db;
 pub mod emby;
 pub mod error;
+pub mod gaps;
 pub mod insights;
 pub mod logs;
 pub mod media_fs;

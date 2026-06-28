@@ -260,6 +260,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/gaps/scan-lib": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["scan_library_gaps"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/libraries": {
         parameters: {
             query?: never;
@@ -946,6 +962,29 @@ export interface components {
             count: number;
             extension: string;
         };
+        GapsScanLibRequest: {
+            lib: string;
+        };
+        GapsScanLibResult: {
+            analyzed: number;
+            copy_text: string;
+            items: components["schemas"]["GapsScanRow"][];
+            lib: string;
+            ok: boolean;
+            total: number;
+        };
+        GapsScanRow: {
+            /** Format: int32 */
+            behind: number;
+            err?: string | null;
+            fmt?: string | null;
+            gap_count: number;
+            id?: string | null;
+            name: string;
+            /** Format: int32 */
+            score: number;
+            tmdb: string;
+        };
         GapsSummaryResponse: {
             autostrm: components["schemas"]["AutostrmSnapshot"];
             catalog: components["schemas"]["CatalogInsight"];
@@ -1229,6 +1268,29 @@ export interface components {
             name: string;
             params?: unknown;
             schedule: unknown;
+        };
+        SeasonGaps: {
+            count: number;
+            gapcount: number;
+            gaps: string[];
+            /** Format: int32 */
+            hi: number;
+            /** Format: int32 */
+            lo: number;
+            /** Format: int32 */
+            season?: number | null;
+        };
+        SeriesGaps: {
+            gap_list: string[];
+            gaps: number;
+            have: number;
+            /** Format: int32 */
+            max_ep: number;
+            mode: string;
+            noidx: number;
+            seasons: components["schemas"]["SeasonGaps"][];
+            /** Format: int32 */
+            tmdb_max: number;
         };
         ShareUrl: {
             pwd?: string | null;
@@ -1806,6 +1868,29 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["GapsSummaryResponse"];
+                };
+            };
+        };
+    };
+    scan_library_gaps: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GapsScanLibRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
                 };
             };
         };

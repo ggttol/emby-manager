@@ -1,8 +1,10 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  Copy,
   FileText,
   ListChecks,
+  Play,
   RefreshCw,
   SearchX,
   Webhook
@@ -14,10 +16,14 @@ import { useToast } from './Toast';
 
 type CatalogInsight = components['schemas']['CatalogInsight'];
 type CleanupSummaryResponse = components['schemas']['CleanupSummaryResponse'];
+type EmbyLibrary = components['schemas']['EmbyLibrary'];
+type GapsScanLibResult = components['schemas']['GapsScanLibResult'];
 type GapsSummaryResponse = components['schemas']['GapsSummaryResponse'];
 type InsightMeta = components['schemas']['InsightMeta'];
 type InsightTodo = components['schemas']['InsightTodo'];
+type LibrariesResponse = components['schemas']['LibrariesResponse'];
 type StrmReadOnlyOverview = components['schemas']['StrmReadOnlyOverview'];
+type TaskRun = components['schemas']['TaskRun'];
 type TaskHistorySummary = components['schemas']['TaskHistorySummary'];
 
 type Tone = 'neutral' | 'ok' | 'warn' | 'error';
@@ -52,6 +58,17 @@ function todoTone(severity: string): Tone {
 function taskProblemCount(task?: TaskHistorySummary) {
   if (!task) return 0;
   return task.error + task.cancelled + task.interrupted + task.stale_running;
+}
+
+function isActiveTask(task?: TaskRun | null) {
+  return task ? ['pending', 'running'].includes(task.status) : false;
+}
+
+function asGapsScanResult(result: unknown): GapsScanLibResult | null {
+  if (!result || typeof result !== 'object') return null;
+  const candidate = result as Partial<GapsScanLibResult>;
+  if (!Array.isArray(candidate.items) || typeof candidate.lib !== 'string') return null;
+  return candidate as GapsScanLibResult;
 }
 
 function StatCard({
@@ -342,26 +359,103 @@ export function DedupPanel() {
   );
 }
 
+function GapsScanResultBlock({
+  result,
+  onCopy
+}: {
+  result: GapsScanLibResult;
+  onCopy: (text: string, label: string) => void;
+}) {
+  const rows = result.items || [];
+  return (
+    <section className="readonlyBlock">
+      <div className="sectionTitleRow">
+        <h2>全库缺集报告</h2>
+        {result.copy_text && (
+          <button className="btn ghost compact" onClick={() => onCopy(result.copy_text, `${rows.length} 行求资源文本`)}>
+            <Copy size={14} />
+            复制全部
+          </button>
+        )}
+      </div>
+      <div className="miniStats">
+        <span>库 <strong>{result.lib}</strong></span>
+        <span>已扫 <strong>{count(result.analyzed)}</strong></span>
+        <span>有缺/落后 <strong>{count(result.total)}</strong></span>
+        <span>错误 <strong>{count(rows.filter((row) => row.err).length)}</strong></span>
+      </div>
+      {rows.length === 0 ? (
+        <div className="empty inlineEmpty">全部齐全，没有缺集或落后 TMDb 的项目</div>
+      ) : (
+        <div className="gapResultList">
+          {rows.map((row) => (
+            <article key={`${row.id || row.name}-${row.fmt || row.err || ''}`} className={row.err ? 'error' : ''}>
+              <div>
+                <strong>{row.name}</strong>
+                {row.tmdb && <span className="badge">tmdb:{row.tmdb}</span>}
+                {!row.err && <span className="badge warn">score {row.score}</span>}
+              </div>
+              {row.err ? (
+                <p>{row.err}</p>
+              ) : (
+                <p>{row.fmt}</p>
+              )}
+              {!row.err && (
+                <small>缺 {count(row.gap_count)} · 落后 {count(row.behind)}</small>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
   const [data, setData] = useState<GapsSummaryResponse | null>(null);
+  const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
+  const [selectedLib, setSelectedLib] = useState('');
+  const [libraryError, setLibraryError] = useState('');
+  const [scanTask, setScanTask] = useState<TaskRun | null>(null);
+  const [scanResult, setScanResult] = useState<GapsScanLibResult | null>(null);
+  const [startingScan, setStartingScan] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const toast = useToast();
 
   const isZhuigeng = mode === 'zhuigeng';
-  const title = isZhuigeng ? '追更只读预检' : '缺集只读预检';
+  const title = isZhuigeng ? '追更只读预检' : '缺集扫描';
   const subtitle = isZhuigeng
     ? '聚合 autostrm unmatched、任务异常和 strm 信号，真实在更剧扫描尚未 port。'
-    : '聚合 catalog、strm 和任务异常，真实 TMDb 季集对照尚未 port。';
+    : '按剧集库读取 Emby Series/Episodes，输出缺集和落后 TMDb 的求资源清单。';
   const notice = isZhuigeng
     ? '当前 Rust 版没有独立追更扫描接口；定时 kind 仍是 dry-run，这里不会遍历在更剧或转存缺集。'
-    : '当前 Rust 版不会连接 TMDb/Emby 推断真实缺集集号，只展示可用的只读预检信号。';
+    : '全库扫描只读 Emby 元数据，不修改媒体文件、不写 STRM、不调用 115。';
+
+  const loadLibraries = async () => {
+    if (isZhuigeng) return;
+    setLibraryError('');
+    try {
+      const res = await api<LibrariesResponse>('/api/v2/libraries');
+      const tv = res.libraries.filter((library) => library.type === 'tvshows');
+      setLibraries(tv);
+      setSelectedLib((current) => {
+        if (current && tv.some((library) => library.name === current)) return current;
+        return tv[0]?.name || '';
+      });
+    } catch (e) {
+      const message = errorMessage(e);
+      setLibraryError(message);
+      toast.push(`剧集库加载失败：${message}`, 'error');
+    }
+  };
 
   const load = async () => {
     setLoading(true);
     setError('');
     try {
       setData(await api<GapsSummaryResponse>('/api/v2/gaps/scan', { method: 'POST', body: JSON.stringify({}) }));
+      await loadLibraries();
     } catch (e) {
       const message = errorMessage(e);
       setError(message);
@@ -375,7 +469,70 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     load();
   }, [mode]);
 
+  useEffect(() => {
+    if (!scanTask?.id || !isActiveTask(scanTask)) return;
+    let disposed = false;
+    let timer = 0;
+
+    const poll = async () => {
+      try {
+        const next = await api<TaskRun>(`/api/v2/tasks/${scanTask.id}`);
+        if (disposed) return;
+        setScanTask(next);
+        if (next.status === 'done') {
+          const result = asGapsScanResult(next.result);
+          if (result) setScanResult(result);
+          return;
+        }
+        if (['error', 'cancelled', 'interrupted'].includes(next.status)) return;
+        timer = window.setTimeout(poll, 1200);
+      } catch (e) {
+        if (!disposed) {
+          toast.push(`缺集任务轮询失败：${errorMessage(e)}`, 'error');
+        }
+      }
+    };
+
+    timer = window.setTimeout(poll, 900);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, [scanTask?.id, scanTask?.status]);
+
   const topLibraries = useMemo(() => (data?.autostrm?.libraries || []).slice(0, 10), [data]);
+  const scanPct = scanTask?.total ? Math.min(100, Math.round((scanTask.progress / scanTask.total) * 100)) : 0;
+  const canStartScan = !isZhuigeng && selectedLib && !startingScan && !isActiveTask(scanTask);
+
+  const startScan = async () => {
+    if (!selectedLib) {
+      toast.push('先选择剧集库', 'warn');
+      return;
+    }
+    setStartingScan(true);
+    setScanResult(null);
+    try {
+      const task = await api<TaskRun>('/api/v2/gaps/scan-lib', {
+        method: 'POST',
+        body: JSON.stringify({ lib: selectedLib })
+      });
+      setScanTask(task);
+      toast.push(`已启动缺集扫描：${selectedLib}`, 'ok');
+    } catch (e) {
+      toast.push(`启动缺集扫描失败：${errorMessage(e)}`, 'error');
+    } finally {
+      setStartingScan(false);
+    }
+  };
+
+  const copyText = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.push(`已复制 ${label}`, 'ok');
+    } catch (e) {
+      toast.push(`复制失败：${errorMessage(e)}`, 'error');
+    }
+  };
 
   return (
     <section className="insightPanel">
@@ -391,9 +548,50 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
       </div>
       <div className="notice warn scanNotice">{notice}</div>
       {error && <div className="notice warn whitespaceNotice">{error}</div>}
+      {!isZhuigeng && (
+        <section className="readonlyBlock">
+          <div className="sectionTitleRow">
+            <h2>全库扫描</h2>
+            <button className="btn ghost compact" onClick={loadLibraries} disabled={loading}>
+              <RefreshCw size={14} />
+              刷新库
+            </button>
+          </div>
+          <div className="gapScanControls">
+            <select value={selectedLib} onChange={(event) => setSelectedLib(event.target.value)} aria-label="选择剧集库">
+              {libraries.length === 0 && <option value="">无剧集库</option>}
+              {libraries.map((library) => (
+                <option value={library.name} key={library.id || library.name}>{library.name}</option>
+              ))}
+            </select>
+            <button className="btn" onClick={startScan} disabled={!canStartScan}>
+              <Play size={16} />
+              {startingScan ? '启动中' : '全库扫描'}
+            </button>
+          </div>
+          {libraryError && <div className="notice warn whitespaceNotice">{libraryError}</div>}
+          {scanTask && (
+            <div className="taskInlineStatus">
+              <div>
+                <strong>{scanTask.label || scanTask.kind}</strong>
+                <span className={`badge ${scanTask.status}`}>{scanTask.status}</span>
+              </div>
+              <p>{scanTask.status_text || scanTask.kind}</p>
+              {isActiveTask(scanTask) && (
+                <>
+                  <div className="miniProgress"><i style={{ width: `${scanTask.total ? scanPct : 5}%` }} /></div>
+                  <small>{scanTask.progress}/{scanTask.total || '?'} · {scanPct}%</small>
+                </>
+              )}
+              {scanTask.error && <p className="errorText">{scanTask.error}</p>}
+            </div>
+          )}
+        </section>
+      )}
+      {scanResult && <GapsScanResultBlock result={scanResult} onCopy={copyText} />}
       <div className="statGrid">
-        <StatCard icon={<CheckCircle2 />} label="业务状态" value={data?.complete_business_port ? '完整' : '只读'} tone={data?.complete_business_port ? 'ok' : 'warn'} hint="v2 preview" />
-        <StatCard icon={<ListChecks />} label="待处理" value={count(data?.todos.length)} tone={data?.todos.length ? 'warn' : 'ok'} hint="只读预检" />
+        <StatCard icon={<CheckCircle2 />} label="业务状态" value={isZhuigeng ? (data?.complete_business_port ? '完整' : '只读') : '扫描可用'} tone={isZhuigeng && !data?.complete_business_port ? 'warn' : 'ok'} hint="v2 preview" />
+        <StatCard icon={<ListChecks />} label="待处理" value={count(data?.todos.length)} tone={data?.todos.length ? 'warn' : 'ok'} hint={isZhuigeng ? '只读预检' : '预检信号'} />
         <StatCard icon={isZhuigeng ? <Webhook /> : <SearchX />} label={isZhuigeng ? 'unmatched' : 'strm 文件'} value={isZhuigeng ? count(data?.autostrm?.unmatched?.total) : count(data?.strm?.strm_files)} tone={(isZhuigeng ? data?.autostrm?.unmatched?.total : data?.strm?.strm_files) ? 'warn' : 'neutral'} hint={isZhuigeng ? `${count(data?.autostrm?.seen?.total)} seen` : data?.strm?.root} />
         <StatCard icon={<AlertTriangle />} label="异常任务" value={count(taskProblemCount(data?.task_history))} tone={taskProblemCount(data?.task_history) ? 'warn' : 'ok'} hint={dateText(data?.task_history?.last_updated_at)} />
       </div>

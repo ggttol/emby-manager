@@ -2168,6 +2168,112 @@ main {
   font-size: 13px;
 }
 
+.sectionTitleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.sectionTitleRow h2 {
+  margin: 0;
+}
+
+.gapScanControls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.gapScanControls select {
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+
+.taskInlineStatus {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.taskInlineStatus > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.taskInlineStatus strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.taskInlineStatus p,
+.taskInlineStatus small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.gapResultList {
+  display: grid;
+  gap: 8px;
+  max-height: 440px;
+  overflow: auto;
+  margin-top: 10px;
+}
+
+.gapResultList article {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.gapResultList article.error {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.gapResultList article > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.gapResultList strong,
+.gapResultList p {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.gapResultList p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.gapResultList small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .insightList,
 .undoMiniList {
   display: grid;

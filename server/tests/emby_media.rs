@@ -194,6 +194,63 @@ async fn emby_client_search_apply_and_download_poster_requests_are_typed_and_enc
     );
 }
 
+#[tokio::test]
+async fn emby_client_lists_series_and_episodes_for_gap_scan() {
+    let series = r#"{
+        "Items": [
+            {"Id": "series 1", "Name": "Show A", "ProviderIds": {"Tmdb": "123"}}
+        ],
+        "TotalRecordCount": 1
+    }"#;
+    let episodes = r#"{
+        "Items": [
+            {"Id": "e1", "ParentIndexNumber": 1, "IndexNumber": 1, "LocationType": "FileSystem"},
+            {"Id": "e2", "ParentIndexNumber": 1, "IndexNumber": 2, "LocationType": "Virtual"}
+        ]
+    }"#;
+    let (base_url, requests) = spawn_fake_emby_many(vec![series, episodes]).await;
+    let client = EmbyClient::new(base_url, "secret-key", reqwest::Client::new());
+
+    let found = client.series("lib?id=1", 10).await.unwrap();
+    let eps = client.episodes("series 1?x=2").await.unwrap();
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].id.as_deref(), Some("series 1"));
+    assert_eq!(found[0].provider_id("Tmdb").as_deref(), Some("123"));
+    assert_eq!(eps.len(), 2);
+    assert_eq!(eps[1].location_type.as_deref(), Some("Virtual"));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].starts_with("GET /Items?"), "{}", requests[0]);
+    assert!(
+        requests[0].contains("ParentId=lib%3Fid%3D1"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[0].contains("IncludeItemTypes=Series"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[0].contains("Fields=ProviderIds"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[1].starts_with("GET /Shows/series%201%3Fx%3D2/Episodes?"),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        requests[1].contains("Fields=ParentIndexNumber%2CIndexNumber%2CLocationType"),
+        "{}",
+        requests[1]
+    );
+    assert!(requests[1].contains("Limit=6000"), "{}", requests[1]);
+}
+
 async fn spawn_fake_emby_many(bodies: Vec<&'static str>) -> (String, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
