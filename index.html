@@ -1036,8 +1036,77 @@ window.UI = (() => {
     let drawerListEl = null;
 
     let _failCount = 0;  // 近期失败任务数(未查看);铃铛标红用
+    const ACTIVE = { running: true, pending: true };
+    function _isActive(t) { return !!(t && ACTIVE[t.status]); }
+    function _tsMs(v) {
+      const n = Number(v || 0);
+      if (!n) return 0;
+      return n > 100000000000 ? n : n * 1000;
+    }
+    function _fmtDuration(ms) {
+      const s = Math.max(0, Math.floor((ms || 0) / 1000));
+      if (s < 10) return '刚刚';
+      if (s < 60) return s + '秒';
+      const m = Math.floor(s / 60);
+      if (m < 60) return m + '分' + (s % 60 ? (s % 60) + '秒' : '');
+      const h = Math.floor(m / 60);
+      if (h < 24) return h + '小时' + (m % 60 ? (m % 60) + '分' : '');
+      return Math.floor(h / 24) + '天' + (h % 24 ? (h % 24) + '小时' : '');
+    }
+    function _fmtClock(ts) {
+      const ms = _tsMs(ts);
+      if (!ms) return '';
+      const d = new Date(ms), now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const hm = pad(d.getHours()) + ':' + pad(d.getMinutes());
+      if (d.toDateString() === now.toDateString()) return hm;
+      return (d.getMonth() + 1) + '-' + d.getDate() + ' ' + hm;
+    }
+    function _timeMeta(t) {
+      const queued = _tsMs(t.queued_at || t.started || t._started);
+      const started = _tsMs(t.started_at) || queued;
+      const ended = _tsMs(t.ended_at || t.ended);
+      if (t.status === 'pending' && queued) return '排队 ' + _fmtDuration(Date.now() - queued) + ' · ' + _fmtClock(queued);
+      if (t.status === 'running' && started) return '运行 ' + _fmtDuration(Date.now() - started) + ' · ' + _fmtClock(started);
+      if (ended && started) return '耗时 ' + _fmtDuration(ended - started) + ' · ' + _fmtClock(ended);
+      if (started) return _fmtClock(started);
+      return '';
+    }
+    function _statusLabel(status) {
+      return ({ running: '运行中', pending: '排队', done: '完成', cancelled: '已取消', error: '出错' })[status] || (status || '?');
+    }
+    function _statusBadge(status) {
+      return ({
+        running: '<span class="badge">运行中</span>',
+        pending: '<span class="badge warn">排队</span>',
+        done: '<span class="badge g">完成</span>',
+        cancelled: '<span class="badge warn">已取消</span>',
+        error: '<span class="badge warn">出错</span>',
+      })[status] || '<span class="badge">?</span>';
+    }
+    function _mergeTask(tid, rt) {
+      const rec = T[tid] || {};
+      rec.kind = rt.kind || rec.kind || '';
+      rec.label = rec.label || rt.label || rt.kind || rt.tid || tid;
+      rec.status = rt.status || rec.status || 'running';
+      rec.progress = rt.progress != null ? rt.progress : (rec.progress || 0);
+      rec.total = rt.total != null ? rt.total : (rec.total || 0);
+      rec.status_text = rt.status_text != null ? rt.status_text : (rec.status_text || '');
+      rec.result = rt.result != null ? rt.result : rec.result;
+      rec.err = rt.err != null ? rt.err : rec.err;
+      rec.cancelled = !!(rt.cancelled || rec.cancelled);
+      rec.queued_at = rt.queued_at != null ? rt.queued_at : rec.queued_at;
+      rec.started_at = rt.started_at != null ? rt.started_at : rec.started_at;
+      rec.ended_at = rt.ended_at != null ? rt.ended_at : rec.ended_at;
+      rec.started = rt.started != null ? rt.started : rec.started;
+      rec.ended = rt.ended != null ? rt.ended : rec.ended;
+      rec.updated_at = rt.updated_at != null ? rt.updated_at : rec.updated_at;
+      rec._started = _tsMs(rec.queued_at || rec.started || rec.started_at || rec.updated_at) || rec._started || Date.now();
+      T[tid] = rec;
+      return rec;
+    }
     function _activeCount() {
-      return Object.values(T).filter(t => t.status === 'running' || t.status === 'pending').length;
+      return Object.values(T).filter(_isActive).length;
     }
     // 任务到终态:失败/取消【中心化】自动弹错误 toast + 铃铛标红。
     // 关键:error/cancelled 时【不调业务 onDone】—— 否则各 onDone 的成功分支会再弹个绿色「✓0」与错误 toast 打架。
@@ -1077,7 +1146,7 @@ window.UI = (() => {
     }
     function _updateProgress() {
       if (!progBarEl || !progRootEl) return;
-      const arr = Object.values(T).filter(t => t.status === 'running' || t.status === 'pending');
+      const arr = Object.values(T).filter(_isActive);
       if (!arr.length) {
         progRootEl.style.display = 'none';
         progBarEl.style.width = '0%';
@@ -1091,47 +1160,69 @@ window.UI = (() => {
     }
     function _renderDrawerList() {
       if (!drawerListEl) return;
-      const arr = Object.entries(T).sort((a, b) => (b[1]._started || 0) - (a[1]._started || 0));
+      const arr = Object.entries(T).sort((a, b) => {
+        const bm = _tsMs(b[1].updated_at) || b[1]._started || 0;
+        const am = _tsMs(a[1].updated_at) || a[1]._started || 0;
+        return bm - am;
+      });
+      const activeN = arr.filter(([, t]) => _isActive(t)).length;
+      const finishedN = arr.length - activeN;
+      const toolbar = `<div class="row" style="justify-content:space-between;gap:8px;margin-bottom:10px">
+        <div class="muted" style="font-size:12px;flex:1">${activeN ? activeN + ' 个进行中' : '无进行中任务'}${finishedN ? ' · ' + finishedN + ' 个已结束' : ''}</div>
+        <button class="btn ghost" data-refresh-tasks style="font-size:12px;padding:4px 8px">刷新</button>
+        ${finishedN ? '<button class="btn ghost" data-clear-finished style="font-size:12px;padding:4px 8px">清除已结束</button>' : ''}
+      </div>`;
       if (!arr.length) {
-        drawerListEl.innerHTML = '<div class="ui-empty"><div class="icon">📭</div><div class="title">没有任务</div></div>';
+        drawerListEl.innerHTML = toolbar + '<div class="ui-empty"><div class="icon">📭</div><div class="title">没有任务</div></div>';
+        _bindDrawerActions();
         return;
       }
-      drawerListEl.innerHTML = arr.map(([tid, t]) => {
-        const pct = t.total ? Math.round(100 * (t.progress || 0) / t.total) : 0;
-        const statusBadge = ({
-          running: '<span class="badge">运行中</span>',
-          pending: '<span class="badge warn">排队</span>',
-          done: '<span class="badge g">完成</span>',
-          cancelled: '<span class="badge warn">已取消</span>',
-          error: '<span class="badge warn">出错</span>',
-        })[t.status] || '<span class="badge">?</span>';
-        const cancelBtn = (t.status === 'running' || t.status === 'pending')
-          ? `<button class="btn ghost" data-cancel-tid="${esc(tid)}" style="font-size:12px;padding:3px 8px">取消</button>` : '';
+      drawerListEl.innerHTML = toolbar + arr.map(([tid, t]) => {
+        const pct = t.total ? Math.min(100, Math.round(100 * (t.progress || 0) / t.total)) : 0;
+        const barPct = t.total ? pct : 5;
+        const statusBadge = _statusBadge(t.status);
+        const active = _isActive(t);
+        const cancelling = active && (t.cancelled || String(t.status_text || '').indexOf('取消中') >= 0);
+        const cancelBtn = active
+          ? `<button class="btn ghost" data-cancel-tid="${esc(tid)}" ${cancelling ? 'disabled' : ''} style="font-size:12px;padding:3px 8px">${cancelling ? '取消中' : '取消'}</button>` : '';
+        const meta = [t.kind && t.kind !== t.label ? '类型 ' + t.kind : '', _timeMeta(t)].filter(Boolean).join(' · ');
         return `<div class="card" style="margin-bottom:8px">
           <div class="row" style="justify-content:space-between;align-items:flex-start">
             <div style="flex:1;min-width:0">
               <div style="font-weight:600;font-size:13px">${esc(t.label || tid)}</div>
-              <div class="muted" style="font-size:11px;margin-top:2px">${statusBadge} ${esc(t.status_text || '')}</div>
+              <div class="muted" style="font-size:11px;margin-top:2px">${statusBadge}${t.status_text ? ' ' + esc(t.status_text) : ''}</div>
+              ${meta ? `<div class="muted" style="font-size:11px;margin-top:2px">${esc(meta)} · ${esc(String(tid).slice(0,12))}</div>` : ''}
             </div>
             ${cancelBtn}
           </div>
-          ${t.status === 'running' || t.status === 'pending'
-            ? `<div style="background:#0b0f17;border-radius:4px;height:6px;margin-top:6px;overflow:hidden"><div style="width:${pct}%;height:100%;background:var(--blue);transition:width .3s"></div></div>
+          ${active
+            ? `<div style="background:#0b0f17;border-radius:4px;height:6px;margin-top:6px;overflow:hidden"><div style="width:${barPct}%;height:100%;background:var(--blue);transition:width .3s"></div></div>
               <div class="muted" style="font-size:11px;margin-top:2px">${t.progress || 0}/${t.total || '?'} · ${pct}%</div>`
             : ''}
           ${t.err ? `<div style="color:var(--red);font-size:11px;margin-top:4px">${esc(t.err)}</div>` : ''}
         </div>`;
       }).join('');
+      _bindDrawerActions();
+    }
+    function _bindDrawerActions() {
+      if (!drawerListEl) return;
       drawerListEl.querySelectorAll('[data-cancel-tid]').forEach(btn => {
         btn.addEventListener('click', () => cancel(btn.getAttribute('data-cancel-tid')));
       });
+      const refreshBtn = drawerListEl.querySelector('[data-refresh-tasks]');
+      if (refreshBtn) refreshBtn.addEventListener('click', () => hydrate());
+      const clearBtn = drawerListEl.querySelector('[data-clear-finished]');
+      if (clearBtn) clearBtn.addEventListener('click', clearFinished);
     }
 
     function bindBell(el) {
       if (!el) return;
       bellEl = el;
       bellCountEl = el.querySelector('.count');
-      el.addEventListener('click', openDrawer);
+      if (!el.__tasksBellBound) {
+        el.addEventListener('click', openDrawer);
+        el.__tasksBellBound = true;
+      }
       _updateBell();
     }
     function bindProgress(rootEl) {
@@ -1143,7 +1234,9 @@ window.UI = (() => {
 
     function _poll(tid) {
       const t = T[tid];
-      if (!t || t.status !== 'running' && t.status !== 'pending') return;
+      if (!t || !_isActive(t) || t._polling) return;
+      if (t._timer) { clearTimeout(t._timer); t._timer = null; }
+      t._polling = true;
       // 通过 window.api(已存在)调用;若 api 未就绪,降级到 fetch
       const fetchTask = async () => {
         if (typeof window.api === 'function') {
@@ -1156,25 +1249,33 @@ window.UI = (() => {
         } catch (e) { return { err: String(e) }; }
       };
       fetchTask().then(r => {
-        if (!T[tid]) return;  // 已被移除
-        if (r.err) {
-          T[tid].status = 'error';
-          T[tid].err = r.err;
+        const cur = T[tid];
+        if (!cur) return;  // 已被移除
+        cur._polling = false;
+        if (r.err && !r.status) {
+          cur.status = 'error';
+          cur.err = r.err;
+          cur.updated_at = Date.now() / 1000;
+          _updateBell();
           _finish(tid, t);
           return;
         }
-        T[tid].status = r.status;
-        T[tid].progress = r.progress;
-        T[tid].total = r.total;
-        T[tid].status_text = r.status_text;
-        T[tid].result = r.result;
-        T[tid].err = r.err;
+        const rec = _mergeTask(tid, r);
         _updateBell();
-        if (r.status === 'running' || r.status === 'pending') {
-          T[tid]._timer = setTimeout(() => _poll(tid), 900);
+        if (_isActive(rec)) {
+          rec._timer = setTimeout(() => _poll(tid), 900);
         } else {
           _finish(tid, t);
         }
+      }).catch(e => {
+        const cur = T[tid];
+        if (!cur) return;
+        cur._polling = false;
+        cur.status = 'error';
+        cur.err = String(e);
+        cur.updated_at = Date.now() / 1000;
+        _updateBell();
+        _finish(tid, t);
       });
     }
 
@@ -1192,19 +1293,48 @@ window.UI = (() => {
     async function cancel(tid) {
       const t = T[tid]; if (!t) return;
       try { t.onCancel && t.onCancel(); } catch (e) {}
+      let ok = true;
       try {
+        let resp;
         if (typeof window.api === 'function') {
-          await window.api('/api/task/cancel', { method: 'POST', body: JSON.stringify({ tid }) });
+          resp = await window.api('/api/task/cancel', { method: 'POST', body: JSON.stringify({ tid }) });
         } else {
-          await fetch('/api/task/cancel', {
+          const r = await fetch('/api/task/cancel', {
             method: 'POST', credentials: 'same-origin',
             headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': (window.CSRF || '') },
             body: JSON.stringify({ tid })
           });
+          if (!r.ok) ok = false;
+          try { resp = await r.json(); } catch (e) { resp = { ok: r.ok }; }
         }
-      } catch (e) {}
-      // 标记 cancelled(下次 poll 会被 server 同步覆盖)
-      if (T[tid]) T[tid].status = 'cancelled';
+        if (resp && resp.ok === false) ok = false;
+      } catch (e) { ok = false; }
+      if (!ok) {
+        try { toast('取消失败:任务可能已结束或不存在', { type: 'warn', ms: 3500 }); } catch (e) {}
+        return;
+      }
+      if (T[tid]) {
+        T[tid].cancelled = true;
+        T[tid].updated_at = Date.now() / 1000;
+        if (t.status === 'pending') {
+          T[tid].status = 'cancelled';
+          T[tid].status_text = '已在开始前取消';
+          T[tid].ended_at = Date.now() / 1000;
+          _finish(tid, t);
+        } else {
+          T[tid].status_text = '取消中…';
+          _poll(tid);
+        }
+      }
+      _updateBell();
+    }
+    function clearFinished() {
+      Object.keys(T).forEach(tid => {
+        if (_isActive(T[tid])) return;
+        if (T[tid]._timer) clearTimeout(T[tid]._timer);
+        delete T[tid];
+      });
+      _failCount = 0;
       _updateBell();
     }
     function list() {
@@ -1221,27 +1351,24 @@ window.UI = (() => {
       drawer.open();
       _renderDrawerList();
     }
-    async function hydrate() {
+    async function hydrate({ limit = 20 } = {}) {
       // 启动时拉后端任务列表,把还在 running/pending 的恢复进来
       try {
+        const url = '/api/tasks/list?limit=' + encodeURIComponent(limit);
         const r = (typeof window.api === 'function')
-          ? await window.api('/api/tasks/list?limit=20')
-          : await (await fetch('/api/tasks/list?limit=20', { credentials: 'same-origin' })).json();
+          ? await window.api(url)
+          : await (await fetch(url, { credentials: 'same-origin' })).json();
         if (!r || !Array.isArray(r.tasks)) return;
         r.tasks.forEach(rt => {
           if (!rt.tid) return;
-          if (T[rt.tid]) return;  // 已在
-          T[rt.tid] = {
-            label: rt.label || rt.kind || rt.tid,
-            status: rt.status, progress: rt.progress || 0, total: rt.total || 0,
-            status_text: rt.status_text || '', _started: rt.created_at ? rt.created_at * 1000 : Date.now(),
-          };
-          if (rt.status === 'running' || rt.status === 'pending') _poll(rt.tid);
+          const rec = _mergeTask(rt.tid, rt);
+          if (_isActive(rec)) _poll(rt.tid);
         });
         _updateBell();
+        return r;
       } catch (e) { /* 后端可能未实现 /api/tasks/list,静默 */ }
     }
-    return { bindBell, bindProgress, start, cancel, list, openDrawer, hydrate };
+    return { bindBell, bindProgress, start, cancel, list, openDrawer, hydrate, clearFinished, describeTime: _timeMeta, formatDuration: _fmtDuration };
   })();
 
   /* ============================================================
@@ -1710,7 +1837,6 @@ function initShell(){
   const progBar = document.querySelector('#globalProg');
   if (bellBtn && UI.tasks.bindBell) UI.tasks.bindBell(bellBtn);
   if (progBar && UI.tasks.bindProgress) UI.tasks.bindProgress(progBar);
-  if (bellBtn) bellBtn.addEventListener('click', ()=>UI.tasks.openDrawer && UI.tasks.openDrawer());
   if (UI.tasks.hydrate) UI.tasks.hydrate();
 
   // 用户菜单
@@ -2312,13 +2438,14 @@ async function loadRecentTasks(){
     const pct = t.total ? Math.round(100*(t.progress||0)/t.total) : 0;
     const cls = ({done:'g', cancelled:'warn', error:'warn', running:'', pending:'warn'})[t.status] || '';
     const label = t.kind || t.label || t.tid || '?';
+    const timeMeta = UI.tasks && UI.tasks.describeTime ? UI.tasks.describeTime(t) : '';
     return `<div style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin-bottom:6px">
       <div class="row" style="justify-content:space-between"><div><span class="badge ${cls}">${esc(t.status||'?')}</span> <b>${esc(label)}</b></div>
       <span class="muted" style="font-size:11px;font-family:ui-monospace,Menlo,monospace">${esc(String(t.tid||'').slice(0,10))}</span></div>
       ${(t.status==='running'||t.status==='pending')
         ? `<div style="background:#0b0f17;border-radius:4px;height:5px;margin-top:6px;overflow:hidden"><div style="width:${pct}%;height:100%;background:var(--blue);transition:width .3s"></div></div>
-           <div class="muted" style="font-size:11px;margin-top:2px">${t.progress||0}/${t.total||'?'} · ${pct}% · ${esc(t.status_text||'')}</div>`
-        : `<div class="muted" style="font-size:11px;margin-top:4px">${esc(t.status_text||'')}${t.err?' · <span style="color:var(--red)">'+esc(t.err)+'</span>':''}</div>`}
+           <div class="muted" style="font-size:11px;margin-top:2px">${t.progress||0}/${t.total||'?'} · ${pct}%${t.status_text?' · '+esc(t.status_text):''}${timeMeta?' · '+esc(timeMeta):''}</div>`
+        : `<div class="muted" style="font-size:11px;margin-top:4px">${esc(t.status_text||'')}${timeMeta?' · '+esc(timeMeta):''}${t.err?' · <span style="color:var(--red)">'+esc(t.err)+'</span>':''}</div>`}
     </div>`;
   }).join('');
 }

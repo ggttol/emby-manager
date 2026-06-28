@@ -39,6 +39,33 @@ class FrontendStaticTests(unittest.TestCase):
         self.assertIn("body.innerHTML = bodyNode;  // 调用方负责 esc", html)
         self.assertIn("bodyWrap.innerHTML = body;  // 允许 HTML(调用者负责安全)", html)
 
+    def test_task_center_hydrates_backend_timestamps(self):
+        html = INDEX.read_text(encoding="utf-8")
+        self.assertIn("queued_at", html)
+        self.assertIn("started_at", html)
+        self.assertIn("ended_at", html)
+        self.assertIn("updated_at", html)
+        self.assertNotIn("created_at", html)
+
+    def test_task_center_running_cancel_keeps_polling(self):
+        html = INDEX.read_text(encoding="utf-8")
+        cancel_start = html.index("async function cancel")
+        cancel_end = html.index("function clearFinished")
+        cancel_body = html[cancel_start:cancel_end]
+        self.assertIn("T[tid].status_text = '取消中…';", cancel_body)
+        self.assertIn("_poll(tid);", cancel_body)
+
+    def test_task_center_drawer_has_refresh_and_clear_actions(self):
+        html = INDEX.read_text(encoding="utf-8")
+        self.assertIn("data-refresh-tasks", html)
+        self.assertIn("data-clear-finished", html)
+        self.assertIn("clearFinished", html)
+
+    def test_task_center_bell_click_binding_is_not_duplicated(self):
+        html = INDEX.read_text(encoding="utf-8")
+        self.assertIn("__tasksBellBound", html)
+        self.assertNotIn("bellBtn.addEventListener('click'", html)
+
 
 if __name__ == "__main__":
     unittest.main()

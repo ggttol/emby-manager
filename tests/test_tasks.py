@@ -110,6 +110,38 @@ class TaskQueueTests(unittest.TestCase):
         release.set()
         self._wait_for(lambda: self.tasks.task_get(tid)["status"] == "cancelled")
 
+    def test_task_updates_timestamp_and_reports_active_count(self):
+        tid = self.tasks.task_new("manual")
+        created = self.tasks.task_get(tid)
+        self.assertIn("updated_at", created)
+        self.assertEqual(self.tasks.list_tasks()["active_count"], 1)
+
+        time.sleep(0.01)
+        self.tasks.task_set(tid, progress=3, total=9, status_text="处理中")
+        updated = self.tasks.task_get(tid)
+        self.assertGreater(updated["updated_at"], created["updated_at"])
+
+        listed = self.tasks.list_tasks()
+        self.assertEqual(listed["active_count"], 1)
+        self.assertEqual(listed["tasks"][0]["tid"], tid)
+
+        self.assertTrue(self.tasks.task_cancel(tid))
+        cancelled = self.tasks.task_get(tid)
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertGreaterEqual(cancelled["updated_at"], updated["updated_at"])
+        self.assertEqual(self.tasks.list_tasks()["active_count"], 0)
+
+    def test_list_tasks_orders_by_recent_update(self):
+        old_tid = self.tasks.task_new("old")
+        time.sleep(0.01)
+        new_tid = self.tasks.task_new("new")
+        time.sleep(0.01)
+        self.tasks.task_set(old_tid, status_text="newer update")
+
+        listed = self.tasks.list_tasks()["tasks"]
+        self.assertEqual(listed[0]["tid"], old_tid)
+        self.assertEqual(listed[1]["tid"], new_tid)
+
 
 if __name__ == "__main__":
     unittest.main()

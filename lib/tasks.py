@@ -24,7 +24,7 @@ def task_new(kind):
         TASKS[tid] = {"tid": tid, "kind": kind, "status": "pending", "progress": 0, "total": 0,
                       "status_text": "", "started": now, "queued_at": now,
                       "started_at": None, "ended": None, "ended_at": None,
-                      "result": None, "err": None, "cancelled": False}
+                      "updated_at": now, "result": None, "err": None, "cancelled": False}
         if len(TASKS) > TASKS_MAX:
             # pending 也还活着；不能为了腾位置删掉一个仍在等待的任务记录，
             # 否则对应 worker 醒来后会脱离 TaskCenter 继续执行。
@@ -37,7 +37,9 @@ def task_new(kind):
 
 def task_set(tid, **kw):
     with TASKS_LOCK:
-        if tid in TASKS: TASKS[tid].update(kw)
+        if tid in TASKS:
+            kw["updated_at"] = time.time()
+            TASKS[tid].update(kw)
 
 
 def task_get(tid):
@@ -50,12 +52,14 @@ def task_cancel(tid):
         t = TASKS.get(tid)
         if not t or t["status"] not in ACTIVE_STATUSES:
             return False
+        now = time.time()
         t["cancelled"] = True
+        t["updated_at"] = now
         if t["status"] == "pending":
             # 尚未取得并发槽，不应等它排到队头后才显示取消，更不能让它执行。
             t["status"] = "cancelled"
             t["status_text"] = "已在开始前取消"
-            t["ended"] = time.time()
+            t["ended"] = now
             t["ended_at"] = t["ended"]
         else:
             # 正在执行时只能协作式中止，保持 running 让前端继续轮询真实结果。
@@ -70,10 +74,11 @@ def task_is_cancelled(tid):
 
 
 def list_tasks(limit=20):
-    """返最近 N 个任务(包括 running 和已结束),按 started 倒序。"""
+    """返最近 N 个任务(包括 running 和已结束),按最近更新倒序。"""
     with TASKS_LOCK:
-        items = sorted(TASKS.values(), key=lambda t: t.get("started", 0), reverse=True)[:limit]
-        return {"tasks": [dict(t) for t in items]}
+        items = sorted(TASKS.values(), key=lambda t: t.get("updated_at") or t.get("ended") or t.get("started", 0), reverse=True)[:limit]
+        active_count = sum(1 for t in TASKS.values() if t.get("status") in ACTIVE_STATUSES)
+        return {"tasks": [dict(t) for t in items], "active_count": active_count}
 
 
 def run_async(kind, fn, *args, **kwargs):
@@ -95,19 +100,22 @@ def run_async(kind, fn, *args, **kwargs):
                     return
                 t["status"] = "running"
                 t["started_at"] = time.time()
+                t["updated_at"] = t["started_at"]
                 t["status_text"] = ""
             result = fn(tid, *args, **kwargs)
             with TASKS_LOCK:
                 t = TASKS.get(tid)
                 if t:
+                    now = time.time()
                     t["status"] = "cancelled" if t.get("cancelled") else "done"
-                    t["ended"] = time.time(); t["ended_at"] = t["ended"]; t["result"] = result
+                    t["ended"] = now; t["ended_at"] = now; t["updated_at"] = now; t["result"] = result
         except Exception as e:
             logger.exception("任务 %s [%s] 失败", tid, kind)
             with TASKS_LOCK:
                 t = TASKS.get(tid)
                 if t:
-                    t["status"] = "error"; t["ended"] = time.time(); t["ended_at"] = t["ended"]; t["err"] = str(e)
+                    now = time.time()
+                    t["status"] = "error"; t["ended"] = now; t["ended_at"] = now; t["updated_at"] = now; t["err"] = str(e)
         finally:
             if acquired:
                 try: _TASK_SLOTS.release()
