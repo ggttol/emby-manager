@@ -42,6 +42,39 @@ pub struct CatalogStatsResponse {
     pub packages: i64,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub struct CatalogDuplicateQuery {
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CatalogDuplicateGroup {
+    pub key: String,
+    pub count: i64,
+    pub link_types: Vec<String>,
+    pub sample_names: Vec<String>,
+    pub sample_sheets: Vec<String>,
+    pub sample_links: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CatalogLinkTypeCount {
+    pub link_type: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CatalogDuplicatesResponse {
+    pub ok: bool,
+    pub readonly: bool,
+    pub limit: i64,
+    pub duplicate_link_groups: i64,
+    pub duplicate_name_groups: i64,
+    pub link_type_distribution: Vec<CatalogLinkTypeCount>,
+    pub link_groups: Vec<CatalogDuplicateGroup>,
+    pub name_groups: Vec<CatalogDuplicateGroup>,
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CatalogTransferPlanItem {
     pub name: Option<String>,
@@ -155,6 +188,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/catalog/stats", get(catalog_stats))
         .route("/api/v2/catalog/search", get(catalog_search))
+        .route("/api/v2/catalog/duplicates", get(catalog_duplicates))
         .route("/api/v2/catalog/transfer-plan", post(catalog_transfer_plan))
 }
 
@@ -170,6 +204,74 @@ pub async fn catalog_stats(State(state): State<AppState>) -> AppResult<Json<Cata
         available: total > 0,
         total,
         packages,
+    }))
+}
+
+#[utoipa::path(get, path = "/api/v2/catalog/duplicates", tag = "catalog", params(CatalogDuplicateQuery), responses((status = 200, body = CatalogDuplicatesResponse)))]
+pub async fn catalog_duplicates(
+    State(state): State<AppState>,
+    Query(q): Query<CatalogDuplicateQuery>,
+) -> AppResult<Json<CatalogDuplicatesResponse>> {
+    let limit = q.limit.unwrap_or(20).clamp(1, 100);
+    let duplicate_link_groups: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (
+            SELECT link FROM catalog_items
+            WHERE btrim(link) <> ''
+            GROUP BY link
+            HAVING COUNT(*) > 1
+        ) groups",
+    )
+    .fetch_one(&state.pool)
+    .await?;
+    let duplicate_name_groups: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (
+            SELECT name FROM catalog_items
+            WHERE btrim(name) <> ''
+            GROUP BY name
+            HAVING COUNT(*) > 1
+        ) groups",
+    )
+    .fetch_one(&state.pool)
+    .await?;
+    let link_type_distribution = sqlx::query_as::<_, (String, i64)>(
+        "WITH duplicate_rows AS (
+            SELECT link_type
+            FROM catalog_items c
+            WHERE EXISTS (
+                SELECT 1 FROM catalog_items d
+                WHERE d.link = c.link AND btrim(d.link) <> ''
+                GROUP BY d.link
+                HAVING COUNT(*) > 1
+            )
+            OR EXISTS (
+                SELECT 1 FROM catalog_items d
+                WHERE d.name = c.name AND btrim(d.name) <> ''
+                GROUP BY d.name
+                HAVING COUNT(*) > 1
+            )
+        )
+        SELECT link_type, COUNT(*) AS count
+        FROM duplicate_rows
+        GROUP BY link_type
+        ORDER BY count DESC, link_type",
+    )
+    .fetch_all(&state.pool)
+    .await?
+    .into_iter()
+    .map(|(link_type, count)| CatalogLinkTypeCount { link_type, count })
+    .collect();
+    let link_groups = duplicate_groups(&state.pool, DuplicateKind::Link, limit).await?;
+    let name_groups = duplicate_groups(&state.pool, DuplicateKind::Name, limit).await?;
+
+    Ok(Json(CatalogDuplicatesResponse {
+        ok: true,
+        readonly: true,
+        limit,
+        duplicate_link_groups,
+        duplicate_name_groups,
+        link_type_distribution,
+        link_groups,
+        name_groups,
     }))
 }
 
@@ -244,6 +346,94 @@ pub async fn catalog_transfer_plan(
     Json(req): Json<CatalogTransferPlanRequest>,
 ) -> AppResult<Json<CatalogTransferPlanResponse>> {
     Ok(Json(build_transfer_plan(req)?))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DuplicateKind {
+    Link,
+    Name,
+}
+
+async fn duplicate_groups(
+    pool: &sqlx::PgPool,
+    kind: DuplicateKind,
+    limit: i64,
+) -> AppResult<Vec<CatalogDuplicateGroup>> {
+    let key_column = match kind {
+        DuplicateKind::Link => "link",
+        DuplicateKind::Name => "name",
+    };
+    let sql = format!(
+        "WITH groups AS (
+            SELECT {key_column} AS key, COUNT(*)::bigint AS count
+            FROM catalog_items
+            WHERE btrim({key_column}) <> ''
+            GROUP BY {key_column}
+            HAVING COUNT(*) > 1
+            ORDER BY COUNT(*) DESC, {key_column}
+            LIMIT $1
+        )
+        SELECT
+            g.key,
+            g.count,
+            ARRAY(
+                SELECT DISTINCT c.link_type
+                FROM catalog_items c
+                WHERE c.{key_column} = g.key
+                ORDER BY c.link_type
+            ) AS link_types,
+            ARRAY(
+                SELECT DISTINCT c.name
+                FROM catalog_items c
+                WHERE c.{key_column} = g.key
+                ORDER BY c.name
+                LIMIT 3
+            ) AS sample_names,
+            ARRAY(
+                SELECT DISTINCT c.sheet
+                FROM catalog_items c
+                WHERE c.{key_column} = g.key
+                ORDER BY c.sheet
+                LIMIT 3
+            ) AS sample_sheets,
+            ARRAY(
+                SELECT DISTINCT c.link
+                FROM catalog_items c
+                WHERE c.{key_column} = g.key
+                ORDER BY c.link
+                LIMIT 3
+            ) AS sample_links
+        FROM groups g
+        ORDER BY g.count DESC, g.key"
+    );
+    Ok(sqlx::query_as::<
+        _,
+        (
+            String,
+            i64,
+            Vec<String>,
+            Vec<String>,
+            Vec<String>,
+            Vec<String>,
+        ),
+    >(&sql)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(
+        |(key, count, link_types, sample_names, sample_sheets, sample_links)| {
+            CatalogDuplicateGroup {
+                key,
+                count,
+                link_types,
+                sample_names,
+                sample_sheets,
+                sample_links,
+            }
+        },
+    )
+    .collect())
 }
 
 pub fn build_transfer_plan(

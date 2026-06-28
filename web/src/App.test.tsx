@@ -855,6 +855,33 @@ describe('App shell', () => {
         calls.push(url.pathname);
         return jsonResponse(cleanupSummary);
       }
+      if (url.pathname === '/api/v2/catalog/duplicates') {
+        calls.push(url.pathname);
+        return jsonResponse({
+          ok: true,
+          readonly: true,
+          limit: 10,
+          duplicate_link_groups: 1,
+          duplicate_name_groups: 1,
+          link_type_distribution: [{ link_type: 'share115', count: 2 }],
+          link_groups: [{
+            key: 'https://115.com/s/shared',
+            count: 2,
+            link_types: ['share115'],
+            sample_names: ['重复资源 A', '重复资源 B'],
+            sample_sheets: ['电影'],
+            sample_links: ['https://115.com/s/shared']
+          }],
+          name_groups: [{
+            key: '同名资源',
+            count: 2,
+            link_types: ['share115', 'magnet'],
+            sample_names: ['同名资源'],
+            sample_sheets: ['电影'],
+            sample_links: ['https://115.com/s/one', 'magnet:?xt=urn:btih:two']
+          }]
+        });
+      }
       return undefined;
     });
 
@@ -867,8 +894,13 @@ describe('App shell', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '去重' }));
     expect(await screen.findByText('去重预检')).toBeInTheDocument();
-    expect(screen.getByText('v2 尚未暴露去重分析明细和替换/删除执行接口；这里先用 catalog 聚合值做风险提示。')).toBeInTheDocument();
-    await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(2));
+    expect(screen.getByText('资源目录重复信号')).toBeInTheDocument();
+    expect(screen.getByText('https://115.com/s/shared')).toBeInTheDocument();
+    expect(screen.getByText('同名资源')).toBeInTheDocument();
+    await waitFor(() => expect(calls).toEqual(expect.arrayContaining([
+      '/api/v2/cleanup/suggest',
+      '/api/v2/catalog/duplicates'
+    ])));
   });
 
   it('creates delete preview tasks from the manage panel with csrf', async () => {

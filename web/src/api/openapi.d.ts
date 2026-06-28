@@ -164,6 +164,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/catalog/duplicates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["catalog_duplicates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/catalog/search": {
         parameters: {
             query?: never;
@@ -821,6 +837,32 @@ export interface components {
             receive_code?: string | null;
             share: string;
         };
+        CatalogDuplicateGroup: {
+            /** Format: int64 */
+            count: number;
+            key: string;
+            link_types: string[];
+            sample_links: string[];
+            sample_names: string[];
+            sample_sheets: string[];
+        };
+        CatalogDuplicateQuery: {
+            /** Format: int64 */
+            limit?: number | null;
+        };
+        CatalogDuplicatesResponse: {
+            /** Format: int64 */
+            duplicate_link_groups: number;
+            /** Format: int64 */
+            duplicate_name_groups: number;
+            /** Format: int64 */
+            limit: number;
+            link_groups: components["schemas"]["CatalogDuplicateGroup"][];
+            link_type_distribution: components["schemas"]["CatalogLinkTypeCount"][];
+            name_groups: components["schemas"]["CatalogDuplicateGroup"][];
+            ok: boolean;
+            readonly: boolean;
+        };
         CatalogInsight: {
             available: boolean;
             /** Format: int64 */
@@ -849,6 +891,11 @@ export interface components {
             share?: string | null;
             sheet: string;
             transfer: boolean;
+        };
+        CatalogLinkTypeCount: {
+            /** Format: int64 */
+            count: number;
+            link_type: string;
         };
         CatalogSearchQuery: {
             /** Format: int64 */
@@ -1751,6 +1798,27 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["C115TestResponse"];
+                };
+            };
+        };
+    };
+    catalog_duplicates: {
+        parameters: {
+            query?: {
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogDuplicatesResponse"];
                 };
             };
         };

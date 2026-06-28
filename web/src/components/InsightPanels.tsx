@@ -15,6 +15,8 @@ import type { components } from '../api/openapi';
 import { useToast } from './Toast';
 
 type CatalogInsight = components['schemas']['CatalogInsight'];
+type CatalogDuplicateGroup = components['schemas']['CatalogDuplicateGroup'];
+type CatalogDuplicatesResponse = components['schemas']['CatalogDuplicatesResponse'];
 type CleanupSummaryResponse = components['schemas']['CleanupSummaryResponse'];
 type EmbyLibrary = components['schemas']['EmbyLibrary'];
 type GapsScanLibResult = components['schemas']['GapsScanLibResult'];
@@ -182,6 +184,72 @@ function CatalogBlock({ catalog }: { catalog?: CatalogInsight }) {
   );
 }
 
+function DuplicateGroupList({
+  title,
+  groups,
+  empty
+}: {
+  title: string;
+  groups: CatalogDuplicateGroup[];
+  empty: string;
+}) {
+  return (
+    <div className="duplicateGroupColumn">
+      <strong>{title}</strong>
+      <div className="insightList compact">
+        {groups.map((group) => (
+          <article key={`${title}-${group.key}`}>
+            <span className="badge warn">{count(group.count)}</span>
+            <strong>{group.key}</strong>
+            <small>
+              {(group.link_types || []).join(' / ') || 'unknown'}
+              {group.sample_names?.length ? ` · ${(group.sample_names || []).join('、')}` : ''}
+              {group.sample_sheets?.length ? ` · ${(group.sample_sheets || []).join('、')}` : ''}
+            </small>
+          </article>
+        ))}
+        {groups.length === 0 && <div className="empty inlineEmpty">{empty}</div>}
+      </div>
+    </div>
+  );
+}
+
+function CatalogDuplicateDetails({ data }: { data?: CatalogDuplicatesResponse | null }) {
+  const distribution = data?.link_type_distribution || [];
+  return (
+    <section className="readonlyBlock">
+      <div className="sectionTitleRow">
+        <h2>资源目录重复信号</h2>
+        <span className="badge">只读</span>
+      </div>
+      <div className="miniStats catalogMiniStats">
+        <span>重复链接组 <strong>{count(data?.duplicate_link_groups)}</strong></span>
+        <span>重复名称组 <strong>{count(data?.duplicate_name_groups)}</strong></span>
+        <span>样例上限 <strong>{count(data?.limit)}</strong></span>
+      </div>
+      <div className="miniStats">
+        {distribution.map((item) => (
+          <span key={item.link_type}>{item.link_type} <strong>{count(item.count)}</strong></span>
+        ))}
+        {data && distribution.length === 0 && <span>分布 <strong>0</strong></span>}
+      </div>
+      <div className="readonlySplit">
+        <DuplicateGroupList
+          title="重复链接 top 组"
+          groups={data?.link_groups || []}
+          empty="没有重复链接样例"
+        />
+        <DuplicateGroupList
+          title="重复名称 top 组"
+          groups={data?.name_groups || []}
+          empty="没有重复名称样例"
+        />
+      </div>
+      <p className="mutedParagraph">仅展示 catalog_items 中 link/name 的重复分组，不生成媒体库删除建议。</p>
+    </section>
+  );
+}
+
 function StrmBlock({ strm }: { strm?: StrmReadOnlyOverview }) {
   return (
     <section className="readonlyBlock">
@@ -214,12 +282,14 @@ function CleanupLayout({
   loading,
   error,
   onRefresh,
-  variant
+  variant,
+  duplicates
 }: {
   title: string;
   subtitle: string;
   notice: string;
   data: CleanupSummaryResponse | null;
+  duplicates?: CatalogDuplicatesResponse | null;
   loading: boolean;
   error: string;
   onRefresh: () => void;
@@ -257,7 +327,7 @@ function CleanupLayout({
             <span>资源总量 <strong>{count(data?.catalog?.total)}</strong></span>
             <span>整包 <strong>{count(data?.catalog?.packages)}</strong></span>
           </div>
-          <p className="mutedParagraph">v2 尚未暴露去重分析明细和替换/删除执行接口；这里先用 catalog 聚合值做风险提示。</p>
+          <p className="mutedParagraph">只读展示资源目录重复信号；当前页面不会执行替换、删除、Emby 更新或 undo 写入。</p>
         </section>
       ) : (
         <section className="readonlyBlock">
@@ -265,6 +335,7 @@ function CleanupLayout({
           <TodoList items={data?.todos || []} empty="当前只读预检没有生成清理待办" />
         </section>
       )}
+      {variant === 'dedup' && <CatalogDuplicateDetails data={duplicates} />}
       <div className="readonlySplit">
         <CatalogBlock catalog={data?.catalog} />
         <section className="readonlyBlock">
@@ -323,6 +394,7 @@ export function CleanupPanel() {
 
 export function DedupPanel() {
   const [data, setData] = useState<CleanupSummaryResponse | null>(null);
+  const [duplicates, setDuplicates] = useState<CatalogDuplicatesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const toast = useToast();
@@ -331,7 +403,12 @@ export function DedupPanel() {
     setLoading(true);
     setError('');
     try {
-      setData(await api<CleanupSummaryResponse>('/api/v2/cleanup/suggest', { method: 'POST', body: JSON.stringify({}) }));
+      const [summary, duplicateDetails] = await Promise.all([
+        api<CleanupSummaryResponse>('/api/v2/cleanup/suggest', { method: 'POST', body: JSON.stringify({}) }),
+        api<CatalogDuplicatesResponse>('/api/v2/catalog/duplicates?limit=10')
+      ]);
+      setData(summary);
+      setDuplicates(duplicateDetails);
     } catch (e) {
       const message = errorMessage(e);
       setError(message);
@@ -348,9 +425,10 @@ export function DedupPanel() {
   return (
     <CleanupLayout
       title="去重预检"
-      subtitle="先展示 catalog 聚合重复信号，替换和删除执行仍待移植。"
+      subtitle="展示 catalog 重复 link/name 样例，替换和删除执行仍待移植。"
       notice="当前 Rust 版没有 dedup 写接口，不会执行替换、删除、Emby 更新或 undo 写入。"
       data={data}
+      duplicates={duplicates}
       loading={loading}
       error={error}
       onRefresh={load}
