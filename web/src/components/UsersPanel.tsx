@@ -38,6 +38,15 @@ function parseNumberField(value: string, label: string) {
   return parsed;
 }
 
+function parseIntegerField(value: string, label: string) {
+  const parsed = parseNumberField(value, label);
+  if (parsed === undefined) return undefined;
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`${label}必须是非负整数`);
+  }
+  return parsed;
+}
+
 function lastActivity(value?: string | null) {
   if (!value) return '未记录';
   const date = new Date(value);
@@ -97,7 +106,7 @@ export function UsersPanel() {
     try {
       payload = {
         remote_bitrate_mbps: parseNumberField(draft.remoteBitrateMbps, '远程限速'),
-        simultaneous_stream_limit: parseNumberField(draft.simultaneousStreamLimit, '同时播放数'),
+        simultaneous_stream_limit: parseIntegerField(draft.simultaneousStreamLimit, '同时播放数'),
         disabled: draft.disabled
       };
     } catch (e) {
