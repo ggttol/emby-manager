@@ -5,6 +5,9 @@ logs/*.pid
 __pycache__/
 *.pyc
 .DS_Store
+.env
+.env.*
+!.env.example
 scripts/alert.conf
 catalog_115.db.bak-*
 catalog_115.db.tmp-*
@@ -15,3 +18,9 @@ catalog_115*.db-shm
 catalog_115*.db-wal
 catalog_115_validation.db
 catalog_115_local_unvalidated.db
+
+# Rust / Node rewrite artifacts
+target/
+web/node_modules/
+web/dist/
+server/.sqlx/

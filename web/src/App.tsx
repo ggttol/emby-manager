@@ -1,0 +1,335 @@
+import {
+  Activity,
+  Database,
+  FolderSearch,
+  LayoutDashboard,
+  ListChecks,
+  LogOut,
+  Search,
+  Settings,
+  Shield,
+  UserRound
+} from 'lucide-react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import {
+  ApiError,
+  api,
+  login as apiLogin,
+  logout as apiLogout,
+  me as apiMe,
+  subscribeAuthSession,
+  type AuthSession
+} from './api/client';
+import { TaskCenter } from './components/TaskCenter';
+import { ToastProvider, useToast } from './components/Toast';
+
+type Tab = {
+  id: string;
+  label: string;
+  endpoint: string;
+  description: string;
+};
+
+const tabs: Tab[] = [
+  { id: 'dashboard', label: '仪表盘', endpoint: '/api/v2/system/summary', description: '在线状态、库卡片和待办入口' },
+  { id: 'scan', label: '扫描', endpoint: '/api/v2/libraries', description: '单库 / 全库扫描与孤儿 strm 清理' },
+  { id: 'c115', label: '115 转存', endpoint: '/api/v2/c115/test', description: '分享链接 snap、转存、离线下载' },
+  { id: 'catalog', label: '找资源', endpoint: '/api/v2/catalog/stats', description: 'Postgres catalog 搜索和转存入口' },
+  { id: 'zhuigeng', label: '追更检查', endpoint: '/api/v2/gaps/scan', description: '在更剧扫描和缺集汇总' },
+  { id: 'gaps', label: '缺集检查', endpoint: '/api/v2/gaps/scan', description: '本地剧集和 TMDb 季集表对照' },
+  { id: 'posters', label: '海报修复', endpoint: '/api/v2/posters/detect-mismatch', description: '无海报、错绑检测和批量修复' },
+  { id: 'subtitles', label: '字幕', endpoint: '/api/v2/libraries', description: '外挂字幕覆盖统计' },
+  { id: 'dedup', label: '去重', endpoint: '/api/v2/manage/undo', description: '重复资源分析、删除、替换' },
+  { id: 'manage', label: '删除·移动', endpoint: '/api/v2/manage/undo', description: '危险操作、移动和 undo' },
+  { id: 'cleanup', label: '智能清理', endpoint: '/api/v2/cleanup/suggest', description: '评分、无观看、空间和元数据维度' },
+  { id: 'system', label: '系统', endpoint: '/api/v2/system/summary', description: 'Docker、负载、磁盘、健康预警' },
+  { id: 'schedules', label: '定时', endpoint: '/api/v2/schedules', description: '每日 / 每周 / 每月任务编排' },
+  { id: 'logs', label: '日志', endpoint: '/api/v2/logs', description: '应用日志和审计记录' },
+  { id: 'users', label: '用户', endpoint: '/api/v2/auth/me', description: 'Emby 用户策略、限速和并发' },
+  { id: 'settings', label: '设置', endpoint: '/api/v2/config', description: '路径、密钥、导入导出和迁移状态' }
+];
+
+type AuthState =
+  | { status: 'checking' }
+  | { status: 'anonymous' }
+  | { status: 'authenticated'; username: string };
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function Shell({ username, onLogout }: { username: string; onLogout: () => void }) {
+  const [active, setActive] = useState(tabs[0].id);
+  const tab = useMemo(() => tabs.find((item) => item.id === active) || tabs[0], [active]);
+
+  return (
+    <div className="app">
+      <aside className="sidebar">
+        <div className="brand">
+          <Shield size={24} />
+          <div><strong>Emby Manager</strong><span>Rust Preview</span></div>
+        </div>
+        <nav>
+          {tabs.map((item) => (
+            <button key={item.id} className={item.id === active ? 'active' : ''} onClick={() => setActive(item.id)}>
+              {item.label}
+            </button>
+          ))}
+        </nav>
+      </aside>
+      <main>
+        <header className="topbar">
+          <div>
+            <h1>{tab.label}</h1>
+            <p>{tab.description}</p>
+          </div>
+          <div className="topbarActions">
+            <TaskCenter />
+            <span className="userPill">
+              <UserRound size={15} />
+              {username}
+            </span>
+            <button className="iconBtn" onClick={onLogout} aria-label="登出">
+              <LogOut size={16} />
+            </button>
+          </div>
+        </header>
+        <TabPanel tab={tab} />
+      </main>
+    </div>
+  );
+}
+
+function TabPanel({ tab }: { tab: Tab }) {
+  const [data, setData] = useState<unknown>(null);
+  const [error, setError] = useState<string>('');
+  const [loading, setLoading] = useState(false);
+  const [strmLib, setStrmLib] = useState('电影');
+  const toast = useToast();
+
+  const load = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const method = tab.endpoint.includes('/scan') || tab.endpoint.includes('/suggest') || tab.endpoint.includes('/detect') ? 'POST' : 'GET';
+      const value = await api<unknown>(tab.endpoint, method === 'POST' ? { method, body: JSON.stringify({}) } : {});
+      setData(value);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+  }, [tab.id]);
+
+  const demoTask = async () => {
+    try {
+      await api('/api/v2/tasks/demo', { method: 'POST', body: JSON.stringify({ seconds: 5, label: `${tab.label} 演示任务` }) });
+      toast.push('演示任务已启动，打开任务中心查看', 'ok');
+    } catch (e) {
+      toast.push(`启动演示任务失败：${errorMessage(e)}`, 'error');
+    }
+  };
+
+  const loadStrm = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const value = await api<unknown>(`/api/v2/libraries/strm?lib=${encodeURIComponent(strmLib)}&limit=80`);
+      setData(value);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <section className="panel">
+      <div className="panelActions">
+        <button className="btn" onClick={load} disabled={loading}>{loading ? '加载中' : '刷新'}</button>
+        <button className="btn ghost" onClick={demoTask}>启动演示任务</button>
+      </div>
+      {(tab.id === 'scan' || tab.id === 'subtitles') && (
+        <div className="inlineTool">
+          <label>
+            <span>strm 库名</span>
+            <input className="input" value={strmLib} onChange={(e) => setStrmLib(e.target.value)} />
+          </label>
+          <button className="btn ghost" onClick={loadStrm} disabled={loading}>列出 strm</button>
+        </div>
+      )}
+      <FeatureMap id={tab.id} />
+      {error && <div className="notice warn">{error}</div>}
+      {data !== null && <pre className="jsonBlock">{JSON.stringify(data, null, 2)}</pre>}
+    </section>
+  );
+}
+
+function FeatureMap({ id }: { id: string }) {
+  const cards = [
+    { icon: <LayoutDashboard />, title: 'UI 壳', text: '16 个 tab 已拆成 React 路由入口。' },
+    { icon: <Activity />, title: '任务中心', text: '轮询 /api/v2/tasks，支持取消和全局进度。' },
+    { icon: <Database />, title: 'Postgres', text: '配置、任务、调度、undo、catalog 共用数据库。' },
+    { icon: <FolderSearch />, title: '业务 Port', text: `${id} 模块保留现有语义，后续逐项替换占位端点。` }
+  ];
+  if (id === 'catalog') cards.push({ icon: <Search />, title: 'Catalog', text: '搜索接口已接 Postgres catalog_items。' });
+  if (id === 'schedules') cards.push({ icon: <ListChecks />, title: 'Scheduler', text: 'CRUD 和立即运行占位任务已接入。' });
+  if (id === 'settings') cards.push({ icon: <Settings />, title: 'Config', text: '敏感字段脱敏，PUT 写入 app_settings。' });
+  if (id === 'users') cards.push({ icon: <UserRound />, title: 'Auth', text: '登录/session/legacy PBKDF2 rehash 已在后端实现。' });
+  return (
+    <div className="featureGrid">
+      {cards.map((card) => (
+        <article className="feature" key={card.title}>
+          {card.icon}
+          <h3>{card.title}</h3>
+          <p>{card.text}</p>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function CheckingPanel() {
+  return (
+    <div className="loginPage">
+      <section className="loginPanel" aria-label="正在检查登录状态">
+        <div className="brand loginBrand">
+          <Shield size={24} />
+          <div><strong>Emby Manager</strong><span>Rust Preview</span></div>
+        </div>
+        <p className="loginHint">正在检查登录状态...</p>
+      </section>
+    </div>
+  );
+}
+
+function LoginPanel({ onAuthenticated }: { onAuthenticated: (session: AuthSession) => void }) {
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const toast = useToast();
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    try {
+      const session = await apiLogin(username, password);
+      onAuthenticated(session);
+      toast.push('登录成功', 'ok');
+    } catch (e) {
+      const message = `登录失败：${errorMessage(e)}`;
+      setError(message);
+      toast.push(message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="loginPage">
+      <form className="loginPanel" onSubmit={submit}>
+        <div className="brand loginBrand">
+          <Shield size={24} />
+          <div><strong>Emby Manager</strong><span>Rust Preview</span></div>
+        </div>
+        <label>
+          <span>用户名</span>
+          <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" />
+        </label>
+        <label>
+          <span>密码</span>
+          <input
+            className="input"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="current-password"
+            autoFocus
+          />
+        </label>
+        {error && <div className="notice warn">{error}</div>}
+        <button className="btn" disabled={loading || !username.trim() || !password}>
+          {loading ? '登录中' : '登录'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function AuthGate() {
+  const [auth, setAuth] = useState<AuthState>({ status: 'checking' });
+  const toast = useToast();
+
+  useEffect(() => {
+    let alive = true;
+    const unsubscribe = subscribeAuthSession((session, reason) => {
+      if (session.username || session.csrf) {
+        setAuth({ status: 'authenticated', username: session.username || '已登录' });
+        return;
+      }
+      setAuth((prev) => {
+        if (prev.status === 'authenticated' && reason === 'unauthorized') {
+          toast.push('登录已过期，请重新登录', 'warn');
+        }
+        return { status: 'anonymous' };
+      });
+    });
+
+    apiMe()
+      .then((current) => {
+        if (!alive) return;
+        if (current.authenticated) {
+          setAuth({ status: 'authenticated', username: current.username || '已登录' });
+        } else {
+          setAuth({ status: 'anonymous' });
+        }
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setAuth({ status: 'anonymous' });
+        if (!(e instanceof ApiError && e.status === 401)) {
+          toast.push(`无法确认登录状态：${errorMessage(e)}`, 'warn');
+        }
+      });
+
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [toast]);
+
+  const handleAuthenticated = (session: AuthSession) => {
+    setAuth({ status: 'authenticated', username: session.username || '已登录' });
+  };
+
+  const handleLogout = async () => {
+    try {
+      await apiLogout();
+      toast.push('已登出', 'info');
+    } catch (e) {
+      toast.push(`登出请求失败，本地会话已清理：${errorMessage(e)}`, 'warn');
+    } finally {
+      setAuth({ status: 'anonymous' });
+    }
+  };
+
+  if (auth.status === 'checking') return <CheckingPanel />;
+  if (auth.status === 'anonymous') return <LoginPanel onAuthenticated={handleAuthenticated} />;
+  return <Shell username={auth.username} onLogout={handleLogout} />;
+}
+
+export default function App() {
+  return (
+    <ToastProvider>
+      <AuthGate />
+    </ToastProvider>
+  );
+}

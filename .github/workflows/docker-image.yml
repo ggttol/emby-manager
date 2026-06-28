@@ -1,0 +1,147 @@
+name: Docker image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: emby_manager_test
+          POSTGRES_USER: emby_manager
+          POSTGRES_PASSWORD: ci-postgres-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U emby_manager -d emby_manager_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://emby_manager:ci-postgres-password@127.0.0.1:5432/emby_manager_test
+      EMBY_MANAGER_AUTH_TEST_DATABASE_URL: postgres://emby_manager:ci-postgres-password@127.0.0.1:5432/emby_manager_test
+      EMBY_MANAGER_INSIGHTS_TEST_DATABASE_URL: postgres://emby_manager:ci-postgres-password@127.0.0.1:5432/emby_manager_test
+      EMBY_MANAGER_MANAGE_TEST_DATABASE_URL: postgres://emby_manager:ci-postgres-password@127.0.0.1:5432/emby_manager_test
+      EMBY_MANAGER_MIGRATE_TEST_DATABASE_URL: postgres://emby_manager:ci-postgres-password@127.0.0.1:5432/emby_manager_test
+      EMBY_MANAGER_SCHEDULER_TEST_DATABASE_URL: postgres://emby_manager:ci-postgres-password@127.0.0.1:5432/emby_manager_test
+      EMBY_MANAGER_BOOTSTRAP_PASSWORD: ci-preview-password
+      POSTGRES_PASSWORD: ci-postgres-password
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Rust tests
+        run: cargo test
+
+      - name: Web tests and build
+        working-directory: web
+        run: |
+          npm ci --no-audit --no-fund
+          npm run openapi:types
+          git diff --exit-code src/api/openapi.d.ts
+          npm test
+          npm run build
+
+      - name: Legacy Python tests
+        run: python3 -m unittest discover tests
+
+      - name: Compose config
+        run: docker compose config
+
+      - name: Compose smoke
+        run: |
+          set -euo pipefail
+          tmpdir="$(mktemp -d)"
+          mkdir -p "$tmpdir"/{legacy,data,strm,media}
+          export EMBY_MANAGER_LEGACY_DIR="$tmpdir/legacy"
+          export EMBY_MANAGER_DATA_DIR="$tmpdir/data"
+          export EMBY_MANAGER_STRM_ROOT="$tmpdir/strm"
+          export EMBY_MANAGER_MEDIA_ROOT="$tmpdir/media"
+          export EMBY_MANAGER_HTTP_PORT=18098
+          cleanup() {
+            docker compose -p emby-manager-rs-ci down -v || true
+            rm -rf "$tmpdir"
+          }
+          trap cleanup EXIT
+          docker compose -p emby-manager-rs-ci up -d --build
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18098/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -p emby-manager-rs-ci logs --tail=120
+          exit 1
+
+  build:
+    name: Build multi-platform image
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+
+      - name: Build and optionally push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

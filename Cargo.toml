@@ -1,0 +1,9 @@
+[workspace]
+members = ["server"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/ggttol/emby-manager"
+

@@ -1,0 +1,909 @@
+use crate::{error::AppResult, state::AppState};
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use sqlx::PgPool;
+use std::{collections::BTreeMap, path::Path};
+use uuid::Uuid;
+use walkdir::WalkDir;
+
+const STRM_SUMMARY_MAX_DEPTH: usize = 8;
+const STRM_SUMMARY_ENTRY_LIMIT: usize = 50_000;
+const STRM_SUMMARY_SAMPLE_LIMIT: usize = 20;
+const SUBTITLE_EXTENSIONS: &[&str] = &["ass", "idx", "smi", "srt", "ssa", "sub", "sup", "vtt"];
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct InsightMeta {
+    pub generated_at: DateTime<Utc>,
+    pub readonly: bool,
+    pub source: Vec<String>,
+    pub coverage: Vec<String>,
+    pub limitations: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct InsightTodo {
+    pub severity: String,
+    pub area: String,
+    pub message: String,
+    pub count: i64,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct GapsSummaryResponse {
+    pub ok: bool,
+    pub complete_business_port: bool,
+    pub meta: InsightMeta,
+    pub task_history: TaskHistorySummary,
+    pub catalog: CatalogInsight,
+    pub strm: StrmReadOnlyOverview,
+    pub autostrm: AutostrmSnapshot,
+    pub todos: Vec<InsightTodo>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CleanupSummaryResponse {
+    pub ok: bool,
+    pub complete_business_port: bool,
+    pub meta: InsightMeta,
+    pub task_history: TaskHistorySummary,
+    pub catalog: CatalogInsight,
+    pub strm: StrmReadOnlyOverview,
+    pub autostrm: AutostrmSnapshot,
+    pub schedules: ScheduleInsight,
+    pub logs: LogInsight,
+    pub todos: Vec<InsightTodo>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AutostrmStatusResponse {
+    pub ok: bool,
+    pub complete_business_port: bool,
+    pub meta: InsightMeta,
+    pub seen: AutostrmSeenStats,
+    pub unmatched: AutostrmUnmatchedStats,
+    pub libraries: Vec<AutostrmLibraryStat>,
+    pub todos: Vec<InsightTodo>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TaskHistorySummary {
+    pub total: i64,
+    pub pending: i64,
+    pub running: i64,
+    pub stale_running: i64,
+    pub done: i64,
+    pub error: i64,
+    pub cancelled: i64,
+    pub interrupted: i64,
+    pub last_updated_at: Option<DateTime<Utc>>,
+    pub recent_issues: Vec<TaskIssue>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TaskIssue {
+    pub id: Uuid,
+    pub kind: String,
+    pub label: String,
+    pub status: String,
+    pub message: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CatalogInsight {
+    pub available: bool,
+    pub total: i64,
+    pub packages: i64,
+    pub share115: i64,
+    pub magnet: i64,
+    pub ed2k: i64,
+    pub other: i64,
+    pub duplicate_links: i64,
+    pub duplicate_names: i64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct StrmReadOnlyOverview {
+    pub root: String,
+    pub exists: bool,
+    pub is_dir: bool,
+    pub max_depth: usize,
+    pub entry_limit: usize,
+    pub directories: i64,
+    pub top_level_dirs: i64,
+    pub empty_directories: i64,
+    pub files: i64,
+    pub strm_files: i64,
+    pub subtitle_files: i64,
+    pub other_files: i64,
+    pub extension_counts: Vec<ExtensionCount>,
+    pub samples: Vec<StrmSignalSample>,
+    pub truncated: bool,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ExtensionCount {
+    pub extension: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct StrmSignalSample {
+    pub kind: String,
+    pub rel_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct AutostrmSnapshot {
+    pub seen: AutostrmSeenStats,
+    pub unmatched: AutostrmUnmatchedStats,
+    pub libraries: Vec<AutostrmLibraryStat>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct AutostrmSeenStats {
+    pub total: i64,
+    pub libraries: i64,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct AutostrmUnmatchedStats {
+    pub total: i64,
+    pub without_emby_id: i64,
+    pub libraries: i64,
+    pub first_created_at: Option<DateTime<Utc>>,
+    pub last_updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct AutostrmLibraryStat {
+    pub lib: String,
+    pub seen: i64,
+    pub unmatched: i64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ScheduleInsight {
+    pub total: i64,
+    pub enabled: i64,
+    pub last_errors: i64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct LogInsight {
+    pub errors_7d: i64,
+    pub warnings_7d: i64,
+    pub last_error_at: Option<DateTime<Utc>>,
+}
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/api/v2/gaps/scan", post(gaps_summary))
+        .route("/api/v2/cleanup/suggest", post(cleanup_summary))
+        .route("/api/v2/autostrm/status", get(autostrm_status))
+}
+
+#[utoipa::path(post, path = "/api/v2/gaps/scan", tag = "insights", responses((status = 200, body = GapsSummaryResponse)))]
+pub async fn gaps_summary(State(state): State<AppState>) -> AppResult<Json<GapsSummaryResponse>> {
+    let task_history = task_history_summary(&state.pool).await?;
+    let catalog = catalog_insight(&state.pool).await?;
+    let autostrm = autostrm_snapshot(&state.pool).await?;
+    let strm = strm_readonly_overview(&state.settings.strm_root);
+
+    let mut warnings = strm.warnings.clone();
+    if !catalog.available {
+        warnings.push("catalog_items 为空，缺集待办只能参考任务与 strm/autostrm 状态".to_string());
+    }
+    let todos = gaps_todos(&task_history, &catalog, &strm, &autostrm);
+
+    Ok(Json(GapsSummaryResponse {
+        ok: true,
+        complete_business_port: false,
+        meta: insight_meta(
+            vec![
+                "task_runs",
+                "catalog_items",
+                "autostrm_seen",
+                "autostrm_unmatched",
+                "strm_root filesystem metadata",
+            ],
+            vec![
+                "只读预检摘要",
+                "覆盖任务历史、目录规模、资源目录可用性、autostrm 未匹配状态",
+            ],
+            vec![
+                "不连接 Emby，不读取剧集元数据，不推断真实缺集集号",
+                "不读取 .strm 文件内容，不修改文件系统",
+            ],
+        ),
+        task_history,
+        catalog,
+        strm,
+        autostrm,
+        todos,
+        warnings,
+    }))
+}
+
+#[utoipa::path(post, path = "/api/v2/cleanup/suggest", tag = "insights", responses((status = 200, body = CleanupSummaryResponse)))]
+pub async fn cleanup_summary(
+    State(state): State<AppState>,
+) -> AppResult<Json<CleanupSummaryResponse>> {
+    let task_history = task_history_summary(&state.pool).await?;
+    let catalog = catalog_insight(&state.pool).await?;
+    let autostrm = autostrm_snapshot(&state.pool).await?;
+    let schedules = schedule_insight(&state.pool).await?;
+    let logs = log_insight(&state.pool).await?;
+    let strm = strm_readonly_overview(&state.settings.strm_root);
+
+    let mut warnings = strm.warnings.clone();
+    if task_history.stale_running > 0 {
+        warnings.push("存在长时间未更新的 running 任务，可能是旧进程残留".to_string());
+    }
+    let todos = cleanup_todos(&task_history, &catalog, &strm, &autostrm, &schedules, &logs);
+
+    Ok(Json(CleanupSummaryResponse {
+        ok: true,
+        complete_business_port: false,
+        meta: insight_meta(
+            vec![
+                "task_runs",
+                "schedule_jobs",
+                "app_logs",
+                "catalog_items",
+                "autostrm_seen",
+                "autostrm_unmatched",
+                "strm_root filesystem metadata",
+            ],
+            vec![
+                "只读清理候选摘要",
+                "覆盖失败任务、日志异常、定时任务最近错误、catalog 重复项、strm 目录信号",
+            ],
+            vec![
+                "不删除、不移动、不重命名任何文件",
+                "不连接 Emby/115，不能替代最终清理评分与人工确认",
+                "strm 统计只看文件名和元数据，不读取文件内容",
+            ],
+        ),
+        task_history,
+        catalog,
+        strm,
+        autostrm,
+        schedules,
+        logs,
+        todos,
+        warnings,
+    }))
+}
+
+#[utoipa::path(get, path = "/api/v2/autostrm/status", tag = "autostrm", responses((status = 200, body = AutostrmStatusResponse)))]
+pub async fn autostrm_status(
+    State(state): State<AppState>,
+) -> AppResult<Json<AutostrmStatusResponse>> {
+    let snapshot = autostrm_snapshot(&state.pool).await?;
+    let mut warnings = Vec::new();
+    if snapshot.seen.total == 0 && snapshot.unmatched.total == 0 {
+        warnings
+            .push("autostrm 状态表暂无数据，可能尚未导入或 webhook worker 尚未接入".to_string());
+    }
+    let todos = autostrm_todos(&snapshot);
+
+    Ok(Json(AutostrmStatusResponse {
+        ok: true,
+        complete_business_port: false,
+        meta: insight_meta(
+            vec!["autostrm_seen", "autostrm_unmatched"],
+            vec![
+                "只读状态统计",
+                "覆盖 seen/unmatched 数量、库分布、最近更新时间",
+            ],
+            vec!["不接收 webhook，不触发匹配，不写入 seen/unmatched 表"],
+        ),
+        seen: snapshot.seen,
+        unmatched: snapshot.unmatched,
+        libraries: snapshot.libraries,
+        todos,
+        warnings,
+    }))
+}
+
+fn insight_meta(
+    source: Vec<&'static str>,
+    coverage: Vec<&'static str>,
+    limitations: Vec<&'static str>,
+) -> InsightMeta {
+    InsightMeta {
+        generated_at: Utc::now(),
+        readonly: true,
+        source: source.into_iter().map(str::to_string).collect(),
+        coverage: coverage.into_iter().map(str::to_string).collect(),
+        limitations: limitations.into_iter().map(str::to_string).collect(),
+    }
+}
+
+async fn task_history_summary(pool: &PgPool) -> AppResult<TaskHistorySummary> {
+    let (
+        total,
+        pending,
+        running,
+        stale_running,
+        done,
+        error,
+        cancelled,
+        interrupted,
+        last_updated_at,
+    ): (
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<DateTime<Utc>>,
+    ) = sqlx::query_as(
+        "SELECT
+                COUNT(*)::bigint,
+                COUNT(*) FILTER (WHERE status = 'pending')::bigint,
+                COUNT(*) FILTER (WHERE status = 'running')::bigint,
+                COUNT(*) FILTER (
+                    WHERE status = 'running' AND updated_at < now() - interval '30 minutes'
+                )::bigint,
+                COUNT(*) FILTER (WHERE status = 'done')::bigint,
+                COUNT(*) FILTER (WHERE status = 'error')::bigint,
+                COUNT(*) FILTER (WHERE status = 'cancelled')::bigint,
+                COUNT(*) FILTER (WHERE status = 'interrupted')::bigint,
+                MAX(updated_at)
+             FROM task_runs",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let recent_issues = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            DateTime<Utc>,
+        ),
+    >(
+        "SELECT id, kind, label, status, error, status_text, updated_at
+         FROM task_runs
+         WHERE status IN ('error', 'interrupted', 'cancelled')
+         ORDER BY updated_at DESC
+         LIMIT 8",
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(
+        |(id, kind, label, status, error, status_text, updated_at)| TaskIssue {
+            id,
+            kind,
+            label,
+            status,
+            message: error
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(status_text),
+            updated_at,
+        },
+    )
+    .collect();
+
+    Ok(TaskHistorySummary {
+        total,
+        pending,
+        running,
+        stale_running,
+        done,
+        error,
+        cancelled,
+        interrupted,
+        last_updated_at,
+        recent_issues,
+    })
+}
+
+async fn catalog_insight(pool: &PgPool) -> AppResult<CatalogInsight> {
+    let (total, packages, share115, magnet, ed2k, other): (i64, i64, i64, i64, i64, i64) =
+        sqlx::query_as(
+            "SELECT
+                COUNT(*)::bigint,
+                COUNT(*) FILTER (WHERE is_pkg)::bigint,
+                COUNT(*) FILTER (WHERE link_type = 'share115')::bigint,
+                COUNT(*) FILTER (WHERE link_type = 'magnet')::bigint,
+                COUNT(*) FILTER (WHERE link_type = 'ed2k')::bigint,
+                COUNT(*) FILTER (WHERE link_type NOT IN ('share115', 'magnet', 'ed2k'))::bigint
+             FROM catalog_items",
+        )
+        .fetch_one(pool)
+        .await?;
+    let duplicate_links: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint
+         FROM (
+            SELECT link
+            FROM catalog_items
+            WHERE link <> ''
+            GROUP BY link
+            HAVING COUNT(*) > 1
+         ) duplicated",
+    )
+    .fetch_one(pool)
+    .await?;
+    let duplicate_names: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint
+         FROM (
+            SELECT lower(name) AS normalized_name
+            FROM catalog_items
+            WHERE name <> ''
+            GROUP BY lower(name)
+            HAVING COUNT(*) > 1
+         ) duplicated",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(CatalogInsight {
+        available: total > 0,
+        total,
+        packages,
+        share115,
+        magnet,
+        ed2k,
+        other,
+        duplicate_links,
+        duplicate_names,
+    })
+}
+
+async fn autostrm_snapshot(pool: &PgPool) -> AppResult<AutostrmSnapshot> {
+    let (seen_total, seen_libraries, last_seen_at): (i64, i64, Option<DateTime<Utc>>) =
+        sqlx::query_as(
+            "SELECT COUNT(*)::bigint, COUNT(DISTINCT lib)::bigint, MAX(updated_at)
+             FROM autostrm_seen",
+        )
+        .fetch_one(pool)
+        .await?;
+    let (
+        unmatched_total,
+        without_emby_id,
+        unmatched_libraries,
+        first_created_at,
+        last_updated_at,
+    ): (i64, i64, i64, Option<DateTime<Utc>>, Option<DateTime<Utc>>) = sqlx::query_as(
+        "SELECT
+            COUNT(*)::bigint,
+            COUNT(*) FILTER (WHERE emby_id IS NULL OR emby_id = '')::bigint,
+            COUNT(DISTINCT lib)::bigint,
+            MIN(created_at),
+            MAX(updated_at)
+         FROM autostrm_unmatched",
+    )
+    .fetch_one(pool)
+    .await?;
+    let libraries = sqlx::query_as::<_, (String, i64, i64)>(
+        "SELECT
+            COALESCE(s.lib, u.lib) AS lib,
+            COALESCE(s.seen, 0)::bigint AS seen,
+            COALESCE(u.unmatched, 0)::bigint AS unmatched
+         FROM (
+            SELECT lib, COUNT(*)::bigint AS seen
+            FROM autostrm_seen
+            GROUP BY lib
+         ) s
+         FULL OUTER JOIN (
+            SELECT lib, COUNT(*)::bigint AS unmatched
+            FROM autostrm_unmatched
+            GROUP BY lib
+         ) u USING (lib)
+         ORDER BY COALESCE(u.unmatched, 0) DESC, COALESCE(s.seen, 0) DESC, lib ASC
+         LIMIT 20",
+    )
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(lib, seen, unmatched)| AutostrmLibraryStat {
+        lib,
+        seen,
+        unmatched,
+    })
+    .collect();
+
+    Ok(AutostrmSnapshot {
+        seen: AutostrmSeenStats {
+            total: seen_total,
+            libraries: seen_libraries,
+            last_seen_at,
+        },
+        unmatched: AutostrmUnmatchedStats {
+            total: unmatched_total,
+            without_emby_id,
+            libraries: unmatched_libraries,
+            first_created_at,
+            last_updated_at,
+        },
+        libraries,
+    })
+}
+
+async fn schedule_insight(pool: &PgPool) -> AppResult<ScheduleInsight> {
+    let (total, enabled, last_errors): (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            COUNT(*)::bigint,
+            COUNT(*) FILTER (WHERE enabled)::bigint,
+            COUNT(*) FILTER (WHERE last_status = 'error')::bigint
+         FROM schedule_jobs",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(ScheduleInsight {
+        total,
+        enabled,
+        last_errors,
+    })
+}
+
+async fn log_insight(pool: &PgPool) -> AppResult<LogInsight> {
+    let (errors_7d, warnings_7d, last_error_at): (i64, i64, Option<DateTime<Utc>>) =
+        sqlx::query_as(
+            "SELECT
+                COUNT(*) FILTER (
+                    WHERE lower(level) = 'error'
+                      AND created_at >= now() - interval '7 days'
+                )::bigint,
+                COUNT(*) FILTER (
+                    WHERE lower(level) IN ('warn', 'warning')
+                      AND created_at >= now() - interval '7 days'
+                )::bigint,
+                MAX(created_at) FILTER (WHERE lower(level) = 'error')
+             FROM app_logs",
+        )
+        .fetch_one(pool)
+        .await?;
+    Ok(LogInsight {
+        errors_7d,
+        warnings_7d,
+        last_error_at,
+    })
+}
+
+pub fn strm_readonly_overview(root: &Path) -> StrmReadOnlyOverview {
+    let mut overview = StrmReadOnlyOverview {
+        root: root.display().to_string(),
+        exists: root.exists(),
+        is_dir: root.is_dir(),
+        max_depth: STRM_SUMMARY_MAX_DEPTH,
+        entry_limit: STRM_SUMMARY_ENTRY_LIMIT,
+        directories: 0,
+        top_level_dirs: 0,
+        empty_directories: 0,
+        files: 0,
+        strm_files: 0,
+        subtitle_files: 0,
+        other_files: 0,
+        extension_counts: Vec::new(),
+        samples: Vec::new(),
+        truncated: false,
+        warnings: Vec::new(),
+    };
+    if !overview.exists {
+        overview
+            .warnings
+            .push(format!("strm_root 不存在: {}", root.display()));
+        return overview;
+    }
+    if !overview.is_dir {
+        overview
+            .warnings
+            .push(format!("strm_root 不是目录: {}", root.display()));
+        return overview;
+    }
+
+    let mut extension_counts = BTreeMap::<String, i64>::new();
+    for entry in WalkDir::new(root)
+        .min_depth(1)
+        .max_depth(STRM_SUMMARY_MAX_DEPTH)
+        .follow_links(false)
+        .into_iter()
+    {
+        let Ok(entry) = entry else {
+            overview
+                .warnings
+                .push("strm_root 遍历时有条目不可读".to_string());
+            continue;
+        };
+        let depth = entry.depth();
+        if (overview.directories + overview.files) as usize >= STRM_SUMMARY_ENTRY_LIMIT {
+            overview.truncated = true;
+            break;
+        }
+
+        let path = entry.path();
+        let rel_path = rel_display(root, path);
+        if entry.file_type().is_dir() {
+            overview.directories += 1;
+            if depth == 1 {
+                overview.top_level_dirs += 1;
+            }
+            if is_empty_dir(path) {
+                overview.empty_directories += 1;
+                push_sample(&mut overview.samples, "empty_dir", &rel_path);
+            }
+            continue;
+        }
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        overview.files += 1;
+        let ext = extension(path);
+        if !ext.is_empty() {
+            *extension_counts.entry(ext.clone()).or_default() += 1;
+        }
+        if ext == "strm" {
+            overview.strm_files += 1;
+            push_sample(&mut overview.samples, "strm", &rel_path);
+        } else if SUBTITLE_EXTENSIONS.contains(&ext.as_str()) {
+            overview.subtitle_files += 1;
+            push_sample(&mut overview.samples, "subtitle", &rel_path);
+        } else {
+            overview.other_files += 1;
+            push_sample(&mut overview.samples, "other_file", &rel_path);
+        }
+    }
+    overview.extension_counts = extension_counts
+        .into_iter()
+        .map(|(extension, count)| ExtensionCount { extension, count })
+        .collect();
+    overview
+}
+
+fn is_empty_dir(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
+}
+
+fn extension(path: &Path) -> String {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn rel_display(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn push_sample(samples: &mut Vec<StrmSignalSample>, kind: &str, rel_path: &str) {
+    if samples.len() >= STRM_SUMMARY_SAMPLE_LIMIT {
+        return;
+    }
+    samples.push(StrmSignalSample {
+        kind: kind.to_string(),
+        rel_path: rel_path.to_string(),
+    });
+}
+
+fn gaps_todos(
+    task_history: &TaskHistorySummary,
+    catalog: &CatalogInsight,
+    strm: &StrmReadOnlyOverview,
+    autostrm: &AutostrmSnapshot,
+) -> Vec<InsightTodo> {
+    let mut todos = Vec::new();
+    if autostrm.unmatched.total > 0 {
+        todos.push(todo(
+            "high",
+            "autostrm",
+            "存在未匹配条目，缺集扫描前建议先处理 unmatched 队列",
+            autostrm.unmatched.total,
+            "autostrm_unmatched",
+        ));
+    }
+    if task_history.error + task_history.interrupted > 0 {
+        todos.push(todo(
+            "medium",
+            "tasks",
+            "存在失败或中断任务，可能影响缺集判断的历史基线",
+            task_history.error + task_history.interrupted,
+            "task_runs",
+        ));
+    }
+    if strm.exists && strm.strm_files == 0 {
+        todos.push(todo(
+            "medium",
+            "strm",
+            "strm_root 下没有发现 .strm 文件，缺集扫描暂无本地只读参照",
+            1,
+            "strm_root filesystem metadata",
+        ));
+    }
+    if !catalog.available {
+        todos.push(todo(
+            "low",
+            "catalog",
+            "catalog_items 为空，无法给缺集待办提供资源目录参照",
+            1,
+            "catalog_items",
+        ));
+    }
+    todos
+}
+
+fn cleanup_todos(
+    task_history: &TaskHistorySummary,
+    catalog: &CatalogInsight,
+    strm: &StrmReadOnlyOverview,
+    autostrm: &AutostrmSnapshot,
+    schedules: &ScheduleInsight,
+    logs: &LogInsight,
+) -> Vec<InsightTodo> {
+    let mut todos = Vec::new();
+    if task_history.stale_running > 0 {
+        todos.push(todo(
+            "high",
+            "tasks",
+            "存在超过 30 分钟未更新的 running 任务，建议人工核对后清理状态",
+            task_history.stale_running,
+            "task_runs",
+        ));
+    }
+    if task_history.error + task_history.interrupted > 0 {
+        todos.push(todo(
+            "medium",
+            "tasks",
+            "存在失败或中断任务，可作为清理/重试候选",
+            task_history.error + task_history.interrupted,
+            "task_runs",
+        ));
+    }
+    if logs.errors_7d > 0 {
+        todos.push(todo(
+            "medium",
+            "logs",
+            "最近 7 天有 error 日志，建议先查看日志再执行危险清理",
+            logs.errors_7d,
+            "app_logs",
+        ));
+    }
+    if schedules.last_errors > 0 {
+        todos.push(todo(
+            "medium",
+            "schedules",
+            "有定时任务最近一次执行失败",
+            schedules.last_errors,
+            "schedule_jobs",
+        ));
+    }
+    if catalog.duplicate_links > 0 {
+        todos.push(todo(
+            "low",
+            "catalog",
+            "catalog_items 存在重复链接，可后续做只读去重报告",
+            catalog.duplicate_links,
+            "catalog_items",
+        ));
+    }
+    if catalog.duplicate_names > 0 {
+        todos.push(todo(
+            "low",
+            "catalog",
+            "catalog_items 存在重复名称，可后续辅助资源目录整理",
+            catalog.duplicate_names,
+            "catalog_items",
+        ));
+    }
+    if strm.empty_directories > 0 {
+        todos.push(todo(
+            "low",
+            "strm",
+            "strm_root 下存在空目录，仅作为候选信号，不会自动删除",
+            strm.empty_directories,
+            "strm_root filesystem metadata",
+        ));
+    }
+    if strm.other_files > 0 {
+        todos.push(todo(
+            "low",
+            "strm",
+            "strm_root 下存在非 .strm/字幕文件，可后续生成清理候选列表",
+            strm.other_files,
+            "strm_root filesystem metadata",
+        ));
+    }
+    if autostrm.unmatched.total > 0 {
+        todos.push(todo(
+            "low",
+            "autostrm",
+            "autostrm unmatched 仍有积压，清理前建议先确认是否为真实未匹配",
+            autostrm.unmatched.total,
+            "autostrm_unmatched",
+        ));
+    }
+    todos
+}
+
+fn autostrm_todos(snapshot: &AutostrmSnapshot) -> Vec<InsightTodo> {
+    let mut todos = Vec::new();
+    if snapshot.unmatched.total > 0 {
+        todos.push(todo(
+            "medium",
+            "autostrm",
+            "存在 unmatched 条目，需要后续匹配 worker 或人工处理",
+            snapshot.unmatched.total,
+            "autostrm_unmatched",
+        ));
+    }
+    if snapshot.seen.total == 0 {
+        todos.push(todo(
+            "low",
+            "autostrm",
+            "seen 表为空，当前只能说明状态库已就绪，不能证明 webhook 已运行",
+            1,
+            "autostrm_seen",
+        ));
+    }
+    todos
+}
+
+fn todo(severity: &str, area: &str, message: &str, count: i64, source: &str) -> InsightTodo {
+    InsightTodo {
+        severity: severity.to_string(),
+        area: area.to_string(),
+        message: message.to_string(),
+        count,
+        source: source.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strm_readonly_overview;
+
+    #[test]
+    fn strm_overview_is_metadata_only_and_counts_candidates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let season = tmp.path().join("Shows").join("Season 1");
+        let empty = tmp.path().join("Empty");
+        std::fs::create_dir_all(&season).unwrap();
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::write(season.join("E01.strm"), "http://example.invalid/E01.mkv").unwrap();
+        std::fs::write(season.join("E01.srt"), "subtitle").unwrap();
+        std::fs::write(season.join("poster.jpg"), "image").unwrap();
+
+        let overview = strm_readonly_overview(tmp.path());
+
+        assert!(overview.exists);
+        assert_eq!(overview.top_level_dirs, 2);
+        assert_eq!(overview.strm_files, 1);
+        assert_eq!(overview.subtitle_files, 1);
+        assert_eq!(overview.other_files, 1);
+        assert_eq!(overview.empty_directories, 1);
+        assert!(
+            overview
+                .samples
+                .iter()
+                .any(|sample| sample.kind == "empty_dir" && sample.rel_path == "Empty")
+        );
+    }
+}

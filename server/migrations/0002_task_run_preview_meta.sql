@@ -1,0 +1,5 @@
+ALTER TABLE task_runs
+    ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
+
+ALTER TABLE task_runs
+    ADD COLUMN IF NOT EXISTS params JSONB NOT NULL DEFAULT '{}'::jsonb;

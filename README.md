@@ -266,6 +266,37 @@ CREATE INDEX idx_catalog_link_type on catalog(link_type);
 
 3. 默认绑 `127.0.0.1`(只 NAS 本机能访问)。外网用走 NAS 反代或 iKuai 端口转发(见下)。
 
+### Rust + Docker 预览版
+
+Rust/React 重构版使用 `Dockerfile` + `docker-compose.yml` 启动,默认只把宿主 `127.0.0.1:8098` 映射进容器,不会占用 legacy Python 版的 `8097`。
+
+```sh
+docker compose up -d --build
+```
+
+默认挂载:
+
+- legacy 数据: `./legacy` → `/legacy`(只读,供迁移读取 `config.json` / `undo_log.jsonl` / `catalog_115.db`;真实迁移时用 `.env` 指到旧目录)
+- 本地数据: `./data` → `/data`
+- strm 根目录: `/volume1/strm` → `/strm`(默认只读灰度;确认要让 Rust 写入时再设 `EMBY_MANAGER_STRM_MODE=rw`)
+- CloudDrive2 媒体根: `/volume1/docker/clouddrive2/CloudNAS/CloudDrive` → `/media`(只读)
+
+可通过 `.env` 覆盖 `EMBY_MANAGER_BIND_IP`、`EMBY_MANAGER_HTTP_PORT`、`EMBY_MANAGER_LEGACY_DIR`、`EMBY_MANAGER_DATA_DIR`、`EMBY_MANAGER_STRM_ROOT`、`EMBY_MANAGER_STRM_MODE`、`EMBY_MANAGER_MEDIA_ROOT`、`EMBY_MANAGER_UID`、`EMBY_MANAGER_GID`、`POSTGRES_PASSWORD` 和 `EMBY_MANAGER_BOOTSTRAP_PASSWORD`。
+
+```env
+# 默认是 127.0.0.1,建议经 NAS 反代访问;确需局域网直连再改成 0.0.0.0
+EMBY_MANAGER_BIND_IP=127.0.0.1
+EMBY_MANAGER_HTTP_PORT=8098
+EMBY_MANAGER_BOOTSTRAP_PASSWORD=改成你的强密码
+POSTGRES_PASSWORD=改成随机强密码
+# 如果 NAS bind mount 不是 world-readable,把这里改成有权读取 /volume1/strm 和 CloudDrive2 的宿主 uid/gid
+EMBY_MANAGER_UID=10001
+EMBY_MANAGER_GID=10001
+```
+
+首次启动会创建 Rust 版 `admin` 用户。`EMBY_MANAGER_BOOTSTRAP_PASSWORD` 只在数据库里还没有用户时使用,且 Rust 服务会拒绝缺失、过短或明显弱的 bootstrap 密码。
+如果 `/strm` 或 CloudDrive2 bind mount 读不到,优先在 `.env` 里把 `EMBY_MANAGER_UID` / `EMBY_MANAGER_GID` 对齐到 NAS 上拥有这些目录权限的用户/组,而不是把容器改回 root。
+
 ### 开机自启(Synology DSM)
 
 ```sh
@@ -313,6 +344,8 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 
 ## 安全
 
+### Legacy Python
+
 - **密码:** PBKDF2-SHA256 + per-user salt + 200000 iter,只存 hash。
 - **登录限流:** 同源 IP 5 分钟内 5 次失败 → 429。
 - **Token:** 登录成功后发 token(HttpOnly cookie),7 天过期,后台 `token-reaper` 线程定期回收。
@@ -326,6 +359,16 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 - **配置导出剔密:** `/api/config/export` 返回的 JSON 把 `password_hash` 和 `c115_cookie` 替换为 `"<redacted>"`,导入时这些字段保留原值。
 - **反代 X-Forwarded-For:** 配 `trusted_proxies` 白名单后,login 限流按真实客户端 IP 而非反代 IP,防止所有用户被同时锁。
 - **Cookie / API Key 明文存:** 见下「已知未做」。
+
+### Rust Preview
+
+- **默认灰度端口:** compose 默认只映射 `127.0.0.1:8098`,容器内监听 `0.0.0.0` 仅用于 Docker 网络;要局域网直连必须显式设置 `EMBY_MANAGER_BIND_IP=0.0.0.0`。
+- **首次管理员:** 必须显式设置 `EMBY_MANAGER_BOOTSTRAP_PASSWORD`,服务会拒绝缺失、过短或明显弱密码。
+- **会话:** 登录发 HttpOnly cookie,React 前端只保存 CSRF/用户名,不把 Bearer token 存入 localStorage;Bearer 保留给后续显式 API/CLI 场景。
+- **CSRF:** cookie 模式下所有 POST/PUT/PATCH/DELETE 要带 `X-CSRF-Token`;未登录的 `/api/v2/*` 业务接口默认 401。
+- **运行用户:** Docker runtime 使用非 root 用户;`/media` 和默认 `/strm` 都按只读挂载,写能力需要显式 opt-in。
+- **NAS 权限:** Docker build/runtime 默认 uid/gid 是 `10001:10001`;Synology bind mount 保留宿主权限,可用 `.env` 的 `EMBY_MANAGER_UID` / `EMBY_MANAGER_GID` 对齐到有权读取媒体目录的 NAS 用户。
+- **仍在预览:** Rust 版还没有 legacy 的登录限流、trusted proxy/XFF、CSP 全量头和 16 tab 功能齐平,上线前必须通过灰度验收。
 
 ## 已知未做(诚实清单)
 
