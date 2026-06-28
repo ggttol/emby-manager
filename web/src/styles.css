@@ -1189,6 +1189,132 @@ main {
   line-height: 1.5;
 }
 
+.schedulesPanel {
+  display: grid;
+  gap: 14px;
+}
+
+.schedulesToolbar,
+.scheduleEditorHead,
+.scheduleActions,
+.scheduleItemMain,
+.scheduleMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.schedulesToolbar,
+.scheduleEditorHead {
+  justify-content: space-between;
+}
+
+.scheduleEditor {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid #b8ddd5;
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+
+.scheduleEditor h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.scheduleFormGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.scheduleFormGrid label,
+.scheduleParams {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.scheduleFormGrid small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.scheduleSwitch {
+  align-self: end;
+  color: var(--muted-strong) !important;
+}
+
+.scheduleParams textarea {
+  min-height: 92px;
+  resize: vertical;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+}
+
+.scheduleList {
+  display: grid;
+  gap: 10px;
+}
+
+.scheduleItem {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(190px, auto) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.scheduleItem.disabled {
+  opacity: 0.68;
+}
+
+.scheduleItemMain {
+  min-width: 0;
+}
+
+.scheduleItemMain svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.scheduleItemMain strong,
+.scheduleItemMain span {
+  display: block;
+}
+
+.scheduleItemMain strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduleItemMain span,
+.scheduleMeta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.scheduleMeta {
+  flex-wrap: wrap;
+}
+
+.scheduleError {
+  flex-basis: 100%;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.dangerText {
+  color: var(--danger) !important;
+}
+
 .catalogTable th:first-child,
 .catalogTable td:first-child {
   width: 64px;
@@ -1448,6 +1574,13 @@ main {
   .settingsBlockHead,
   .settingsGrid,
   .cidRow,
+  .schedulesToolbar,
+  .scheduleEditorHead,
+  .scheduleFormGrid,
+  .scheduleItem,
+  .scheduleActions,
+  .scheduleItemMain,
+  .scheduleMeta,
   .modalActions {
     align-items: stretch;
     flex-direction: column;

@@ -654,6 +654,125 @@ describe('App shell', () => {
     expect(await screen.findByText('配置已保存')).toBeInTheDocument();
   });
 
+  it('manages schedules through the v2 scheduler api', async () => {
+    const existing = {
+      id: '99999999-9999-4999-8999-999999999999',
+      name: '夜间扫库',
+      kind: 'scan_all',
+      params: {},
+      schedule: { mode: 'daily', hour: 3, minute: 0, weekday: 0, day: 1 },
+      enabled: true,
+      last_run_at: null,
+      last_ended_at: null,
+      last_status: null,
+      last_task_id: null,
+      last_error: null,
+      created_at: '2026-06-28T00:00:00Z',
+      updated_at: '2026-06-28T00:00:00Z'
+    };
+    const created = {
+      ...existing,
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      name: '每周追更',
+      kind: 'zhuigeng_scan_airing',
+      schedule: { mode: 'weekly', hour: 4, minute: 30, weekday: 2, day: 1 }
+    };
+    let schedules = [existing];
+    let createPayload: unknown = null;
+    let togglePayload: unknown = null;
+    let runCalls = 0;
+    let deleteCalls = 0;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/schedules' && (!init?.method || init.method === 'GET')) {
+        return jsonResponse(schedules);
+      }
+      if (url.pathname === '/api/v2/schedules' && init?.method === 'POST') {
+        const headers = init.headers as Headers;
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        createPayload = JSON.parse(String(init.body));
+        schedules = [created, ...schedules];
+        return jsonResponse(created);
+      }
+      if (/^\/api\/v2\/schedules\/[^/]+$/.test(url.pathname) && init?.method === 'PUT') {
+        const headers = init.headers as Headers;
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        togglePayload = JSON.parse(String(init.body));
+        const id = url.pathname.split('/').at(-1);
+        schedules = schedules.map((job) => job.id === id ? { ...job, enabled: false } : job);
+        return jsonResponse({ ...(schedules.find((job) => job.id === id) || existing), enabled: false });
+      }
+      if (/^\/api\/v2\/schedules\/[^/]+\/run$/.test(url.pathname)) {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        runCalls += 1;
+        return jsonResponse({
+          tid: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          task: {
+            id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            kind: 'scan_all',
+            label: '定时任务（scheduler preview dry run）',
+            status: 'pending',
+            progress: 0,
+            total: 1,
+            status_text: '排队中',
+            cancel_requested: false,
+            queued_at: '2026-06-28T00:00:01Z',
+            started_at: null,
+            ended_at: null,
+            updated_at: '2026-06-28T00:00:01Z',
+            params: {},
+            result: null,
+            source: 'manual'
+          }
+        });
+      }
+      if (/^\/api\/v2\/schedules\/[^/]+$/.test(url.pathname) && init?.method === 'DELETE') {
+        const headers = init.headers as Headers;
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        deleteCalls += 1;
+        const id = url.pathname.split('/').at(-1);
+        schedules = schedules.filter((job) => job.id !== id);
+        return jsonResponse({ ok: true });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '定时' }));
+    expect(await screen.findByText('夜间扫库')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '新建定时' }));
+    fireEvent.change(screen.getByLabelText('定时任务类型'), { target: { value: 'zhuigeng_scan_airing' } });
+    fireEvent.change(screen.getByLabelText('定时任务名称'), { target: { value: '每周追更' } });
+    fireEvent.change(screen.getByLabelText('触发模式'), { target: { value: 'weekly' } });
+    fireEvent.change(await screen.findByLabelText('星期'), { target: { value: '2' } });
+    fireEvent.change(screen.getByLabelText('小时'), { target: { value: '4' } });
+    fireEvent.change(screen.getByLabelText('分钟'), { target: { value: '30' } });
+    fireEvent.click(screen.getByRole('button', { name: '保存定时' }));
+
+    await waitFor(() => expect(createPayload).toEqual({
+      name: '每周追更',
+      kind: 'zhuigeng_scan_airing',
+      enabled: true,
+      params: {},
+      schedule: { mode: 'weekly', hour: 4, minute: 30, weekday: 2, day: 1 }
+    }));
+    expect(await screen.findByText('定时任务已创建')).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: '立即运行' })[0]);
+    await waitFor(() => expect(runCalls).toBe(1));
+    expect(await screen.findByText('已创建任务：定时任务（scheduler preview dry run）')).toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole('button', { name: '停用' })[0]);
+    await waitFor(() => expect(togglePayload).toEqual(expect.objectContaining({ enabled: false })));
+
+    fireEvent.click(screen.getAllByRole('button', { name: '删除' })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: '删除' }).at(-1)!);
+    await waitFor(() => expect(deleteCalls).toBe(1));
+  });
+
   it('shows login panel and enters the shell after login', async () => {
     mockApi((url) => {
       if (url.pathname === '/api/v2/auth/me') {

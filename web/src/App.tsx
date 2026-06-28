@@ -24,6 +24,7 @@ import { TaskCenter } from './components/TaskCenter';
 import { ToastProvider, useToast } from './components/Toast';
 import { C115Panel } from './components/C115Panel';
 import { CatalogPanel } from './components/CatalogPanel';
+import { SchedulesPanel } from './components/SchedulesPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { UsersPanel } from './components/UsersPanel';
 
@@ -181,6 +182,14 @@ function TabPanel({ tab }: { tab: Tab }) {
     return (
       <section className="panel">
         <SettingsPanel />
+      </section>
+    );
+  }
+
+  if (tab.id === 'schedules') {
+    return (
+      <section className="panel">
+        <SchedulesPanel />
       </section>
     );
   }
