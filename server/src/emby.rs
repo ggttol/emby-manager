@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 #[derive(Clone)]
@@ -75,6 +75,30 @@ pub struct EmbyLibrary {
     #[serde(rename = "type")]
     pub library_type: String,
     pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EmbyUser {
+    #[serde(rename = "Id")]
+    pub id: String,
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "LastActivityDate")]
+    pub last_activity_date: Option<String>,
+    #[serde(rename = "Policy", default)]
+    pub policy: EmbyUserPolicy,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct EmbyUserPolicy {
+    #[serde(rename = "IsDisabled")]
+    pub is_disabled: Option<bool>,
+    #[serde(rename = "RemoteClientBitrateLimit")]
+    pub remote_client_bitrate_limit: Option<i64>,
+    #[serde(rename = "SimultaneousStreamLimit")]
+    pub simultaneous_stream_limit: Option<i64>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 impl EmbyClient {
@@ -196,6 +220,45 @@ impl EmbyClient {
         .await
     }
 
+    pub async fn users(&self) -> anyhow::Result<Vec<EmbyUser>> {
+        self.get_json("/Users").await
+    }
+
+    pub async fn user(&self, user_id: &str) -> anyhow::Result<EmbyUser> {
+        if user_id.trim().is_empty() {
+            bail!("user_id is required for Emby user lookup");
+        }
+        let path = format!("/Users/{}", urlencoding::encode(user_id.trim()));
+        self.get_json(&path).await
+    }
+
+    pub async fn update_user_policy(
+        &self,
+        user_id: &str,
+        policy: &EmbyUserPolicy,
+    ) -> anyhow::Result<u16> {
+        if user_id.trim().is_empty() {
+            bail!("user_id is required for Emby user policy update");
+        }
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let path = format!("/Users/{}/Policy", urlencoding::encode(user_id.trim()));
+        let url = format!("{}{}", self.base_url, path);
+        let status = self
+            .http
+            .post(url)
+            .query(&[("api_key", self.api_key.as_str())])
+            .json(policy)
+            .send()
+            .await
+            .with_context(|| format!("failed to call Emby {path}"))?
+            .error_for_status()
+            .with_context(|| format!("Emby {path} returned an error"))?
+            .status();
+        Ok(status.as_u16())
+    }
+
     async fn post_empty(&self, path: &str, params: &[(&str, &str)]) -> anyhow::Result<u16> {
         if !self.has_api_key() {
             bail!("api_key is not configured for Emby requests");
@@ -215,6 +278,27 @@ impl EmbyClient {
             .with_context(|| format!("Emby {path} returned an error"))?
             .status();
         Ok(status.as_u16())
+    }
+
+    async fn get_json<T>(&self, path: &str) -> anyhow::Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let url = format!("{}{}", self.base_url, path);
+        Ok(self
+            .http
+            .get(url)
+            .query(&[("api_key", self.api_key.as_str())])
+            .send()
+            .await
+            .with_context(|| format!("failed to call Emby {path}"))?
+            .error_for_status()
+            .with_context(|| format!("Emby {path} returned an error"))?
+            .json()
+            .await?)
     }
 
     async fn items_page(

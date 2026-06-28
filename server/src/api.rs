@@ -1,6 +1,6 @@
 use crate::{
     auth, c115, catalog, config_store, error::AppResult, insights, logs, media_fs, openapi::ApiDoc,
-    posters, scheduler, settings::Settings, state::AppState, system, tasks, undo,
+    posters, scheduler, settings::Settings, state::AppState, system, tasks, undo, users,
 };
 use axum::{
     Json, Router,
@@ -55,6 +55,7 @@ pub fn router(pool: PgPool, settings: Settings) -> Router {
         .merge(logs::router())
         .merge(insights::router())
         .merge(posters::router())
+        .merge(users::router())
         .with_state(state);
 
     api.fallback_service(ServeDir::new(web_dist).not_found_service(ServeFile::new(index)))

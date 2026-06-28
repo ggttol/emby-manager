@@ -33,6 +33,10 @@ use crate::{
         UndoEntry, UndoExecuteAction, UndoExecuteRequest, UndoExecuteResponse, UndoListQuery,
         UndoListResponse,
     },
+    users::{
+        UpdateUserPolicyRequest, UpdateUserPolicyResponse, UserPolicySummary, UserSummary,
+        UsersResponse,
+    },
 };
 use utoipa::OpenApi;
 
@@ -75,7 +79,10 @@ use utoipa::OpenApi;
         crate::c115::auto_cid,
         crate::insights::gaps_summary,
         crate::insights::cleanup_summary,
-        crate::insights::autostrm_status
+        crate::insights::autostrm_status,
+        crate::users::list_users,
+        crate::users::get_user_policy,
+        crate::users::update_user_policy
     ),
     components(schemas(
         HealthResponse,
@@ -159,7 +166,12 @@ use utoipa::OpenApi;
         AutostrmUnmatchedStats,
         AutostrmLibraryStat,
         ScheduleInsight,
-        LogInsight
+        LogInsight,
+        UsersResponse,
+        UserSummary,
+        UserPolicySummary,
+        UpdateUserPolicyRequest,
+        UpdateUserPolicyResponse
     )),
     tags(
         (name = "health", description = "Runtime health"),
@@ -175,7 +187,8 @@ use utoipa::OpenApi;
         (name = "logs", description = "Application log APIs"),
         (name = "c115", description = "115 webapi APIs"),
         (name = "insights", description = "Read-only task and cleanup insights"),
-        (name = "autostrm", description = "Auto STRM status APIs")
+        (name = "autostrm", description = "Auto STRM status APIs"),
+        (name = "users", description = "Emby user policy APIs")
     )
 )]
 pub struct ApiDoc;

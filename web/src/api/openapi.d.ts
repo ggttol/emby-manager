@@ -532,6 +532,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_users"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/users/{id}/policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_user_policy"];
+        put: operations["update_user_policy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -1282,6 +1314,35 @@ export interface components {
         UndoListResponse: {
             items: components["schemas"]["UndoEntry"][];
             total: number;
+        };
+        UpdateUserPolicyRequest: {
+            disabled?: boolean | null;
+            /** Format: double */
+            remote_bitrate_mbps?: number | null;
+            /** Format: int64 */
+            simultaneous_stream_limit?: number | null;
+        };
+        UpdateUserPolicyResponse: {
+            ok: boolean;
+            user: components["schemas"]["UserSummary"];
+        };
+        UserPolicySummary: {
+            /** Format: int64 */
+            RemoteClientBitrateLimit?: number | null;
+            /** Format: int64 */
+            SimultaneousStreamLimit?: number | null;
+        };
+        UserSummary: {
+            disabled: boolean;
+            id: string;
+            last_activity_date?: string | null;
+            name: string;
+            policy: components["schemas"]["UserPolicySummary"];
+            /** Format: double */
+            remote_bitrate_mbps?: number | null;
+        };
+        UsersResponse: {
+            users: components["schemas"]["UserSummary"][];
         };
     };
     responses: never;
@@ -2060,6 +2121,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskCancelResponse"];
+                };
+            };
+        };
+    };
+    list_users: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsersResponse"];
+                };
+            };
+        };
+    };
+    get_user_policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Emby user id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserSummary"];
+                };
+            };
+        };
+    };
+    update_user_policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Emby user id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateUserPolicyRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateUserPolicyResponse"];
                 };
             };
         };
