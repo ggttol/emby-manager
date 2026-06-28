@@ -1467,6 +1467,325 @@ main {
   font-weight: 720;
 }
 
+.readonlyPanel {
+  display: grid;
+  gap: 14px;
+}
+
+.readonlyToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.readonlyToolbar > div {
+  display: grid;
+  gap: 3px;
+}
+
+.readonlyToolbar strong {
+  font-size: 15px;
+}
+
+.readonlyToolbar span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.statGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.statCard {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 4px 9px;
+  min-width: 0;
+  min-height: 112px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.statCard > div {
+  grid-row: 1 / span 3;
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--accent);
+}
+
+.statCard.warn > div {
+  color: var(--amber);
+}
+
+.statCard.error > div {
+  color: var(--danger);
+}
+
+.statCard.ok > div {
+  color: #3a7430;
+}
+
+.statCard span,
+.statCard small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statCard strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 21px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.readonlyBlock {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.readonlyBlock h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.todoList,
+.issueList,
+.sampleList,
+.extensionList,
+.libraryBars {
+  display: grid;
+  gap: 8px;
+}
+
+.todoItem,
+.issueList article,
+.sampleList article,
+.libraryBars article {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.todoItem {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 6px 9px;
+}
+
+.todoItem strong,
+.issueList strong,
+.sampleList strong,
+.libraryBars strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.todoItem small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.todoItem.error {
+  border-color: #efb3ad;
+  background: var(--danger-soft);
+}
+
+.todoItem.warn {
+  border-color: #edcf95;
+  background: var(--amber-soft);
+}
+
+.miniStats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.miniStats span,
+.extensionList span,
+.libraryBars article {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.miniStats strong,
+.extensionList strong,
+.libraryBars strong {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.issueList article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+}
+
+.issueList p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.issueList small,
+.sampleList small,
+.libraryBars span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.pathGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pathCard {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.pathCard > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pathCard code {
+  overflow: hidden;
+  color: var(--muted-strong);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pathCard small,
+.pathCard p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.pathCard.error {
+  border-color: #efb3ad;
+}
+
+.pathCard.warn {
+  border-color: #edcf95;
+}
+
+.readonlyFilter {
+  display: grid;
+  grid-template-columns: minmax(240px, 360px) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.readonlyFilter label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.readonlySplit {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.sampleList {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.sampleList article {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 4px 8px;
+}
+
+.sampleList small {
+  grid-column: 2;
+}
+
+.metaColumns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metaColumns div {
+  min-width: 0;
+}
+
+.metaColumns strong {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 13px;
+}
+
+.metaColumns ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.metaColumns li {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
+.inlineEmpty {
+  margin: 0;
+  padding: 14px;
+}
+
 .dangerText {
   color: var(--danger) !important;
 }
@@ -1741,6 +2060,13 @@ main {
   .logsFilters,
   .logsTabs,
   .undoResult dl,
+  .readonlyToolbar,
+  .statGrid,
+  .miniStats,
+  .pathGrid,
+  .readonlyFilter,
+  .readonlySplit,
+  .metaColumns,
   .modalActions {
     align-items: stretch;
     flex-direction: column;

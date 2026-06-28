@@ -66,6 +66,177 @@ function mockApi(handler?: ApiHandler) {
   });
 }
 
+const systemSummary = {
+  ok: false,
+  version: '0.1.0',
+  rust_version: '0.1.0',
+  cd_root: '/volume1/docker/clouddrive2/CloudNAS/CloudDrive',
+  strm_root: '/volume1/strm',
+  docker_bin: '/usr/local/bin/docker',
+  cd_root_exists: true,
+  strm_root_exists: true,
+  docker_bin_exists: true,
+  database: {
+    configured: true,
+    url: 'postgres://***@postgres/emby_manager',
+    status: 'ok',
+    current_database: 'emby_manager',
+    server_version: 'PostgreSQL 16',
+    pool_size: 5,
+    idle_connections: 2,
+    warning: null
+  },
+  host: {
+    os: 'linux',
+    arch: 'x86_64',
+    process_id: 42,
+    memory: { total_bytes: 8_000_000_000, available_bytes: 2_000_000_000, used_percent: 75 },
+    load_average: { one: 0.42, five: 0.36, fifteen: 0.31 }
+  },
+  configured_roots: [
+    {
+      key: 'strm_root',
+      label: 'strm 根目录',
+      path: '/volume1/strm',
+      expected_kind: 'directory',
+      exists: true,
+      is_dir: true,
+      is_file: false,
+      readable: true,
+      writable_hint: true,
+      disk: {
+        filesystem: '/dev/md0',
+        mount_point: '/volume1',
+        total_bytes: 10_000_000_000,
+        used_bytes: 7_500_000_000,
+        available_bytes: 2_500_000_000,
+        used_percent: 75
+      },
+      warnings: []
+    },
+    {
+      key: 'legacy_dir',
+      label: '旧版数据目录',
+      path: '/legacy',
+      expected_kind: 'directory',
+      exists: false,
+      is_dir: false,
+      is_file: false,
+      readable: null,
+      writable_hint: null,
+      disk: null,
+      warnings: ['旧版数据目录不存在']
+    }
+  ],
+  warnings: ['旧版数据目录不存在']
+};
+
+const readonlyMeta = {
+  generated_at: '2026-06-28T00:00:00Z',
+  readonly: true,
+  source: ['task_runs'],
+  coverage: ['只读预检摘要'],
+  limitations: ['不执行写操作']
+};
+
+const taskHistory = {
+  total: 5,
+  pending: 0,
+  running: 1,
+  stale_running: 0,
+  done: 3,
+  error: 1,
+  cancelled: 0,
+  interrupted: 0,
+  last_updated_at: '2026-06-28T00:03:00Z',
+  recent_issues: [
+    {
+      id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+      kind: 'scan',
+      label: '失败扫库',
+      status: 'error',
+      message: 'Emby timeout',
+      updated_at: '2026-06-28T00:02:00Z'
+    }
+  ]
+};
+
+const strmReadonly = {
+  root: '/volume1/strm',
+  exists: true,
+  is_dir: true,
+  max_depth: 8,
+  entry_limit: 50000,
+  directories: 8,
+  top_level_dirs: 2,
+  empty_directories: 1,
+  files: 130,
+  strm_files: 120,
+  subtitle_files: 9,
+  other_files: 1,
+  extension_counts: [{ extension: 'srt', count: 7 }],
+  samples: [{ kind: 'subtitle', rel_path: '电影/A.srt' }],
+  truncated: false,
+  warnings: []
+};
+
+const autostrmStatus = {
+  ok: true,
+  complete_business_port: false,
+  meta: readonlyMeta,
+  seen: { total: 20, libraries: 2, last_seen_at: '2026-06-28T00:01:00Z' },
+  unmatched: {
+    total: 3,
+    without_emby_id: 2,
+    libraries: 1,
+    first_created_at: '2026-06-27T00:00:00Z',
+    last_updated_at: '2026-06-28T00:02:00Z'
+  },
+  libraries: [{ lib: '电影', seen: 12, unmatched: 3 }],
+  todos: [{ severity: 'high', area: 'autostrm', message: '需要处理 unmatched', count: 3, source: 'autostrm_unmatched' }],
+  warnings: ['webhook worker 尚未接入']
+};
+
+const cleanupSummary = {
+  ok: true,
+  complete_business_port: false,
+  meta: readonlyMeta,
+  task_history: taskHistory,
+  catalog: {
+    available: true,
+    total: 260000,
+    packages: 1200,
+    share115: 200000,
+    magnet: 50000,
+    ed2k: 10000,
+    other: 0,
+    duplicate_links: 10,
+    duplicate_names: 8
+  },
+  strm: strmReadonly,
+  autostrm: {
+    seen: autostrmStatus.seen,
+    unmatched: autostrmStatus.unmatched,
+    libraries: autostrmStatus.libraries
+  },
+  schedules: { total: 2, enabled: 1, last_errors: 0 },
+  logs: { errors_7d: 1, warnings_7d: 2, last_error_at: '2026-06-28T00:02:00Z' },
+  todos: [{ severity: 'medium', area: 'tasks', message: '存在失败任务', count: 1, source: 'task_runs' }],
+  warnings: []
+};
+
+const gapsSummary = {
+  ok: true,
+  complete_business_port: false,
+  meta: readonlyMeta,
+  task_history: taskHistory,
+  catalog: cleanupSummary.catalog,
+  strm: strmReadonly,
+  autostrm: cleanupSummary.autostrm,
+  todos: [{ severity: 'low', area: 'catalog', message: '缺集只读预检', count: 1, source: 'catalog_items' }],
+  warnings: []
+};
+
 describe('App shell', () => {
   beforeEach(() => {
     installLocalStorage();
@@ -171,6 +342,126 @@ describe('App shell', () => {
     fireEvent.click(screen.getByRole('button', { name: /异常/ }));
     expect(screen.getByText('清理预检')).toBeInTheDocument();
     expect(screen.getByText('路径未配置')).toBeInTheDocument();
+  });
+
+  it('renders the dashboard read-only overview with csrf protected insight calls', async () => {
+    let cleanupCalled = false;
+    let gapsCalled = false;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        cleanupCalled = true;
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        gapsCalled = true;
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText('Rust Preview 总览')).toBeInTheDocument();
+    expect(await screen.findByText('需要处理 unmatched')).toBeInTheDocument();
+    expect(await screen.findByText('失败扫库')).toBeInTheDocument();
+    expect(await screen.findByText('120 / 9')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(cleanupCalled).toBe(true);
+      expect(gapsCalled).toBe(true);
+    });
+  });
+
+  it('renders system health details from the system tab', async () => {
+    mockApi((url) => {
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '系统' }));
+    expect(await screen.findByText('系统健康')).toBeInTheDocument();
+    expect(screen.getByText('strm 根目录')).toBeInTheDocument();
+    expect(screen.getByText('/volume1/strm')).toBeInTheDocument();
+    expect(screen.getAllByText('旧版数据目录不存在').length).toBeGreaterThan(0);
+  });
+
+  it('renders subtitle overview and reloads by library', async () => {
+    const requestedLibs: Array<string | null> = [];
+    mockApi((url) => {
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      if (url.pathname === '/api/v2/libraries/strm') {
+        requestedLibs.push(url.searchParams.get('lib'));
+        expect(url.searchParams.get('overview')).toBe('true');
+        return jsonResponse({
+          base: '/volume1/strm',
+          items: [],
+          truncated: false,
+          overview: {
+            base: '/volume1/strm',
+            max_depth: 8,
+            entry_limit: 100000,
+            directories: 12,
+            files: 144,
+            strm_files: 120,
+            subtitle_files: 9,
+            other_files: 15,
+            strm_bytes: 2048,
+            subtitle_bytes: 1024,
+            subtitle_extensions: [{ extension: 'srt', count: 7 }, { extension: 'ass', count: 2 }],
+            samples: [{ rel_path: '电影/A.srt', kind: 'subtitle', extension: 'srt', size: 512 }],
+            truncated: false,
+            warnings: []
+          }
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '字幕' }));
+    expect(await screen.findByText('外挂字幕概览')).toBeInTheDocument();
+    expect(screen.getByText('.srt')).toBeInTheDocument();
+    expect(screen.getByText('电影/A.srt')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('字幕库名'), { target: { value: '电影' } });
+    fireEvent.click(screen.getByRole('button', { name: '查看概览' }));
+    await waitFor(() => expect(requestedLibs).toContain('电影'));
   });
 
   it('loads and saves Emby user policy from the users tab', async () => {

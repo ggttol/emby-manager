@@ -25,6 +25,7 @@ import { ToastProvider, useToast } from './components/Toast';
 import { C115Panel } from './components/C115Panel';
 import { CatalogPanel } from './components/CatalogPanel';
 import { LogsPanel } from './components/LogsPanel';
+import { DashboardPanel, SubtitlesPanel, SystemPanel } from './components/ReadOnlyPanels';
 import { SchedulesPanel } from './components/SchedulesPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 import { UsersPanel } from './components/UsersPanel';
@@ -155,6 +156,14 @@ function TabPanel({ tab }: { tab: Tab }) {
     }
   };
 
+  if (tab.id === 'dashboard') {
+    return (
+      <section className="panel">
+        <DashboardPanel />
+      </section>
+    );
+  }
+
   if (tab.id === 'users') {
     return (
       <section className="panel">
@@ -199,6 +208,22 @@ function TabPanel({ tab }: { tab: Tab }) {
     return (
       <section className="panel">
         <LogsPanel />
+      </section>
+    );
+  }
+
+  if (tab.id === 'system') {
+    return (
+      <section className="panel">
+        <SystemPanel />
+      </section>
+    );
+  }
+
+  if (tab.id === 'subtitles') {
+    return (
+      <section className="panel">
+        <SubtitlesPanel />
       </section>
     );
   }
