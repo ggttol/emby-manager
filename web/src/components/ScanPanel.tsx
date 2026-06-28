@@ -48,12 +48,14 @@ export function ScanPanel() {
   const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
   const [selectedLib, setSelectedLib] = useState('');
   const [itemId, setItemId] = useState('');
+  const [keyword, setKeyword] = useState('');
   const [recursive, setRecursive] = useState(true);
   const [full, setFull] = useState(false);
+  const [fullauto, setFullauto] = useState(false);
   const [strm, setStrm] = useState<StrmListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [overviewLoading, setOverviewLoading] = useState(false);
-  const [starting, setStarting] = useState<'lib' | 'all' | 'item' | null>(null);
+  const [starting, setStarting] = useState<'lib' | 'all' | 'item' | 'strm' | null>(null);
   const [error, setError] = useState('');
   const toast = useToast();
 
@@ -121,12 +123,25 @@ export function ScanPanel() {
     loadStrm(selectedLib);
   };
 
-  const startScan = async (mode: 'lib' | 'all' | 'item') => {
+  const startScan = async (mode: 'lib' | 'all' | 'item' | 'strm') => {
     setStarting(mode);
     setError('');
     try {
       let payload: ScanLibraryRequest;
-      if (mode === 'item') {
+      if (mode === 'strm') {
+        if (!selectedLib) {
+          toast.push('先选择一个库', 'warn');
+          return;
+        }
+        payload = {
+          lib: selectedLib,
+          recursive,
+          full,
+          generate_strm: true,
+          keyword: keyword.trim() || null,
+          fullauto
+        };
+      } else if (mode === 'item') {
         const id = itemId.trim();
         if (!id) {
           toast.push('先填写 Emby ItemId', 'warn');
@@ -161,7 +176,7 @@ export function ScanPanel() {
       <div className="scanToolbar">
         <div>
           <strong>扫描工作台</strong>
-          <span>当前 Rust 版触发 Emby Refresh；生成 strm 与清孤儿仍在迁移中。</span>
+          <span>可触发 Emby Refresh，也可生成缺失 strm；清孤儿仍在迁移中。</span>
         </div>
         <button className="btn ghost" onClick={loadLibraries} disabled={loading}>
           <RefreshCw size={16} />
@@ -170,7 +185,7 @@ export function ScanPanel() {
       </div>
 
       <div className="notice warn scanNotice">
-        旧版扫描的 115 文件遍历、strm 写入、权限修复和孤儿清理尚未启用；这里不会修改媒体文件或删除 strm。
+        生成缺失 STRM 只会新增 .strm，不覆盖已有文件、不删除孤儿；无 tmdbid 的首次目录默认只提示。
       </div>
 
       <form className="scanGrid" onSubmit={submitOverview}>
@@ -202,6 +217,16 @@ export function ScanPanel() {
             placeholder="可选，精确刷新单项"
           />
         </label>
+        <label>
+          <span>目录关键词</span>
+          <input
+            className="input"
+            aria-label="扫描目录关键词"
+            value={keyword}
+            onChange={(event) => setKeyword(event.target.value)}
+            placeholder="可选，只处理匹配的顶层目录"
+          />
+        </label>
         <label className="switchRow scanSwitch">
           <input type="checkbox" checked={recursive} onChange={(event) => setRecursive(event.target.checked)} />
           <span>递归刷新</span>
@@ -209,6 +234,10 @@ export function ScanPanel() {
         <label className="switchRow scanSwitch">
           <input type="checkbox" checked={full} onChange={(event) => setFull(event.target.checked)} />
           <span>Full Refresh</span>
+        </label>
+        <label className="switchRow scanSwitch">
+          <input type="checkbox" checked={fullauto} onChange={(event) => setFullauto(event.target.checked)} />
+          <span>首次无 tmdbid 也生成</span>
         </label>
         <button className="btn ghost" disabled={overviewLoading}>
           <FileSearch size={16} />
@@ -222,6 +251,10 @@ export function ScanPanel() {
         <button className="btn" onClick={() => startScan('lib')} disabled={starting !== null || !selectedLib}>
           <ScanLine size={16} />
           {starting === 'lib' ? '创建中' : '刷新选中库'}
+        </button>
+        <button className="btn" onClick={() => startScan('strm')} disabled={starting !== null || !selectedLib}>
+          <FolderSync size={16} />
+          {starting === 'strm' ? '创建中' : '生成缺失 STRM'}
         </button>
         <button className="btn ghost" onClick={() => startScan('all')} disabled={starting !== null}>
           <FolderSync size={16} />

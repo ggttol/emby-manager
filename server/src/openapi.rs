@@ -27,7 +27,7 @@ use crate::{
     media_fs::{
         LibrariesResponse, ManageDeleteExecuteResult, ManageDeleteRequest, ManageMoveRequest,
         ManagePreviewResult, ScanLibraryItemResult, ScanLibraryRequest, ScanLibraryResult,
-        StrmEntry, StrmListResponse,
+        StrmEntry, StrmGenerateResult, StrmListResponse,
     },
     posters::{
         PosterApplyRequest, PosterApplyResponse, PosterDetectRequest, PosterDetectResponse,
@@ -135,6 +135,7 @@ use utoipa::OpenApi;
         ScanLibraryRequest,
         ScanLibraryResult,
         ScanLibraryItemResult,
+        StrmGenerateResult,
         ManageDeleteRequest,
         ManageDeleteExecuteResult,
         ManageMoveRequest,

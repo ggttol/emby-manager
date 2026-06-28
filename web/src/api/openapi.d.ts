@@ -1296,7 +1296,10 @@ export interface components {
         };
         ScanLibraryRequest: {
             full?: boolean | null;
+            fullauto?: boolean | null;
+            generate_strm?: boolean | null;
             item_id?: string | null;
+            keyword?: string | null;
             lib?: string | null;
             recursive?: boolean | null;
         };
@@ -1306,6 +1309,7 @@ export interface components {
             mode: string;
             ok: boolean;
             requested?: string | null;
+            strm?: null | components["schemas"]["StrmGenerateResult"];
             triggered: number;
         };
         ScheduleInsight: {
@@ -1377,6 +1381,20 @@ export interface components {
             rel_path: string;
             /** Format: int64 */
             size: number;
+        };
+        StrmGenerateResult: {
+            attention: string[];
+            keyword: string;
+            lib: string;
+            matched: number;
+            new_count: number;
+            new_folders: {
+                [key: string]: number;
+            };
+            permissions_fixed: number;
+            /** Format: int32 */
+            refresh_code?: number | null;
+            refreshed: boolean;
         };
         StrmListResponse: {
             base: string;

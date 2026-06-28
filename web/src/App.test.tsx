@@ -570,9 +570,21 @@ describe('App shell', () => {
     fireEvent.click(screen.getByRole('button', { name: '刷新选中库' }));
     await waitFor(() => expect(scanPayloads[0]).toEqual({ lib: '电影', recursive: true, full: false }));
 
+    fireEvent.change(screen.getByLabelText('扫描目录关键词'), { target: { value: 'Movie' } });
+    fireEvent.click(screen.getByLabelText('首次无 tmdbid 也生成'));
+    fireEvent.click(screen.getByRole('button', { name: '生成缺失 STRM' }));
+    await waitFor(() => expect(scanPayloads[1]).toEqual({
+      lib: '电影',
+      recursive: true,
+      full: false,
+      generate_strm: true,
+      keyword: 'Movie',
+      fullauto: true
+    }));
+
     fireEvent.change(screen.getByLabelText('Emby ItemId'), { target: { value: 'item-1' } });
     fireEvent.click(screen.getByRole('button', { name: '刷新 ItemId' }));
-    await waitFor(() => expect(scanPayloads[1]).toEqual({
+    await waitFor(() => expect(scanPayloads[2]).toEqual({
       item_id: 'item-1',
       lib: '电影',
       recursive: true,

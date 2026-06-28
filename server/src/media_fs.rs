@@ -25,6 +25,9 @@ const MAX_STRM_OVERVIEW_DEPTH: usize = 20;
 const DEFAULT_STRM_SAMPLE_LIMIT: usize = 20;
 const MAX_STRM_SAMPLE_LIMIT: usize = 100;
 const STRM_OVERVIEW_ENTRY_LIMIT: usize = 100_000;
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mkv", "mp4", "ts", "m2ts", "avi", "iso", "mov", "flv", "wmv", "rmvb",
+];
 const SUBTITLE_EXTENSIONS: &[&str] = &["ass", "idx", "smi", "srt", "ssa", "sub", "sup", "vtt"];
 const TASK_CANCELLED_SENTINEL: &str = "__task_cancelled__";
 
@@ -97,6 +100,9 @@ pub struct ScanLibraryRequest {
     pub item_id: Option<String>,
     pub recursive: Option<bool>,
     pub full: Option<bool>,
+    pub generate_strm: Option<bool>,
+    pub keyword: Option<String>,
+    pub fullauto: Option<bool>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -107,6 +113,7 @@ pub struct ScanLibraryResult {
     pub triggered: usize,
     pub global_refresh: bool,
     pub items: Vec<ScanLibraryItemResult>,
+    pub strm: Option<StrmGenerateResult>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -114,6 +121,19 @@ pub struct ScanLibraryItemResult {
     pub id: Option<String>,
     pub name: String,
     pub code: u16,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct StrmGenerateResult {
+    pub lib: String,
+    pub keyword: String,
+    pub matched: usize,
+    pub new_count: usize,
+    pub new_folders: BTreeMap<String, usize>,
+    pub attention: Vec<String>,
+    pub permissions_fixed: usize,
+    pub refreshed: bool,
+    pub refresh_code: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -666,6 +686,9 @@ async fn run_scan_task(
     let recursive = req.recursive.unwrap_or(true);
     let full = req.full.unwrap_or(false);
     let requested = first_non_empty([req.item_id.clone(), req.lib.clone()]);
+    if req.generate_strm.unwrap_or(false) {
+        return run_strm_generate_task(state, id, client, req, requested, recursive, full).await;
+    }
     let plan = resolve_scan_plan(client, &req).await?;
 
     match plan {
@@ -689,6 +712,7 @@ async fn run_scan_task(
                     name: reason,
                     code,
                 }],
+                strm: None,
             })
         }
         ScanPlan::Items(targets) => {
@@ -728,9 +752,87 @@ async fn run_scan_task(
                 triggered: items.len(),
                 global_refresh: false,
                 items,
+                strm: None,
             })
         }
     }
+}
+
+async fn run_strm_generate_task(
+    state: &AppState,
+    id: Uuid,
+    client: &EmbyClient,
+    req: ScanLibraryRequest,
+    requested: Option<String>,
+    recursive: bool,
+    full: bool,
+) -> AppResult<ScanLibraryResult> {
+    let lib = req
+        .lib
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .ok_or_else(|| AppError::BadRequest("生成 STRM 需要指定 lib".to_string()))?
+        .to_string();
+    tasks::set_total(&state.pool, id, 2).await?;
+    if tasks::cancel_requested(&state.pool, id).await {
+        tasks::finish_cancelled(&state.pool, id).await?;
+        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+    }
+    tasks::set_progress(&state.pool, id, 0, "生成缺失 STRM").await?;
+    let mut strm = generate_missing_strm_for_library(
+        state,
+        &lib,
+        req.keyword.as_deref().and_then(non_empty_trimmed),
+        req.fullauto.unwrap_or(false),
+    )?;
+    tasks::set_progress(&state.pool, id, 1, "STRM 生成完成").await?;
+    if tasks::cancel_requested(&state.pool, id).await {
+        tasks::finish_cancelled(&state.pool, id).await?;
+        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+    }
+
+    let mut items = Vec::new();
+    if strm.new_count > 0 || strm.permissions_fixed > 0 {
+        let plan = resolve_scan_plan(client, &req).await?;
+        match plan {
+            ScanPlan::Items(targets) => {
+                if let Some(target) = targets.into_iter().next() {
+                    tasks::set_progress(&state.pool, id, 1, &format!("刷新 {}", target.name))
+                        .await?;
+                    let code = client.refresh_item(&target.id, recursive, full).await?;
+                    strm.refreshed = (200..300).contains(&code);
+                    strm.refresh_code = Some(code);
+                    items.push(ScanLibraryItemResult {
+                        id: Some(target.id),
+                        name: target.name,
+                        code,
+                    });
+                }
+            }
+            ScanPlan::Global { .. } => {
+                let code = client.refresh_library().await?;
+                strm.refreshed = (200..300).contains(&code);
+                strm.refresh_code = Some(code);
+                items.push(ScanLibraryItemResult {
+                    id: None,
+                    name: "全局刷新".to_string(),
+                    code,
+                });
+            }
+        }
+    }
+    tasks::set_progress(&state.pool, id, 2, "STRM 任务完成").await?;
+    Ok(ScanLibraryResult {
+        ok: strm
+            .refresh_code
+            .is_none_or(|code| (200..300).contains(&code)),
+        mode: "strm_generate".to_string(),
+        requested,
+        triggered: items.len(),
+        global_refresh: items.iter().any(|item| item.id.is_none()),
+        items,
+        strm: Some(strm),
+    })
 }
 
 #[derive(Debug)]
@@ -800,7 +902,11 @@ async fn resolve_scan_plan(client: &EmbyClient, req: &ScanLibraryRequest) -> App
 }
 
 fn scan_task_label(req: &ScanLibraryRequest) -> String {
-    if let Some(lib) = req.lib.as_deref().and_then(non_empty_trimmed) {
+    if req.generate_strm.unwrap_or(false)
+        && let Some(lib) = req.lib.as_deref().and_then(non_empty_trimmed)
+    {
+        format!("生成 STRM: {lib}")
+    } else if let Some(lib) = req.lib.as_deref().and_then(non_empty_trimmed) {
         format!("扫描库: {lib}")
     } else if let Some(item_id) = req.item_id.as_deref().and_then(non_empty_trimmed) {
         format!("刷新 Item: {item_id}")
@@ -820,6 +926,196 @@ fn non_empty_trimmed(value: &str) -> Option<&str> {
     let value = value.trim();
     (!value.is_empty()).then_some(value)
 }
+
+fn generate_missing_strm_for_library(
+    state: &AppState,
+    lib: &str,
+    keyword: Option<&str>,
+    fullauto: bool,
+) -> AppResult<StrmGenerateResult> {
+    let lib = required_segment(lib, "lib")?;
+    let src_base = safe_under(&state.settings.cd_root, lib)?;
+    let strm_base = safe_under(&state.settings.strm_root, lib)?;
+    if !src_base.is_dir() {
+        return Err(AppError::NotFound(format!(
+            "115 文件夹不存在: {}",
+            src_base.display()
+        )));
+    }
+    std::fs::create_dir_all(&strm_base).map_err(|err| AppError::Anyhow(err.into()))?;
+    chmod_public_dir(&strm_base);
+
+    let keyword = keyword.unwrap_or_default().trim().to_string();
+    let mut tops = std::fs::read_dir(&src_base)
+        .map_err(|err| AppError::Anyhow(err.into()))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .collect::<Vec<_>>();
+    tops.sort_by_key(|entry| entry.file_name());
+
+    let mut matched = 0usize;
+    let mut new_count = 0usize;
+    let mut new_folders = BTreeMap::new();
+    let mut attention = Vec::new();
+    for entry in tops {
+        let top = entry.file_name().to_string_lossy().to_string();
+        if !keyword.is_empty() && !top.contains(&keyword) {
+            continue;
+        }
+        matched += 1;
+        let missing = missing_strm_in_top(&src_base, &strm_base, &entry.path());
+        if missing.is_empty() {
+            continue;
+        }
+        if should_generate_missing_top(&top, &strm_base, fullauto) {
+            let mut written = 0usize;
+            for (rel, filename) in missing {
+                if write_strm(&strm_base, lib, &rel, &filename)? {
+                    written += 1;
+                }
+            }
+            if written > 0 {
+                new_count += written;
+                new_folders.insert(top, written);
+            }
+        } else {
+            attention.push(format!(
+                "{top} (+{}个视频,无tmdbid且首次出现,需看一眼)",
+                missing.len()
+            ));
+        }
+    }
+
+    Ok(StrmGenerateResult {
+        lib: lib.to_string(),
+        keyword,
+        matched,
+        new_count,
+        new_folders,
+        attention,
+        permissions_fixed: 0,
+        refreshed: false,
+        refresh_code: None,
+    })
+}
+
+fn missing_strm_in_top(
+    src_base: &Path,
+    strm_base: &Path,
+    top_path: &Path,
+) -> Vec<(PathBuf, String)> {
+    let mut missing = Vec::new();
+    for entry in WalkDir::new(top_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() || !is_video_file(entry.path()) {
+            continue;
+        }
+        let Ok(root_rel) = entry
+            .path()
+            .parent()
+            .unwrap_or(top_path)
+            .strip_prefix(src_base)
+        else {
+            continue;
+        };
+        let Some(stem) = entry.path().file_stem().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let strm_path = strm_base.join(root_rel).join(format!("{stem}.strm"));
+        if !strm_path.exists() {
+            let Some(filename) = entry
+                .path()
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(ToString::to_string)
+            else {
+                continue;
+            };
+            missing.push((root_rel.to_path_buf(), filename));
+        }
+    }
+    missing.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    missing
+}
+
+fn should_generate_missing_top(top: &str, strm_base: &Path, fullauto: bool) -> bool {
+    has_declared_tmdb(top) || strm_base.join(top).is_dir() || fullauto
+}
+
+fn has_declared_tmdb(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower
+        .match_indices("tmdbid")
+        .any(|(idx, _)| lower[idx + 6..].chars().any(|ch| ch.is_ascii_digit()))
+}
+
+fn write_strm(strm_base: &Path, lib: &str, rel: &Path, filename: &str) -> AppResult<bool> {
+    let target_dir = strm_base.join(rel);
+    std::fs::create_dir_all(&target_dir).map_err(|err| AppError::Anyhow(err.into()))?;
+    chmod_public_tree(strm_base, rel);
+    let stem = Path::new(filename)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| AppError::BadRequest(format!("文件名缺少 stem: {filename}")))?;
+    let strm_path = target_dir.join(format!("{stem}.strm"));
+    if strm_path.exists() {
+        chmod_public_file(&strm_path);
+        return Ok(false);
+    }
+    let rel_text = rel.to_string_lossy().replace('\\', "/");
+    let media_path = format!("/media/{lib}/{rel_text}/{filename}");
+    std::fs::write(&strm_path, media_path).map_err(|err| AppError::Anyhow(err.into()))?;
+    chmod_public_file(&strm_path);
+    Ok(true)
+}
+
+fn is_video_file(path: &Path) -> bool {
+    lower_extension(path)
+        .as_deref()
+        .is_some_and(|ext| VIDEO_EXTENSIONS.contains(&ext))
+}
+
+fn chmod_public_tree(base: &Path, rel: &Path) {
+    chmod_public_dir(base);
+    let mut current = base.to_path_buf();
+    for part in rel.components() {
+        current.push(part);
+        chmod_public_dir(&current);
+    }
+}
+
+#[cfg(unix)]
+fn chmod_public_dir(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o777 != 0o755 {
+            permissions.set_mode(0o755);
+            let _ = std::fs::set_permissions(path, permissions);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn chmod_public_dir(_path: &Path) {}
+
+#[cfg(unix)]
+fn chmod_public_file(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        if permissions.mode() & 0o777 != 0o644 {
+            permissions.set_mode(0o644);
+            let _ = std::fs::set_permissions(path, permissions);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn chmod_public_file(_path: &Path) {}
 
 pub fn safe_under(base: impl AsRef<Path>, name: impl AsRef<Path>) -> AppResult<PathBuf> {
     let base = base.as_ref();
@@ -1097,5 +1393,75 @@ mod tests {
         assert!(res.items.iter().any(|i| i.rel_path == "A"));
         assert!(res.items.iter().any(|i| i.rel_path == "A/a.strm"));
         assert!(!res.items.iter().any(|i| i.rel_path.ends_with(".nfo")));
+    }
+
+    #[tokio::test]
+    async fn generates_missing_strm_without_overwriting_or_unknown_first_folders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd_root = tmp.path().join("cd");
+        let strm_root = tmp.path().join("strm");
+        std::fs::create_dir_all(cd_root.join("电影/Movie [tmdbid-123]/Season 1")).unwrap();
+        std::fs::create_dir_all(cd_root.join("电影/No Match")).unwrap();
+        std::fs::create_dir_all(strm_root.join("电影/Movie [tmdbid-123]/Season 1")).unwrap();
+        std::fs::write(
+            cd_root.join("电影/Movie [tmdbid-123]/Season 1/E01.mkv"),
+            "video",
+        )
+        .unwrap();
+        std::fs::write(cd_root.join("电影/No Match/Loose.mp4"), "video").unwrap();
+        std::fs::write(
+            strm_root.join("电影/Movie [tmdbid-123]/Season 1/E01.strm"),
+            "keep-me",
+        )
+        .unwrap();
+        std::fs::write(
+            cd_root.join("电影/Movie [tmdbid-123]/Season 1/E02.mp4"),
+            "video",
+        )
+        .unwrap();
+
+        let state = AppState::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused")
+                .unwrap(),
+            crate::settings::Settings {
+                host: "127.0.0.1".to_string(),
+                port: 8098,
+                database_url: "postgres://unused".to_string(),
+                web_dist: tmp.path().to_path_buf(),
+                legacy_dir: tmp.path().to_path_buf(),
+                bootstrap_password: "admin".to_string(),
+                cd_root: cd_root.clone(),
+                strm_root: strm_root.clone(),
+                docker_bin: tmp.path().join("docker"),
+                task_concurrency: 1,
+            },
+        );
+
+        let result = generate_missing_strm_for_library(&state, "电影", None, false).unwrap();
+        assert_eq!(result.matched, 2);
+        assert_eq!(result.new_count, 1);
+        assert_eq!(result.new_folders["Movie [tmdbid-123]"], 1);
+        assert_eq!(result.attention.len(), 1);
+        assert!(result.attention[0].contains("No Match"));
+        assert_eq!(
+            std::fs::read_to_string(strm_root.join("电影/Movie [tmdbid-123]/Season 1/E01.strm"))
+                .unwrap(),
+            "keep-me"
+        );
+        assert_eq!(
+            std::fs::read_to_string(strm_root.join("电影/Movie [tmdbid-123]/Season 1/E02.strm"))
+                .unwrap(),
+            "/media/电影/Movie [tmdbid-123]/Season 1/E02.mp4"
+        );
+        assert!(!strm_root.join("电影/No Match/Loose.strm").exists());
+
+        let result = generate_missing_strm_for_library(&state, "电影", Some("No"), true).unwrap();
+        assert_eq!(result.matched, 1);
+        assert_eq!(result.new_count, 1);
+        assert_eq!(
+            std::fs::read_to_string(strm_root.join("电影/No Match/Loose.strm")).unwrap(),
+            "/media/电影/No Match/Loose.mp4"
+        );
     }
 }
