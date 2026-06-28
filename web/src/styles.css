@@ -615,7 +615,14 @@ main {
 }
 
 .taskCard strong {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.taskDetailToggle {
+  flex: 0 0 auto;
+  margin-left: -4px;
 }
 
 .taskCard p {
@@ -714,6 +721,60 @@ main {
   border-radius: 7px;
   background: var(--info-soft);
   color: var(--info) !important;
+  overflow-wrap: anywhere;
+}
+
+.taskDetails {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.taskIdLine {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.taskIdLine span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taskDetails section {
+  min-width: 0;
+}
+
+.taskDetails h4 {
+  margin: 0 0 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.taskDetails pre {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: #19201f;
+  color: #eff6f1;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 

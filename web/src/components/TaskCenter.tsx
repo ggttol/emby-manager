@@ -1,4 +1,4 @@
-import { Bell, RefreshCw, XCircle } from 'lucide-react';
+import { Bell, ChevronDown, ChevronUp, Copy, RefreshCw, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
@@ -40,6 +40,21 @@ function formatTime(value?: string | null) {
   });
 }
 
+function formatDuration(start?: string | null, end?: string | null) {
+  if (!start || !end) return '未记录';
+  const started = new Date(start).getTime();
+  const ended = new Date(end).getTime();
+  if (Number.isNaN(started) || Number.isNaN(ended) || ended < started) return '未记录';
+  const seconds = Math.max(0, Math.round((ended - started) / 1000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes < 60) return rest ? `${minutes} 分 ${rest} 秒` : `${minutes} 分`;
+  const hours = Math.floor(minutes / 60);
+  const minuteRest = minutes % 60;
+  return minuteRest ? `${hours} 小时 ${minuteRest} 分` : `${hours} 小时`;
+}
+
 function resultPreview(result: unknown) {
   if (result === null || result === undefined) return '';
   if (typeof result === 'string') return result;
@@ -50,12 +65,30 @@ function resultPreview(result: unknown) {
   }
 }
 
+function prettyJson(value: unknown) {
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function hasJsonPayload(value: unknown) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === 'object' && !Array.isArray(value)) return Object.keys(value).length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
+}
+
 export function TaskCenter() {
   const [open, setOpen] = useState(false);
   const [tasks, setTasks] = useState<TaskRun[]>([]);
   const [activeCount, setActiveCount] = useState(0);
   const [loadError, setLoadError] = useState('');
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const [filter, setFilter] = useState<TaskFilter>('all');
   const toast = useToast();
 
@@ -116,6 +149,24 @@ export function TaskCenter() {
     }
   };
 
+  const toggleExpanded = (taskId: string) => {
+    setExpandedIds((current) => {
+      const next = new Set(current);
+      if (next.has(taskId)) next.delete(taskId);
+      else next.add(taskId);
+      return next;
+    });
+  };
+
+  const copyTaskId = async (task: TaskRun) => {
+    try {
+      await navigator.clipboard.writeText(task.id);
+      toast.push('任务 ID 已复制', 'ok');
+    } catch (e) {
+      toast.push(`复制失败：${errorMessage(e)}`, 'error');
+    }
+  };
+
   return (
     <>
       <button
@@ -155,14 +206,30 @@ export function TaskCenter() {
               const taskPct = task.total ? Math.min(100, Math.round((task.progress / task.total) * 100)) : 0;
               const canCancel = active.has(task.status) && !task.cancel_requested;
               const preview = resultPreview(task.result);
+              const expanded = expandedIds.has(task.id);
+              const taskName = task.label || task.kind;
+              const duration = formatDuration(task.started_at || task.queued_at, task.ended_at || task.updated_at);
+              const showParams = hasJsonPayload(task.params);
+              const showResult = hasJsonPayload(task.result);
               return (
                 <article className="taskCard" key={task.id}>
                   <div>
-                    <strong>{task.label || task.kind}</strong>
+                    <strong>{taskName}</strong>
                     <span className={`badge ${task.status}`}>{statusLabel(task.status)}</span>
+                    <button
+                      className="iconBtn taskDetailToggle"
+                      onClick={() => toggleExpanded(task.id)}
+                      title={expanded ? '收起详情' : '展开详情'}
+                      aria-label={`${expanded ? '收起' : '展开'}任务详情：${taskName}`}
+                    >
+                      {expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                    </button>
                   </div>
                   <dl className="taskMeta">
                     <div><dt>类型</dt><dd>{task.kind}</dd></div>
+                    <div><dt>来源</dt><dd>{task.source || 'manual'}</dd></div>
+                    <div><dt>排队</dt><dd>{formatTime(task.queued_at)}</dd></div>
+                    <div><dt>耗时</dt><dd>{duration}</dd></div>
                     <div><dt>更新</dt><dd>{formatTime(task.updated_at)}</dd></div>
                     {task.started_at && <div><dt>开始</dt><dd>{formatTime(task.started_at)}</dd></div>}
                     {task.ended_at && <div><dt>结束</dt><dd>{formatTime(task.ended_at)}</dd></div>}
@@ -179,6 +246,39 @@ export function TaskCenter() {
                   )}
                   {preview && <p className="resultText">{preview}</p>}
                   {task.error && <p className="errorText">{task.error}</p>}
+                  {expanded && (
+                    <div className="taskDetails">
+                      <div className="taskIdLine">
+                        <span>{task.id}</span>
+                        <button
+                          className="iconBtn"
+                          onClick={() => copyTaskId(task)}
+                          title="复制任务 ID"
+                          aria-label={`复制任务 ID：${taskName}`}
+                        >
+                          <Copy size={14} />
+                        </button>
+                      </div>
+                      {showParams && (
+                        <section>
+                          <h4>参数</h4>
+                          <pre>{prettyJson(task.params)}</pre>
+                        </section>
+                      )}
+                      {showResult && (
+                        <section>
+                          <h4>结果</h4>
+                          <pre>{prettyJson(task.result)}</pre>
+                        </section>
+                      )}
+                      {task.error && (
+                        <section>
+                          <h4>错误</h4>
+                          <pre>{task.error}</pre>
+                        </section>
+                      )}
+                    </div>
+                  )}
                 </article>
               );
             })}

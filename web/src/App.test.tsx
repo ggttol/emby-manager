@@ -269,6 +269,11 @@ describe('App shell', () => {
 
   it('opens task center, filters tasks, and requests cancellation', async () => {
     let cancelCalls = 0;
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText }
+    });
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/tasks') {
         return jsonResponse({
@@ -281,6 +286,8 @@ describe('App shell', () => {
               status: 'running',
               progress: 2,
               total: 4,
+              source: 'manual',
+              params: { library: 'Movies' },
               status_text: '处理中',
               cancel_requested: false,
               queued_at: '2026-06-28T00:00:00Z',
@@ -295,6 +302,8 @@ describe('App shell', () => {
               status: 'done',
               progress: 1,
               total: 1,
+              source: 'migration',
+              params: {},
               status_text: '完成',
               result: { imported: 3 },
               cancel_requested: false,
@@ -310,6 +319,8 @@ describe('App shell', () => {
               status: 'error',
               progress: 0,
               total: 1,
+              source: 'schedule',
+              params: { reason: 'missing_path' },
               status_text: '失败',
               error: '路径未配置',
               cancel_requested: false,
@@ -336,6 +347,12 @@ describe('App shell', () => {
 
     expect(await screen.findByText('扫描电影库')).toBeInTheDocument();
     expect(screen.getAllByText('运行中').length).toBeGreaterThan(0);
+    expect(screen.getByText('manual')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '展开任务详情：扫描电影库' }));
+    expect(screen.getByText('11111111-1111-4111-8111-111111111111')).toBeInTheDocument();
+    expect(screen.getAllByText((_, element) => element?.textContent?.includes('"library": "Movies"') ?? false).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: '复制任务 ID：扫描电影库' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('11111111-1111-4111-8111-111111111111'));
     fireEvent.click(screen.getByRole('button', { name: '取消' }));
     await waitFor(() => expect(cancelCalls).toBe(1));
 
