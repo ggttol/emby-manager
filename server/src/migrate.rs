@@ -3,13 +3,15 @@ use chrono::{TimeZone, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 use std::{
     fs::File,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
+
+const CATALOG_BATCH_SIZE: usize = 1000;
 
 #[derive(Debug, Serialize)]
 pub struct MigrationReport {
@@ -247,6 +249,7 @@ async fn migrate_catalog(
             row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         ))
     })?;
+    let mut batch = Vec::with_capacity(CATALOG_BATCH_SIZE);
     for row in rows {
         let (name, sheet, link, is_pkg, link_type) = row?;
         if name.is_empty() && link.is_empty() {
@@ -259,21 +262,60 @@ async fn migrate_catalog(
             } else {
                 link_type
             };
-            sqlx::query(
-                "INSERT INTO catalog_items(name, sheet, link, is_pkg, link_type)
-                 SELECT $1, $2, $3, $4, $5
-                 WHERE NOT EXISTS (
-                     SELECT 1 FROM catalog_items WHERE link = $3
-                 )",
-            )
-            .bind(name)
-            .bind(sheet)
-            .bind(link)
-            .bind(is_pkg)
-            .bind(link_type)
-            .execute(pool)
-            .await?;
+            batch.push(CatalogImportRow {
+                name,
+                sheet,
+                link,
+                is_pkg,
+                link_type,
+            });
+            if batch.len() >= CATALOG_BATCH_SIZE {
+                flush_catalog_batch(pool, &mut batch).await?;
+            }
         }
     }
+    if apply {
+        flush_catalog_batch(pool, &mut batch).await?;
+    }
+    Ok(())
+}
+
+struct CatalogImportRow {
+    name: String,
+    sheet: String,
+    link: String,
+    is_pkg: bool,
+    link_type: String,
+}
+
+async fn flush_catalog_batch(
+    pool: &PgPool,
+    batch: &mut Vec<CatalogImportRow>,
+) -> anyhow::Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let mut builder = QueryBuilder::<Postgres>::new(
+        "WITH incoming(name, sheet, link, is_pkg, link_type) AS (",
+    );
+    builder.push_values(batch.iter(), |mut row, item| {
+        row.push_bind(&item.name)
+            .push_bind(&item.sheet)
+            .push_bind(&item.link)
+            .push_bind(item.is_pkg)
+            .push_bind(&item.link_type);
+    });
+    builder.push(
+        ")
+         INSERT INTO catalog_items(name, sheet, link, is_pkg, link_type)
+         SELECT i.name, i.sheet, i.link, i.is_pkg, i.link_type
+         FROM incoming i
+         WHERE NOT EXISTS (
+             SELECT 1 FROM catalog_items c WHERE c.link = i.link
+         )",
+    );
+    builder.build().execute(pool).await?;
+    batch.clear();
     Ok(())
 }
