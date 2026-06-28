@@ -22,6 +22,7 @@ import {
 } from './api/client';
 import { TaskCenter } from './components/TaskCenter';
 import { ToastProvider, useToast } from './components/Toast';
+import { UsersPanel } from './components/UsersPanel';
 
 type Tab = {
   id: string;
@@ -45,7 +46,7 @@ const tabs: Tab[] = [
   { id: 'system', label: '系统', endpoint: '/api/v2/system/summary', description: 'Docker、负载、磁盘、健康预警' },
   { id: 'schedules', label: '定时', endpoint: '/api/v2/schedules', description: '每日 / 每周 / 每月任务编排' },
   { id: 'logs', label: '日志', endpoint: '/api/v2/logs', description: '应用日志和审计记录' },
-  { id: 'users', label: '用户', endpoint: '/api/v2/auth/me', description: 'Emby 用户策略、限速和并发' },
+  { id: 'users', label: '用户', endpoint: '/api/v2/users', description: 'Emby 用户策略、限速和并发' },
   { id: 'settings', label: '设置', endpoint: '/api/v2/config', description: '路径、密钥、导入导出和迁移状态' }
 ];
 
@@ -148,6 +149,14 @@ function TabPanel({ tab }: { tab: Tab }) {
       setLoading(false);
     }
   };
+
+  if (tab.id === 'users') {
+    return (
+      <section className="panel">
+        <UsersPanel />
+      </section>
+    );
+  }
 
   return (
     <section className="panel">

@@ -173,6 +173,67 @@ describe('App shell', () => {
     expect(screen.getByText('路径未配置')).toBeInTheDocument();
   });
 
+  it('loads and saves Emby user policy from the users tab', async () => {
+    let savedPayload: unknown = null;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/users') {
+        return jsonResponse({
+          users: [
+            {
+              id: 'user/1',
+              name: 'Alice',
+              disabled: false,
+              last_activity_date: '2026-06-28T08:00:00Z',
+              remote_bitrate_mbps: 25,
+              policy: {
+                RemoteClientBitrateLimit: 25_000_000,
+                SimultaneousStreamLimit: 2
+              }
+            }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/users/user%2F1/policy') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('PUT');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        savedPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: true,
+          user: {
+            id: 'user/1',
+            name: 'Alice',
+            disabled: true,
+            last_activity_date: '2026-06-28T08:00:00Z',
+            remote_bitrate_mbps: 12.5,
+            policy: {
+              RemoteClientBitrateLimit: 12_500_000,
+              SimultaneousStreamLimit: 3
+            }
+          }
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '用户' }));
+    expect(await screen.findByText('Alice')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Alice 远程限速 Mbps'), { target: { value: '12.5' } });
+    fireEvent.change(screen.getByLabelText('Alice 同时播放数'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(screen.getByRole('button', { name: '保存' }));
+
+    await waitFor(() => expect(savedPayload).toEqual({
+      remote_bitrate_mbps: 12.5,
+      simultaneous_stream_limit: 3,
+      disabled: true
+    }));
+    expect(await screen.findByText('已保存 Alice 的用户策略')).toBeInTheDocument();
+  });
+
   it('shows login panel and enters the shell after login', async () => {
     mockApi((url) => {
       if (url.pathname === '/api/v2/auth/me') {
