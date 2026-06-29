@@ -2,6 +2,7 @@ import { AlertTriangle, CheckCircle2, ImageOff, RefreshCw, SearchCheck, Wand2 } 
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { useTaskCompletion } from '../hooks/useTaskCompletion';
 import { useToast } from './Toast';
 
 type EmbyLibrary = components['schemas']['EmbyLibrary'];
@@ -48,6 +49,8 @@ export function PostersPanel() {
   const [batchStarting, setBatchStarting] = useState(false);
   const [candidates, setCandidates] = useState<Record<string, PosterSearchCandidate[]>>({});
   const [manualTmdb, setManualTmdb] = useState<Record<string, string>>({});
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
+  const [completedTasks, setCompletedTasks] = useState<TaskRun[]>([]);
   const [error, setError] = useState('');
   const toast = useToast();
 
@@ -56,6 +59,10 @@ export function PostersPanel() {
     [libraries]
   );
   const topItems = useMemo(() => (result?.items || []).slice(0, 200), [result]);
+
+  const trackTask = (task: TaskRun) => {
+    setTrackedTaskIds((prev) => (prev.includes(task.id) ? prev : [task.id, ...prev].slice(0, 20)));
+  };
 
   const loadLibraries = async () => {
     setLoadingLibraries(true);
@@ -105,6 +112,17 @@ export function PostersPanel() {
       setScanning(false);
     }
   };
+
+  useTaskCompletion(trackedTaskIds, (task) => {
+    setCompletedTasks((prev) => [task, ...prev.filter((item) => item.id !== task.id)].slice(0, 6));
+    if (task.kind === 'poster_fix_batch' && task.status === 'done') {
+      void runDetect();
+    }
+    toast.push(
+      task.status === 'done' ? `海报任务完成：${task.label || task.kind}` : `海报任务结束：${task.label || task.kind} · ${task.status}`,
+      task.status === 'done' ? 'ok' : 'warn'
+    );
+  });
 
   const searchName = (item: PosterSignalItem) => item.folder_clean || item.folder || item.name || item.emby_name;
 
@@ -205,6 +223,7 @@ export function PostersPanel() {
           method: 'POST',
           body: JSON.stringify({ ids, type: kind })
         });
+        trackTask(task);
         tasks.push(task);
       }
       toast.push(`已创建 ${tasks.length} 个海报批量任务，打开任务中心查看进度`, 'ok');
@@ -285,6 +304,14 @@ export function PostersPanel() {
       </form>
 
       {error && <div className="notice warn whitespaceNotice">{error}</div>}
+
+      {completedTasks.length > 0 && (
+        <div className="notice scanNotice">
+          {completedTasks.map((task) => (
+            <div key={task.id}>{task.label || task.kind} · {task.status}</div>
+          ))}
+        </div>
+      )}
 
       <div className="statGrid">
         <article className={`statCard ${result?.total ? 'warn' : 'ok'}`}>

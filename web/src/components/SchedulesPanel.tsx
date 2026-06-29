@@ -2,12 +2,14 @@ import { CalendarClock, Pencil, Play, Plus, RefreshCw, Save, Trash2 } from 'luci
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { useTaskCompletion } from '../hooks/useTaskCompletion';
 import { ConfirmDanger } from './Modal';
 import { useToast } from './Toast';
 
 type ScheduleJob = components['schemas']['ScheduleJob'];
 type ScheduleRequest = components['schemas']['ScheduleRequest'];
 type RunScheduleResponse = components['schemas']['RunScheduleResponse'];
+type TaskRun = components['schemas']['TaskRun'];
 
 type ScheduleMode = 'daily' | 'weekly' | 'monthly';
 
@@ -155,6 +157,7 @@ export function SchedulesPanel() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [runningId, setRunningId] = useState<string | null>(null);
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
   const [error, setError] = useState('');
   const toast = useToast();
 
@@ -181,6 +184,18 @@ export function SchedulesPanel() {
   useEffect(() => {
     load();
   }, []);
+
+  const trackTask = (task: TaskRun) => {
+    setTrackedTaskIds((prev) => (prev.includes(task.id) ? prev : [task.id, ...prev].slice(0, 20)));
+  };
+
+  useTaskCompletion(trackedTaskIds, (task) => {
+    void load();
+    toast.push(
+      task.status === 'done' ? `定时任务完成：${task.label || task.kind}` : `定时任务结束：${task.label || task.kind} · ${task.status}`,
+      task.status === 'done' ? 'ok' : 'warn'
+    );
+  });
 
   const patchDraft = (patch: Partial<Draft>) => {
     setDraft((prev) => (prev ? { ...prev, ...patch } : prev));
@@ -236,6 +251,7 @@ export function SchedulesPanel() {
     setRunningId(job.id);
     try {
       const data = await api<RunScheduleResponse>(`/api/v2/schedules/${job.id}/run`, { method: 'POST' });
+      trackTask(data.task);
       toast.push(`已创建任务：${data.task.label}`, 'ok');
       await load();
     } catch (e) {

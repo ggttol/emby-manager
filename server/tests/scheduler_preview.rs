@@ -1,8 +1,12 @@
-use axum::extract::{Path, State};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use chrono::{Duration as ChronoDuration, Utc};
 use emby_manager::{
     db,
     error::AppError,
+    media_fs,
     scheduler::{self, ScheduleJob},
     settings::Settings,
     state::AppState,
@@ -23,6 +27,66 @@ use tokio::{
 use uuid::Uuid;
 
 static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[tokio::test]
+async fn manual_scan_all_endpoint_runs_real_scan_all_worker() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(state) = test_state().await else {
+        eprintln!("skipping manual scan all DB test; set EMBY_MANAGER_SCHEDULER_TEST_DATABASE_URL");
+        return;
+    };
+    seed_scan_all_media(&state);
+    let (base_url, requests) = spawn_fake_emby(vec![
+        FakeResponse::ok_json(
+            r#"[{"ItemId":"lib-movies","Name":"Movies","CollectionType":"movies","Locations":["/strm/MovieFolder"]}]"#,
+        ),
+        FakeResponse::no_content(),
+    ])
+    .await;
+    configure_emby(&state, &base_url).await;
+
+    let response = media_fs::scan_all_libraries(
+        State(state.clone()),
+        Json(media_fs::ScanLibraryRequest {
+            lib: None,
+            item_id: None,
+            recursive: Some(true),
+            full: Some(false),
+            generate_strm: Some(true),
+            keyword: None,
+            fullauto: Some(false),
+            cleanup_orphans: Some(false),
+        }),
+    )
+    .await
+    .expect("manual scan all should create a task")
+    .0;
+
+    assert_eq!(response.kind, "scan_all");
+    assert_eq!(response.source, "manual");
+    assert_eq!(response.params["generate_strm"], json!(true));
+    assert_eq!(response.params["cleanup_orphans"], json!(false));
+
+    let task = wait_for_task_status(&state, response.id, "done").await;
+    assert_eq!(task["kind"], "scan_all");
+    assert_eq!(task["result"]["source"], "manual");
+    assert_eq!(task["result"]["detail"]["action"], "scan_all");
+    assert_eq!(task["result"]["detail"]["libs_scanned"], json!(1));
+    assert_eq!(task["result"]["detail"]["new_count"], json!(1));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0].starts_with("GET /Library/VirtualFolders?api_key=secret-key"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[1].starts_with("POST /Items/lib-movies/Refresh?"),
+        "{}",
+        requests[1]
+    );
+}
 
 #[tokio::test]
 async fn run_schedule_creates_real_task_and_finishes_done() {

@@ -258,6 +258,65 @@ async fn save_active_task_reuse_includes_sorted_file_ids() {
     sleep(Duration::from_millis(50)).await;
 }
 
+#[tokio::test]
+async fn auto_cid_task_records_target_map_and_can_cancel_before_c115_call() {
+    let _guard = TEST_DB_LOCK.lock().await;
+    let Some(state) = c115_test_state().await else {
+        eprintln!("skipping c115 auto cid task DB test; set EMBY_MANAGER_C115_TEST_DATABASE_URL");
+        return;
+    };
+    seed_c115_settings(&state).await;
+    let emby_libraries = r#"[
+        {"ItemId": "lib-movies", "Name": "Movies", "CollectionType": "movies", "Locations": ["/media/电影"]},
+        {"ItemId": "lib-shows", "Name": "Shows", "CollectionType": "tvshows", "LibraryOptions": {"PathInfos": [{"Path": "/strm/剧集"}]}}
+    ]"#;
+    let (emby_base, requests, handle) = spawn_fake_c115(vec![emby_libraries]).await;
+    upsert_setting(&state.pool, "emby_url", json!(emby_base)).await;
+    upsert_setting(&state.pool, "api_key", json!("emby-key")).await;
+
+    let permit = state
+        .clouddrive_slot
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("hold clouddrive slot");
+    let app = c115::router().with_state(state.clone());
+
+    let (status, task) = post_c115_auto_cid_task(&app, json!({"max_depth": 1})).await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    assert_eq!(task["kind"], "c115_auto_cid");
+    assert_eq!(task["label"], "115 自动匹配 cid(depth 1)");
+    assert_eq!(task["status"], "pending");
+
+    timeout(Duration::from_secs(1), handle)
+        .await
+        .unwrap()
+        .unwrap();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("GET /Library/VirtualFolders?"));
+    assert!(requests[0].contains("api_key=emby-key"), "{}", requests[0]);
+
+    let task_id = Uuid::parse_str(task["id"].as_str().unwrap()).unwrap();
+    let params: Value = sqlx::query_scalar("SELECT params FROM task_runs WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("load c115 auto cid task params");
+    assert_eq!(params["max_depth"], json!(1));
+    assert_eq!(params["targets"]["电影"], json!("Movies"));
+    assert_eq!(params["targets"]["剧集"], json!("Shows"));
+    assert_eq!(params["current"]["电影"], json!("12345"));
+
+    sqlx::query("UPDATE task_runs SET cancel_requested = TRUE WHERE id = $1")
+        .bind(task_id)
+        .execute(&state.pool)
+        .await
+        .expect("cancel blocked c115 auto cid task");
+    drop(permit);
+    sleep(Duration::from_millis(50)).await;
+}
+
 #[test]
 fn target_cid_rejects_root_and_non_numeric_values() {
     assert_eq!(validate_target_cid("12345").unwrap(), "12345");
@@ -273,6 +332,7 @@ fn openapi_registers_c115_live_ops() {
     assert!(paths.contains_key("/api/v2/c115/save"));
     assert!(paths.contains_key("/api/v2/c115/offline"));
     assert!(paths.contains_key("/api/v2/c115/auto-cid"));
+    assert!(paths.contains_key("/api/v2/c115/auto-cid/task"));
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();
     assert!(schemas.contains_key("C115SaveRequest"));
@@ -297,6 +357,31 @@ async fn post_c115_save(app: &axum::Router, body: Value) -> (StatusCode, Value) 
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("read c115 save response body");
+    let body = if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}))
+    };
+    (status, body)
+}
+
+async fn post_c115_auto_cid_task(app: &axum::Router, body: Value) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v2/c115/auto-cid/task")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build c115 auto cid task request"),
+        )
+        .await
+        .expect("send c115 auto cid task request");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read c115 auto cid task response body");
     let body = if bytes.is_empty() {
         json!({})
     } else {

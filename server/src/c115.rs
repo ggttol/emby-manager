@@ -121,7 +121,7 @@ pub struct C115OfflineResponse {
     pub msg: String,
 }
 
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct C115AutoCidRequest {
     pub max_depth: Option<usize>,
 }
@@ -144,6 +144,13 @@ pub struct C115AutoCidResponse {
     pub matches: BTreeMap<String, Vec<C115CidMatch>>,
     pub current: BTreeMap<String, String>,
     pub scanned: usize,
+}
+
+struct C115AutoCidPlan {
+    cookie: String,
+    targets: BTreeMap<String, String>,
+    current: BTreeMap<String, String>,
+    max_depth: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +279,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v2/c115/save", post(save))
         .route("/api/v2/c115/offline", post(offline))
         .route("/api/v2/c115/auto-cid", post(auto_cid))
+        .route("/api/v2/c115/auto-cid/task", post(auto_cid_task))
 }
 
 impl C115Client {
@@ -899,6 +907,34 @@ pub async fn auto_cid(
     State(state): State<AppState>,
     Json(req): Json<C115AutoCidRequest>,
 ) -> AppResult<Json<C115AutoCidResponse>> {
+    let plan = prepare_auto_cid(&state, &req).await?;
+    Ok(Json(run_auto_cid_plan(&state, plan).await?))
+}
+
+#[utoipa::path(post, path = "/api/v2/c115/auto-cid/task", tag = "c115", request_body = C115AutoCidRequest, responses((status = 200, body = TaskRun)))]
+pub async fn auto_cid_task(
+    State(state): State<AppState>,
+    Json(req): Json<C115AutoCidRequest>,
+) -> AppResult<Json<TaskRun>> {
+    let plan = prepare_auto_cid(&state, &req).await?;
+    let label = format!("115 自动匹配 cid(depth {})", plan.max_depth);
+    let params = serde_json::json!({
+        "max_depth": plan.max_depth,
+        "targets": &plan.targets,
+        "current": &plan.current,
+    });
+    let (task, created) =
+        insert_or_reuse_c115_task_with_params(&state, "c115_auto_cid", &label, params).await?;
+    if created {
+        spawn_c115_auto_cid(state, task.id, plan);
+    }
+    Ok(Json(task))
+}
+
+async fn prepare_auto_cid(
+    state: &AppState,
+    req: &C115AutoCidRequest,
+) -> AppResult<C115AutoCidPlan> {
     let cookie =
         require_c115_cookie(config_store::get_string(&state.pool, C115_COOKIE_KEY).await?)?;
     let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
@@ -916,12 +952,22 @@ pub async fn auto_cid(
         .flat_map(|lib| library_target_names(&lib.name, &lib.paths))
         .collect::<BTreeMap<_, _>>();
     let current = cid_map(&state.pool).await?;
-    let client = C115Client::new_with_site(C115_API, C115_SITE, cookie, state.http.clone());
-    Ok(Json(
-        client
-            .auto_cid(targets, current, req.max_depth.unwrap_or(2))
-            .await?,
-    ))
+    Ok(C115AutoCidPlan {
+        cookie,
+        targets,
+        current,
+        max_depth: req.max_depth.unwrap_or(2),
+    })
+}
+
+async fn run_auto_cid_plan(
+    state: &AppState,
+    plan: C115AutoCidPlan,
+) -> AppResult<C115AutoCidResponse> {
+    let client = C115Client::new_with_site(C115_API, C115_SITE, plan.cookie, state.http.clone());
+    client
+        .auto_cid(plan.targets, plan.current, plan.max_depth)
+        .await
 }
 
 fn c115_save_task_params(req: &C115SaveRequest, cid: &str, lib: Option<&str>) -> Value {
@@ -1028,6 +1074,16 @@ fn spawn_c115_offline(
             } else {
                 Err(AppError::BadRequest(response.msg))
             }
+        })
+        .await;
+    });
+}
+
+fn spawn_c115_auto_cid(state: AppState, id: Uuid, plan: C115AutoCidPlan) {
+    tokio::spawn(async move {
+        run_c115_task(state, id, |state| async move {
+            let response = run_auto_cid_plan(&state, plan).await?;
+            Ok(serde_json::to_value(response).unwrap_or_else(|_| serde_json::json!({})))
         })
         .await;
     });

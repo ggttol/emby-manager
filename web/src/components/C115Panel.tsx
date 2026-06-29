@@ -11,6 +11,7 @@ import {
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { useTaskCompletion } from '../hooks/useTaskCompletion';
 import { useToast } from './Toast';
 
 type C115SnapFile = components['schemas']['C115SnapFile'];
@@ -110,6 +111,14 @@ function taskSummary(task: TaskRun) {
   return task.label || task.kind || task.id;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isAutoCidResponse(value: unknown): value is C115AutoCidResponse {
+  return isRecord(value) && value.ok === true && isRecord(value.matches) && typeof value.scanned === 'number';
+}
+
 export function C115Panel() {
   const [status, setStatus] = useState<C115TestResponse | null>(null);
   const [statusError, setStatusError] = useState('');
@@ -123,6 +132,8 @@ export function C115Panel() {
   const [snapSource, setSnapSource] = useState<InputLine | null>(null);
   const [selectedFileIds, setSelectedFileIds] = useState<Set<string>>(() => new Set());
   const [autoCid, setAutoCid] = useState<C115AutoCidResponse | null>(null);
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
+  const [completedTasks, setCompletedTasks] = useState<TaskRun[]>([]);
   const [error, setError] = useState('');
   const [loadingMeta, setLoadingMeta] = useState(true);
   const [previewing, setPreviewing] = useState(false);
@@ -148,6 +159,21 @@ export function C115Panel() {
     ? `${wizardStats.total} 项 · 分享 ${wizardStats.share} · 离线 ${wizardStats.offline} · ${currentTargetLabel}`
     : `等待链接 · ${currentTargetLabel}`;
   const busy = previewing || saving || offlining || wizarding || scanning || autoDetecting;
+
+  const trackTask = (task: TaskRun) => {
+    setTrackedTaskIds((prev) => (prev.includes(task.id) ? prev : [task.id, ...prev].slice(0, 20)));
+  };
+
+  useTaskCompletion(trackedTaskIds, (task) => {
+    setCompletedTasks((prev) => [task, ...prev.filter((item) => item.id !== task.id)].slice(0, 8));
+    if (task.kind === 'c115_auto_cid' && task.status === 'done' && isAutoCidResponse(task.result)) {
+      setAutoCid(task.result);
+    }
+    toast.push(
+      task.status === 'done' ? `任务完成：${taskSummary(task)}` : `任务结束：${taskSummary(task)} · ${task.status}`,
+      task.status === 'done' ? 'ok' : 'warn'
+    );
+  });
 
   const loadMeta = async () => {
     setLoadingMeta(true);
@@ -289,6 +315,7 @@ export function C115Panel() {
               label: snap?.share_title || line.url
             })
           });
+          trackTask(task);
           okCount += 1;
           toast.push(`任务已创建：${taskSummary(task)}`, 'ok');
         } catch (e) {
@@ -333,6 +360,7 @@ export function C115Panel() {
               label: line.url
             })
           });
+          trackTask(task);
           okCount += 1;
           toast.push(`任务已创建：${taskSummary(task)}`, 'ok');
         } catch (e) {
@@ -418,6 +446,7 @@ export function C115Panel() {
         method: 'POST',
         body: JSON.stringify(request)
       });
+      trackTask(task);
       toast.push(`一条龙任务已创建：${taskSummary(task)}`, 'ok');
     } catch (e) {
       const message = errorMessage(e);
@@ -440,6 +469,7 @@ export function C115Panel() {
         method: 'POST',
         body: JSON.stringify({ lib: targetLib })
       });
+      trackTask(task);
       toast.push(`扫库任务已创建：${taskSummary(task)}`, 'ok');
     } catch (e) {
       const message = errorMessage(e);
@@ -470,6 +500,25 @@ export function C115Panel() {
     }
   };
 
+  const detectCidTask = async () => {
+    setAutoDetecting(true);
+    setError('');
+    try {
+      const task = await api<TaskRun>('/api/v2/c115/auto-cid/task', {
+        method: 'POST',
+        body: JSON.stringify({ max_depth: 2 })
+      });
+      trackTask(task);
+      toast.push(`cid 检测任务已创建：${taskSummary(task)}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`创建 cid 检测任务失败：${message}`, 'error');
+    } finally {
+      setAutoDetecting(false);
+    }
+  };
+
   return (
     <section className="c115Panel">
       <div className="c115Meta">
@@ -485,6 +534,10 @@ export function C115Panel() {
           <button className="btn ghost" onClick={detectCid} disabled={busy}>
             <SearchCheck size={16} />
             {autoDetecting ? '检测中' : '检测 cid'}
+          </button>
+          <button className="btn ghost" onClick={detectCidTask} disabled={busy}>
+            <SearchCheck size={16} />
+            任务检测
           </button>
         </div>
       </div>
@@ -630,6 +683,19 @@ export function C115Panel() {
             {Object.entries(autoCid.matches).map(([lib, hits]) => (
               <span key={lib} className={hits.length === 1 ? 'badge done' : 'badge warn'}>
                 {lib}: {hits.length ? hits.map((hit) => hit.cid).join(' / ') : '未找到'}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {completedTasks.length > 0 && (
+        <div className="c115AutoCid">
+          <strong>最近任务结果</strong>
+          <div>
+            {completedTasks.map((task) => (
+              <span key={task.id} className={task.status === 'done' ? 'badge done' : 'badge warn'}>
+                {taskSummary(task)}: {task.status}
               </span>
             ))}
           </div>

@@ -10,6 +10,7 @@ import {
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { useTaskCompletion } from '../hooks/useTaskCompletion';
 import { Modal } from './Modal';
 import { useToast } from './Toast';
 
@@ -113,6 +114,20 @@ function planActionLabel(action: CatalogTransferPlanResponse['action']) {
   return '不支持';
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function numberField(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function resultTargetLib(result: unknown) {
+  if (!isRecord(result) || !isRecord(result.target)) return null;
+  const lib = result.target.lib;
+  return typeof lib === 'string' && lib.trim() ? lib.trim() : null;
+}
+
 export function CatalogPanel() {
   const [stats, setStats] = useState<CatalogStatsResponse | null>(null);
   const [cidMap, setCidMap] = useState<Record<string, string>>({});
@@ -131,11 +146,45 @@ export function CatalogPanel() {
   const [error, setError] = useState('');
   const [pending, setPending] = useState<PendingTransfer | null>(null);
   const [packageAck, setPackageAck] = useState('');
+  const [autoScanAfterTransfer, setAutoScanAfterTransfer] = useState(true);
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
+  const [completedTasks, setCompletedTasks] = useState<TaskRun[]>([]);
   const toast = useToast();
 
   const cidEntries = useMemo(() => Object.entries(cidMap).sort(([a], [b]) => a.localeCompare(b, 'zh-CN')), [cidMap]);
   const selectedItems = useMemo(() => items.filter((_, index) => selected.has(index)), [items, selected]);
   const allSelected = items.length > 0 && selected.size === items.length;
+
+  const trackTask = (task: TaskRun) => {
+    setTrackedTaskIds((prev) => (prev.includes(task.id) ? prev : [task.id, ...prev].slice(0, 20)));
+  };
+
+  useTaskCompletion(trackedTaskIds, (task) => {
+    setCompletedTasks((prev) => [task, ...prev.filter((item) => item.id !== task.id)].slice(0, 8));
+    const result = isRecord(task.result) ? task.result : {};
+    const succeeded = numberField(result.succeeded);
+    const failed = numberField(result.failed);
+    toast.push(
+      task.status === 'done'
+        ? `任务完成：${taskSummary(task)}${succeeded != null ? ` · 成功 ${succeeded}${failed ? ` / 失败 ${failed}` : ''}` : ''}`
+        : `任务结束：${taskSummary(task)} · ${task.status}`,
+      task.status === 'done' && !failed ? 'ok' : 'warn'
+    );
+    if (task.kind === 'catalog_transfer_execute' && task.status === 'done' && autoScanAfterTransfer) {
+      const lib = resultTargetLib(task.result);
+      if (lib) {
+        api<TaskRun>('/api/v2/libraries/scan', {
+          method: 'POST',
+          body: JSON.stringify({ lib })
+        })
+          .then((scanTask) => {
+            trackTask(scanTask);
+            toast.push(`目录转存完成，已创建扫库任务：${taskSummary(scanTask)}`, 'ok');
+          })
+          .catch((e) => toast.push(`目录转存完成，但自动扫库失败：${errorMessage(e)}`, 'error'));
+      }
+    }
+  });
 
   const loadMeta = async () => {
     setLoadingMeta(true);
@@ -256,6 +305,7 @@ export function CatalogPanel() {
     setProgressText('正在创建目录转存任务...');
     try {
       const task = await createTransferBatchTask(transfer.items, transfer.target);
+      trackTask(task);
       if (transfer.mode === 'batch') setSelected(new Set());
       const prefix = transfer.mode === 'batch' ? '批量任务已交给任务中心，可在任务中心取消' : '任务已交给任务中心，可在任务中心取消';
       toast.push(`${prefix}：${taskSummary(task)}`, 'ok');
@@ -360,6 +410,15 @@ export function CatalogPanel() {
           />
         </label>
         <p>自定义 cid 优先；磁力和 ed2k 会创建 115 离线下载任务。</p>
+        <label className="switchRow catalogAutoScan">
+          <input
+            type="checkbox"
+            aria-label="转存完成后自动扫库"
+            checked={autoScanAfterTransfer}
+            onChange={(event) => setAutoScanAfterTransfer(event.target.checked)}
+          />
+          <span>转存完成后自动扫库</span>
+        </label>
       </div>
 
       {error && <div className="notice warn whitespaceNotice">{error}</div>}
@@ -437,6 +496,16 @@ export function CatalogPanel() {
       </div>
 
       {transferring && progressText && <div className="notice catalogProgress">{progressText}</div>}
+
+      {completedTasks.length > 0 && (
+        <div className="notice catalogProgress">
+          {completedTasks.map((task) => (
+            <div key={task.id}>
+              {taskSummary(task)} · {task.status}
+            </div>
+          ))}
+        </div>
+      )}
 
       {pending && (
         <Modal title={pending.mode === 'batch' ? '批量转存确认' : `${actionLabel(pending.items[0])}确认`} onClose={() => setPending(null)}>

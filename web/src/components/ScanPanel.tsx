@@ -2,6 +2,7 @@ import { Database, FileSearch, FolderSync, Plus, RefreshCw, ScanLine } from 'luc
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { useTaskCompletion } from '../hooks/useTaskCompletion';
 import { ConfirmDanger } from './Modal';
 import { TASK_COMPLETED_EVENT, type TaskCompleteDetail } from './TaskCenter';
 import { useToast } from './Toast';
@@ -104,6 +105,7 @@ export function ScanPanel() {
   const [starting, setStarting] = useState<'lib' | 'all' | 'item' | 'strm' | null>(null);
   const [confirmCleanupScan, setConfirmCleanupScan] = useState(false);
   const [latestScan, setLatestScan] = useState<{ task: TaskRun; result: ScanLibraryResult } | null>(null);
+  const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
   const [libraryWarnings, setLibraryWarnings] = useState<string[]>([]);
   const [error, setError] = useState('');
   const toast = useToast();
@@ -164,6 +166,10 @@ export function ScanPanel() {
     }
   };
 
+  const trackTask = (task: TaskRun) => {
+    setTrackedTaskIds((prev) => (prev.includes(task.id) ? prev : [task.id, ...prev].slice(0, 20)));
+  };
+
   useEffect(() => {
     loadLibraries();
   }, []);
@@ -207,6 +213,20 @@ export function ScanPanel() {
     window.addEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
     return () => window.removeEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
   }, [toast]);
+
+  useTaskCompletion(trackedTaskIds, (task) => {
+    const result = scanResultFromTask(task);
+    if (result) {
+      setLatestScan({ task, result });
+      if (result.strm?.lib) {
+        void loadStrm(result.strm.lib, false);
+      }
+    }
+    toast.push(
+      task.status === 'done' ? `扫描任务完成：${task.label || task.kind}` : `扫描任务结束：${task.label || task.kind} · ${task.status}`,
+      task.status === 'done' ? 'ok' : 'warn'
+    );
+  });
 
   const submitOverview = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -282,12 +302,20 @@ export function ScanPanel() {
         }
         payload = { lib: selectedLib, recursive, full };
       } else {
-        payload = { recursive, full };
+        payload = {
+          recursive,
+          full,
+          generate_strm: true,
+          fullauto,
+          cleanup_orphans: cleanupOrphans
+        };
       }
-      const task = await api<TaskRun>('/api/v2/libraries/scan', {
+      const endpoint = mode === 'all' ? '/api/v2/libraries/scan-all' : '/api/v2/libraries/scan';
+      const task = await api<TaskRun>(endpoint, {
         method: 'POST',
         body: JSON.stringify(payload)
       });
+      trackTask(task);
       toast.push(`已创建扫描任务：${task.label || task.kind}`, 'ok');
     } catch (e) {
       const message = errorMessage(e);

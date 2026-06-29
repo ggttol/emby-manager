@@ -2,8 +2,8 @@ import { ArrowRight, CheckCircle2, FileWarning, FolderInput, ListChecks, Plus, R
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { useTaskCompletion } from '../hooks/useTaskCompletion';
 import { ConfirmDanger } from './Modal';
-import { TASK_COMPLETED_EVENT, type TaskCompleteDetail } from './TaskCenter';
 import { useToast } from './Toast';
 
 type EmbyLibrary = components['schemas']['EmbyLibrary'];
@@ -288,16 +288,16 @@ export function ManagePanel() {
     };
   }, [browserLib, toast]);
 
-  useEffect(() => {
-    const onTaskCompleted = (event: Event) => {
-      const detail = (event as CustomEvent<TaskCompleteDetail>).detail;
-      if (detail?.task && shouldRefreshManage(detail.task)) {
-        load();
-      }
-    };
-    window.addEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
-    return () => window.removeEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
-  }, [load]);
+  useTaskCompletion(lastTask ? [lastTask.id] : [], (task) => {
+    setLastTask(task);
+    if (shouldRefreshManage(task)) {
+      void load();
+    }
+    toast.push(
+      task.status === 'done' ? `任务完成：${task.label || task.kind}` : `任务结束：${task.label || task.kind} · ${task.status}`,
+      task.status === 'done' ? 'ok' : 'warn'
+    );
+  });
 
   const submitDelete = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

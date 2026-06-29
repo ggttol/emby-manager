@@ -162,7 +162,7 @@ pub struct StrmSample {
     pub size: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ScanLibraryRequest {
     pub lib: Option<String>,
     pub item_id: Option<String>,
@@ -354,6 +354,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v2/libraries", get(libraries).post(create_library))
         .route("/api/v2/libraries/items", get(library_items))
         .route("/api/v2/libraries/scan", post(scan_library))
+        .route("/api/v2/libraries/scan-all", post(scan_all_libraries))
         .route("/api/v2/libraries/strm", get(list_strm))
         .route("/api/v2/manage/delete", post(manage_delete))
         .route("/api/v2/manage/delete/execute", post(execute_delete))
@@ -619,6 +620,28 @@ pub async fn scan_library(
     let label = scan_task_label(&req);
     let task = tasks::insert_task(&state.pool, "scan_library", &label, 1).await?;
     spawn_scan_task(state, task.id, emby_url, api_key, req);
+    Ok(Json(task))
+}
+
+#[utoipa::path(post, path = "/api/v2/libraries/scan-all", tag = "media", request_body = ScanLibraryRequest, responses((status = 200, body = TaskRun)))]
+pub async fn scan_all_libraries(
+    State(state): State<AppState>,
+    Json(req): Json<ScanLibraryRequest>,
+) -> AppResult<Json<TaskRun>> {
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    ensure_api_key_configured(&api_key)?;
+
+    let params = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
+    let label = if let Some(lib) = req.lib.as_deref().and_then(non_empty_trimmed) {
+        format!("扫全库: {lib}")
+    } else {
+        "扫全库".to_string()
+    };
+    let task =
+        tasks::insert_task_with_meta(&state.pool, "scan_all", &label, 1, "manual", params.clone())
+            .await?;
+    spawn_scan_all_task(state, task.id, label, emby_url, api_key, params);
     Ok(Json(task))
 }
 
@@ -2036,6 +2059,70 @@ fn spawn_scan_task(
             Err(err) if err.to_string() == SCAN_TASK_CANCELLED_SENTINEL => {}
             Err(err) => {
                 let _ = tasks::finish_error(&state.pool, id, &err.to_string(), None).await;
+            }
+        }
+    });
+}
+
+fn spawn_scan_all_task(
+    state: AppState,
+    id: Uuid,
+    label: String,
+    emby_url: String,
+    api_key: String,
+    params: Value,
+) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, id, "任务并发槽不可用", None).await;
+            return;
+        };
+        if tasks::cancel_requested(&state.pool, id).await {
+            let _ = tasks::finish_cancelled(&state.pool, id).await;
+            return;
+        }
+        let _ = tasks::mark_running(&state.pool, id, "手动扫全库启动").await;
+        let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+        match run_scheduled_scan_all_libraries(&state, id, &client, &params).await {
+            Ok(detail) => {
+                let message = "手动扫全库完成";
+                let _ = tasks::finish_done_with_message(
+                    &state.pool,
+                    id,
+                    message,
+                    serde_json::json!({
+                        "ok": true,
+                        "preview": false,
+                        "dry_run": false,
+                        "source": "manual",
+                        "kind": "scan_all",
+                        "label": label,
+                        "message": message,
+                        "detail": detail,
+                    }),
+                )
+                .await;
+            }
+            Err(AppError::Conflict(message)) if message == SCAN_TASK_CANCELLED_SENTINEL => {
+                let _ = tasks::finish_cancelled(&state.pool, id).await;
+            }
+            Err(err) => {
+                let message = err.to_string();
+                let _ = tasks::finish_error(
+                    &state.pool,
+                    id,
+                    &message,
+                    Some(serde_json::json!({
+                        "ok": false,
+                        "preview": false,
+                        "dry_run": false,
+                        "source": "manual",
+                        "kind": "scan_all",
+                        "label": label,
+                        "message": message,
+                    })),
+                )
+                .await;
             }
         }
     });
