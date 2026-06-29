@@ -17,6 +17,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 pub const C115_API: &str = "https://webapi.115.com";
@@ -25,6 +26,8 @@ pub const C115_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWeb
 const C115_COOKIE_KEY: &str = "c115_cookie";
 pub const C115_CID_MAP_KEY: &str = "c115_cid_map";
 const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
+const C115_DELETE_RETRY_COUNT: usize = 5;
+const C115_DELETE_RETRY_DELAY: Duration = Duration::from_millis(1800);
 
 #[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ShareUrl {
@@ -687,27 +690,36 @@ impl C115Client {
         for (idx, id) in ids.iter().enumerate() {
             form.push((format!("fid[{idx}]"), id.clone()));
         }
-        let resp = self
-            .http
-            .post(url)
-            .form(&form)
-            .header(USER_AGENT, C115_UA)
-            .header(COOKIE, cookie)
-            .header(REFERER, "https://115.com/")
-            .header(ACCEPT, "application/json, text/plain, */*")
-            .send()
-            .await
-            .map_err(|e| AppError::BadRequest(format!("115 删除请求失败: {e}")))?;
-        let result: C115GenericApiResponse = self.parse_json_response(resp, "115 删除").await?;
-        if !result.state {
-            let err = result
-                .error
-                .or(result.msg)
-                .or_else(|| result.errno.map(|errno| format!("errno={errno}")))
-                .unwrap_or_else(|| "115 返回 state=false".to_string());
+        let mut last_error = None;
+        for attempt in 0..=C115_DELETE_RETRY_COUNT {
+            let resp = self
+                .http
+                .post(&url)
+                .form(&form)
+                .header(USER_AGENT, C115_UA)
+                .header(COOKIE, cookie.as_str())
+                .header(REFERER, "https://115.com/")
+                .header(ACCEPT, "application/json, text/plain, */*")
+                .send()
+                .await
+                .map_err(|e| AppError::BadRequest(format!("115 删除请求失败: {e}")))?;
+            let result: C115GenericApiResponse = self.parse_json_response(resp, "115 删除").await?;
+            if result.state {
+                return Ok(());
+            }
+            let retryable = c115_delete_is_busy(&result);
+            let err = c115_generic_error(result, "115 返回 state=false");
+            if retryable && attempt < C115_DELETE_RETRY_COUNT {
+                last_error = Some(err);
+                sleep(C115_DELETE_RETRY_DELAY).await;
+                continue;
+            }
             return Err(AppError::BadRequest(format!("115 删除失败: {err}")));
         }
-        Ok(())
+        Err(AppError::BadRequest(format!(
+            "115 删除失败: {}",
+            last_error.unwrap_or_else(|| "重试耗尽".to_string())
+        )))
     }
 
     pub async fn auto_cid(
@@ -1722,6 +1734,28 @@ fn value_to_string(value: &Value) -> Option<String> {
         Value::Number(n) => Some(n.to_string()).filter(|s| !s.is_empty()),
         _ => None,
     }
+}
+
+fn c115_delete_is_busy(result: &C115GenericApiResponse) -> bool {
+    result
+        .errno
+        .as_ref()
+        .and_then(value_to_string)
+        .is_some_and(|errno| errno == "990009")
+        || result
+            .error
+            .as_deref()
+            .or(result.msg.as_deref())
+            .is_some_and(|message| message.contains("尚未执行完成") || message.contains("稍后再试"))
+}
+
+fn c115_generic_error(result: C115GenericApiResponse, fallback: &str) -> String {
+    result
+        .error
+        .or(result.msg)
+        .or_else(|| result.errno.map(|errno| format!("errno={errno}")))
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn value_as_u64(value: &Value) -> Option<u64> {
