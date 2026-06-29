@@ -489,7 +489,7 @@ async fn execute_save_share(
     target_cid: &str,
     target_lib: Option<&str>,
 ) -> Result<Value, String> {
-    let response = client
+    let mut response = client
         .save_to_cid(
             C115SaveRequest {
                 url: item.url.clone(),
@@ -504,11 +504,20 @@ async fn execute_save_share(
         )
         .await
         .map_err(|err| err.to_string())?;
-    if response.ok {
+    if response.ok || is_already_received_message(&response.msg) {
+        if !response.ok {
+            response.ok = true;
+            response.msg = format!("{}，继续执行 STRM/去重/Emby 刷新", response.msg);
+        }
         Ok(serde_json::to_value(response).unwrap_or_else(|_| json!({})))
     } else {
         Err(response.msg)
     }
+}
+
+fn is_already_received_message(message: &str) -> bool {
+    let normalized = message.trim();
+    normalized.contains("文件已接收") || normalized.contains("无需重复接收")
 }
 
 async fn execute_offline_download(
@@ -1180,4 +1189,16 @@ fn truncate(value: &str, limit: usize) -> String {
         .collect::<String>();
     out.push_str("...");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_already_received_message;
+
+    #[test]
+    fn treats_115_already_received_as_idempotent_success() {
+        assert!(is_already_received_message("文件已接收，无需重复接收！"));
+        assert!(is_already_received_message("无需重复接收"));
+        assert!(!is_already_received_message("转存失败"));
+    }
 }
