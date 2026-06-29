@@ -21,8 +21,11 @@ use tokio::{
 };
 use uuid::Uuid;
 
+static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn delete_execute_deletes_emby_first_retries_then_disk_notify_and_undo() {
+    let _guard = DB_LOCK.lock().await;
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping manage execute DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
         return;
@@ -104,6 +107,7 @@ async fn delete_execute_deletes_emby_first_retries_then_disk_notify_and_undo() {
 
 #[tokio::test]
 async fn delete_execute_skips_deleted_notification_when_no_paths_were_removed() {
+    let _guard = DB_LOCK.lock().await;
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping manage execute DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
         return;
@@ -150,6 +154,7 @@ async fn delete_execute_skips_deleted_notification_when_no_paths_were_removed() 
 
 #[tokio::test]
 async fn delete_batch_execute_continues_items_and_records_each_undo() {
+    let _guard = DB_LOCK.lock().await;
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping manage execute DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
         return;
@@ -220,6 +225,7 @@ async fn delete_batch_execute_continues_items_and_records_each_undo() {
 
 #[tokio::test]
 async fn move_execute_moves_media_rebuilds_strm_refreshes_target_and_writes_undo() {
+    let _guard = DB_LOCK.lock().await;
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping manage execute DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
         return;
