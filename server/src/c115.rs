@@ -568,69 +568,82 @@ impl C115Client {
     }
 
     pub async fn list_dirs(&self, cid: &str) -> AppResult<Vec<C115DirEntry>> {
+        const LIMIT: usize = 1000;
+        const MAX_PAGES: usize = 50;
         let cookie = require_c115_cookie(Some(self.cookie.clone()))?;
         let url = format!("{}/files", self.base_url);
-        let params = [
-            ("aid", "1".to_string()),
-            ("cid", cid.to_string()),
-            ("o", "user_ptime".to_string()),
-            ("asc", "0".to_string()),
-            ("offset", "0".to_string()),
-            ("limit", "1000".to_string()),
-            ("show_dir", "1".to_string()),
-            ("format", "json".to_string()),
-        ];
-        let resp = self
-            .http
-            .get(url)
-            .query(&params)
-            .header(USER_AGENT, C115_UA)
-            .header(COOKIE, cookie)
-            .header(REFERER, "https://115.com/")
-            .header(ACCEPT, "application/json, text/plain, */*")
-            .send()
-            .await
-            .map_err(|e| AppError::BadRequest(format!("115 列目录请求失败: {e}")))?;
-        let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| AppError::BadRequest(format!("读取 115 列目录响应失败: {e}")))?;
-        if !status.is_success() {
-            return Err(AppError::BadRequest(format!(
-                "115 列目录失败: HTTP {status}: {}",
-                body_snippet(&body)
-            )));
-        }
-        let files: C115FilesApiResponse = serde_json::from_str(&body).map_err(|e| {
-            AppError::BadRequest(format!(
-                "115 列目录失败: 响应不是预期 JSON: {e}: {}",
-                body_snippet(&body)
-            ))
-        })?;
-        if !files.state {
-            return Err(AppError::BadRequest(format!(
-                "115 列目录失败: {}",
+        let mut offset = 0usize;
+        let mut dirs = Vec::new();
+        for _ in 0..MAX_PAGES {
+            let params = [
+                ("aid", "1".to_string()),
+                ("cid", cid.to_string()),
+                ("o", "user_ptime".to_string()),
+                ("asc", "0".to_string()),
+                ("offset", offset.to_string()),
+                ("limit", LIMIT.to_string()),
+                ("show_dir", "1".to_string()),
+                ("format", "json".to_string()),
+            ];
+            let resp = self
+                .http
+                .get(&url)
+                .query(&params)
+                .header(USER_AGENT, C115_UA)
+                .header(COOKIE, cookie.as_str())
+                .header(REFERER, "https://115.com/")
+                .header(ACCEPT, "application/json, text/plain, */*")
+                .send()
+                .await
+                .map_err(|e| AppError::BadRequest(format!("115 列目录请求失败: {e}")))?;
+            let status = resp.status();
+            let body = resp
+                .text()
+                .await
+                .map_err(|e| AppError::BadRequest(format!("读取 115 列目录响应失败: {e}")))?;
+            if !status.is_success() {
+                return Err(AppError::BadRequest(format!(
+                    "115 列目录失败: HTTP {status}: {}",
+                    body_snippet(&body)
+                )));
+            }
+            let files: C115FilesApiResponse = serde_json::from_str(&body).map_err(|e| {
+                AppError::BadRequest(format!(
+                    "115 列目录失败: 响应不是预期 JSON: {e}: {}",
+                    body_snippet(&body)
+                ))
+            })?;
+            if !files.state {
+                return Err(AppError::BadRequest(format!(
+                    "115 列目录失败: {}",
+                    files
+                        .error
+                        .or(files.msg)
+                        .filter(|v| !v.trim().is_empty())
+                        .unwrap_or_else(|| "115 返回 state=false".to_string())
+                )));
+            }
+            let chunk_len = files.data.len();
+            dirs.extend(
                 files
-                    .error
-                    .or(files.msg)
-                    .filter(|v| !v.trim().is_empty())
-                    .unwrap_or_else(|| "115 返回 state=false".to_string())
-            )));
+                    .data
+                    .into_iter()
+                    .filter(|item| item.fid.is_none())
+                    .filter_map(|item| {
+                        let cid = item.cid.as_ref().and_then(value_to_string)?;
+                        let name = item
+                            .n
+                            .or(item.name)
+                            .and_then(|v| non_empty_trimmed(&v).map(ToString::to_string))?;
+                        Some(C115DirEntry { cid, name })
+                    }),
+            );
+            if chunk_len < LIMIT {
+                break;
+            }
+            offset += chunk_len;
         }
-        Ok(files
-            .data
-            .into_iter()
-            .filter(|item| item.fid.is_none())
-            .filter_map(|item| {
-                let cid = item.cid.as_ref().and_then(value_to_string)?;
-                let name = item
-                    .n
-                    .or(item.name)
-                    .and_then(|v| non_empty_trimmed(&v).map(ToString::to_string))?;
-                Some(C115DirEntry { cid, name })
-            })
-            .collect())
+        Ok(dirs)
     }
 
     pub async fn delete_child_dir(&self, parent_cid: &str, folder: &str) -> AppResult<bool> {
