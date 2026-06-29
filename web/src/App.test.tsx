@@ -2457,9 +2457,10 @@ describe('App shell', () => {
 
   it('previews 115 share files and creates save/offline/scan tasks with csrf', async () => {
     let snapPayload: unknown = null;
-    let savePayload: unknown = null;
+    let wizardPayload: unknown = null;
     let offlinePayload: unknown = null;
     let scanPayload: unknown = null;
+    let replacePayload: unknown = null;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/c115/test') {
         return jsonResponse({ ok: true, uid: '115-user', used: '8.2 TB' });
@@ -2484,24 +2485,89 @@ describe('App shell', () => {
           ]
         });
       }
-      if (url.pathname === '/api/v2/c115/save/batch') {
+      if (url.pathname === '/api/v2/wizard/add-new') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
-        savePayload = JSON.parse(String(init?.body));
+        wizardPayload = JSON.parse(String(init?.body));
         return jsonResponse({
           id: '66666666-6666-4666-8666-666666666666',
-          kind: 'c115_save_batch',
-          label: 'Share Title',
+          kind: 'add_new',
+          label: '一条龙加新资源: 1 项 -> 库「电影」',
           status: 'pending',
           progress: 0,
-          total: 1,
+          total: 4,
           status_text: '排队中',
           cancel_requested: false,
           queued_at: '2026-06-28T00:00:00Z',
           started_at: null,
           ended_at: null,
           updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
+      if (url.pathname === '/api/v2/tasks/66666666-6666-4666-8666-666666666666') {
+        return jsonResponse({
+          id: '66666666-6666-4666-8666-666666666666',
+          kind: 'add_new',
+          label: '一条龙加新资源: 1 项 -> 库「电影」',
+          status: 'done',
+          progress: 4,
+          total: 4,
+          status_text: '完成，发现 1 个可疑项',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: '2026-06-28T00:00:00Z',
+          ended_at: '2026-06-28T00:00:03Z',
+          updated_at: '2026-06-28T00:00:03Z',
+          params: {},
+          source: 'api',
+          result: {
+            ok: false,
+            target: { cid: '12345', lib: '电影' },
+            transfer: { ok: true, total: 1, succeeded: 1, failed: 0, items: [] },
+            strm: { ok: true, triggered: true, lib: '电影', matched: 2, new_count: 1, new_folders: { '示例剧 (1)': 1 }, attention: [], retried: false, warnings: [] },
+            scan: { ok: true, triggered: true, mode: 'library', lib: '电影', item_id: 'movie-lib', code: 204, delay_ms: 500, warning: null, error: null },
+            poster: { ok: true, triggered: true, status: 'ok', scanned_libraries: 1, scanned_items: 2, issue_count: 0, missing_primary_count: 0, mismatch_count: 0, truncated: false, warnings: [], items: [] },
+            dedup: {
+              ok: true,
+              triggered: true,
+              lib: '电影',
+              dups_count: 1,
+              review_count: 0,
+              warnings: [],
+              error: null,
+              dups: [{
+                tmdb: '100',
+                keep: { lib: '电影', folder: '示例剧 (1)', n: 2, score: 100 },
+                remove: [{ lib: '电影', folder: '示例剧', n: 1, score: 80 }]
+              }],
+              review: []
+            },
+            check: { ok: false, status: 'suspicious', item_success_count: 1, item_error_count: 0, stage_error_count: 0, suspicious_count: 1, items: [], errors: [], suspicious: [], message: '检查完成' }
+          }
+        });
+      }
+      if (url.pathname === '/api/v2/dedup/replace-batch') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        replacePayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: '99999999-9999-4999-8999-999999999999',
+          kind: 'replace_batch',
+          label: '批量替换: 1 组',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:04Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:04Z',
           params: {},
           result: null,
           source: 'api'
@@ -2570,16 +2636,28 @@ describe('App shell', () => {
     expect(await screen.findByText('Share Title')).toBeInTheDocument();
     expect(snapPayload).toEqual({ url: 'https://115.com/s/abc?password=urlpw', pwd: 'urlpw' });
     fireEvent.click(screen.getAllByRole('checkbox')[1]);
-    fireEvent.click(screen.getByRole('button', { name: '创建转存任务' }));
+    fireEvent.click(screen.getByRole('button', { name: '一条龙转存' }));
 
-    await waitFor(() => expect(savePayload).toEqual({
+    await waitFor(() => expect(wizardPayload).toEqual({
       lib: '电影',
-      label: 'Share Title',
+      delay_ms: 500,
       items: [{
         url: 'https://115.com/s/abc?password=urlpw',
+        kind: 'share115',
         pwd: 'urlpw',
         file_ids: ['fid-1'],
         label: 'Share Title'
+      }]
+    }));
+    expect(await screen.findByText('重复 1')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '用新替旧' }));
+    fireEvent.click(screen.getByRole('button', { name: '确认替换' }));
+    await waitFor(() => expect(replacePayload).toEqual({
+      items: [{
+        lib: '电影',
+        win_folder: '示例剧 (1)',
+        lose_folder: '示例剧',
+        reason: '一条龙智能替换 tmdb 100'
       }]
     }));
 

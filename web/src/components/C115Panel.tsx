@@ -12,6 +12,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
 import { useTaskCompletion } from '../hooks/useTaskCompletion';
+import { ConfirmDanger } from './Modal';
 import { useToast } from './Toast';
 
 type C115SnapFile = components['schemas']['C115SnapFile'];
@@ -19,8 +20,13 @@ type C115SnapResponse = components['schemas']['C115SnapResponse'];
 type C115TestResponse = components['schemas']['C115TestResponse'];
 type C115AutoCidResponse = components['schemas']['C115AutoCidResponse'];
 type ConfigResponse = components['schemas']['ConfigResponse'];
+type AddNewReport = components['schemas']['AddNewReport'];
 type AddNewItem = components['schemas']['AddNewItem'];
 type AddNewRequest = components['schemas']['AddNewRequest'];
+type DedupGroup = components['schemas']['DedupGroup'];
+type DedupReviewGroup = components['schemas']['DedupReviewGroup'];
+type DedupRow = components['schemas']['DedupRow'];
+type ReplaceBatchRequest = components['schemas']['ReplaceBatchRequest'];
 type TaskRun = components['schemas']['TaskRun'];
 
 type InputLine = {
@@ -115,6 +121,119 @@ function isAutoCidResponse(value: unknown): value is C115AutoCidResponse {
   return isRecord(value) && value.ok === true && isRecord(value.matches) && typeof value.scanned === 'number';
 }
 
+function isAddNewReport(value: unknown): value is AddNewReport {
+  return isRecord(value) && isRecord(value.transfer) && isRecord(value.dedup) && isRecord(value.strm);
+}
+
+function dedupRows(group: DedupGroup | DedupReviewGroup): DedupRow[] {
+  if ('rows' in group) return group.rows;
+  return [group.keep, ...group.remove];
+}
+
+function smartReplaceCandidate(group: DedupGroup | DedupReviewGroup) {
+  const rows = dedupRows(group);
+  const withSuffix = rows.find((row) => /\(\d+\)$/.test(row.folder));
+  const withoutSuffix = rows.find((row) => row !== withSuffix && !/\(\d+\)$/.test(row.folder));
+  if (!withSuffix || !withoutSuffix || withSuffix.lib !== withoutSuffix.lib) return null;
+  if ((withSuffix.n || 0) < (withoutSuffix.n || 0)) return null;
+  return {
+    tmdb: group.tmdb,
+    lib: withSuffix.lib,
+    win_folder: withSuffix.folder,
+    lose_folder: withoutSuffix.folder,
+    win_n: withSuffix.n,
+    lose_n: withoutSuffix.n
+  };
+}
+
+function AddNewReportCard({
+  task,
+  report,
+  replacing,
+  onSmartReplace
+}: {
+  task: TaskRun;
+  report: AddNewReport;
+  replacing: boolean;
+  onSmartReplace: (items: ReplaceBatchRequest['items']) => void;
+}) {
+  const groups = [...report.dedup.dups, ...report.dedup.review];
+  const candidates = groups.flatMap((group) => {
+    const candidate = smartReplaceCandidate(group);
+    return candidate
+      ? [{
+          lib: candidate.lib,
+          win_folder: candidate.win_folder,
+          lose_folder: candidate.lose_folder,
+          reason: `一条龙智能替换 tmdb ${candidate.tmdb}`
+        }]
+      : [];
+  });
+
+  return (
+    <div className="c115AutoCid c115WizardReport">
+      <strong>一条龙报告 · {task.label}</strong>
+      <div>
+        <span className={report.transfer.failed ? 'badge warn' : 'badge done'}>
+          转存 {report.transfer.succeeded}/{report.transfer.total}
+        </span>
+        <span className={report.strm.new_count ? 'badge done' : 'badge warn'}>
+          STRM 新增 {report.strm.new_count}
+        </span>
+        <span className={groups.length ? 'badge warn' : 'badge done'}>
+          重复 {groups.length}
+        </span>
+        <span className={report.poster.issue_count ? 'badge warn' : 'badge done'}>
+          海报问题 {report.poster.issue_count}
+        </span>
+      </div>
+      {groups.length > 0 && (
+        <div className="c115WizardDupList">
+          {groups.slice(0, 8).map((group) => {
+            const candidate = smartReplaceCandidate(group);
+            return (
+              <div className="c115WizardDup" key={`${group.tmdb}-${dedupRows(group).map((row) => row.folder).join('|')}`}>
+                <div>
+                  <span className="badge warn">tmdb {group.tmdb}</span>
+                  {'why' in group && <span>{group.why}</span>}
+                </div>
+                {dedupRows(group).map((row) => (
+                  <p key={`${row.lib}-${row.folder}`}>
+                    {/\(\d+\)$/.test(row.folder) ? '新' : '旧'} {row.folder}
+                    <span> [{row.lib} · {row.n} 文件 · score {row.score}]</span>
+                  </p>
+                ))}
+                {candidate ? (
+                  <button
+                    className="btn danger compact"
+                    disabled={replacing}
+                    onClick={() => onSmartReplace([{
+                      lib: candidate.lib,
+                      win_folder: candidate.win_folder,
+                      lose_folder: candidate.lose_folder,
+                      reason: `一条龙智能替换 tmdb ${candidate.tmdb}`
+                    }])}
+                  >
+                    用新替旧
+                  </button>
+                ) : (
+                  <span className="badge">需手动去重</span>
+                )}
+              </div>
+            );
+          })}
+          {groups.length > 8 && <p className="settingsHint">还有 {groups.length - 8} 组未展开，可去智能清理/去重页处理。</p>}
+        </div>
+      )}
+      {candidates.length > 1 && (
+        <button className="btn danger compact" disabled={replacing} onClick={() => onSmartReplace(candidates)}>
+          一键智能替换 {candidates.length} 组
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function C115Panel() {
   const [status, setStatus] = useState<C115TestResponse | null>(null);
   const [statusError, setStatusError] = useState('');
@@ -130,6 +249,8 @@ export function C115Panel() {
   const [autoCid, setAutoCid] = useState<C115AutoCidResponse | null>(null);
   const [trackedTaskIds, setTrackedTaskIds] = useState<string[]>([]);
   const [completedTasks, setCompletedTasks] = useState<TaskRun[]>([]);
+  const [replacing, setReplacing] = useState(false);
+  const [pendingReplace, setPendingReplace] = useState<ReplaceBatchRequest['items'] | null>(null);
   const [error, setError] = useState('');
   const [loadingMeta, setLoadingMeta] = useState(true);
   const [previewing, setPreviewing] = useState(false);
@@ -154,7 +275,8 @@ export function C115Panel() {
   const wizardSummary = wizardStats.total
     ? `${wizardStats.total} 项 · 分享 ${wizardStats.share} · 离线 ${wizardStats.offline} · ${currentTargetLabel}`
     : `等待链接 · ${currentTargetLabel}`;
-  const busy = previewing || saving || offlining || wizarding || scanning || autoDetecting;
+  const busy = previewing || saving || offlining || wizarding || scanning || autoDetecting || replacing;
+  const addNewReports = completedTasks.filter((task) => task.status === 'done' && isAddNewReport(task.result));
 
   const trackTask = (task: TaskRun) => {
     setTrackedTaskIds((prev) => (prev.includes(task.id) ? prev : [task.id, ...prev].slice(0, 20)));
@@ -277,6 +399,21 @@ export function C115Panel() {
     });
   };
 
+  const buildShareItems = (shareLines: InputLine[]): AddNewItem[] => {
+    const allSelected = selectableFiles.length > 0 && selectedFileIds.size === selectableFiles.length;
+    return shareLines.map((line) => {
+      const canUseFileSubset =
+        shareLines.length === 1 && snapSource?.url === line.url && selectableFiles.length > 0 && !allSelected;
+      return {
+        url: line.url,
+        kind: 'share115',
+        pwd: resolvePwd(line, defaultPwd),
+        file_ids: canUseFileSubset ? Array.from(selectedFileIds) : undefined,
+        label: snapSource?.url === line.url && snap?.share_title ? snap.share_title : line.url
+      };
+    });
+  };
+
   const saveShares = async () => {
     const target = parseTarget();
     if (!target) return;
@@ -293,32 +430,23 @@ export function C115Panel() {
     setSaving(true);
     setError('');
     try {
-      setProgressText(`创建批量转存任务：${shareLines.length} 项`);
-      const allSelected = selectableFiles.length > 0 && selectedFileIds.size === selectableFiles.length;
-      const items = shareLines.map((line) => {
-        const canUseFileSubset =
-          shareLines.length === 1 && snapSource?.url === line.url && selectableFiles.length > 0 && !allSelected;
-        return {
-              url: line.url,
-              pwd: resolvePwd(line, defaultPwd),
-              file_ids: canUseFileSubset ? Array.from(selectedFileIds) : undefined,
-              label: snap?.share_title || line.url
-        };
-      });
-      const task = await api<TaskRun>('/api/v2/c115/save/batch', {
+      const delayMs = parseWizardDelay();
+      if (delayMs == null) return;
+      setProgressText(`创建一条龙转存任务：${shareLines.length} 项`);
+      const task = await api<TaskRun>('/api/v2/wizard/add-new', {
         method: 'POST',
         body: JSON.stringify({
-          items,
+          items: buildShareItems(shareLines),
+          delay_ms: delayMs,
           ...(target.cid ? { cid: target.cid } : { lib: target.lib }),
-          label: shareLines.length === 1 ? items[0]?.label : `115 批量转存 ${shareLines.length} 项`
         })
       });
       trackTask(task);
-      toast.push(`批量转存任务已创建：${taskSummary(task)}`, 'ok');
+      toast.push(`一条龙转存任务已创建：${taskSummary(task)}`, 'ok');
     } catch (e) {
       const message = errorMessage(e);
       setError(message);
-      toast.push(`批量转存任务创建失败：${message}`, 'error');
+      toast.push(`一条龙转存任务创建失败：${message}`, 'error');
     } finally {
       setSaving(false);
       setProgressText('');
@@ -497,8 +625,52 @@ export function C115Panel() {
     }
   };
 
+  const requestSmartReplace = (items: ReplaceBatchRequest['items']) => {
+    if (!items.length) {
+      toast.push('没有可智能替换的重复项', 'warn');
+      return;
+    }
+    setPendingReplace(items);
+  };
+
+  const runSmartReplace = async () => {
+    const items = pendingReplace || [];
+    if (!items.length) return;
+    setReplacing(true);
+    setError('');
+    try {
+      const task = await api<TaskRun>('/api/v2/dedup/replace-batch', {
+        method: 'POST',
+        body: JSON.stringify({ items })
+      });
+      trackTask(task);
+      toast.push(`智能替换任务已创建：${taskSummary(task)}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`创建智能替换任务失败：${message}`, 'error');
+    } finally {
+      setReplacing(false);
+      setPendingReplace(null);
+    }
+  };
+
   return (
     <section className="c115Panel">
+      {pendingReplace && (
+        <ConfirmDanger
+          title={`确认智能替换 ${pendingReplace.length} 组`}
+          confirmText="确认替换"
+          onCancel={() => setPendingReplace(null)}
+          onConfirm={runSmartReplace}
+          body={(
+            <div className="dangerCopy">
+              <p>将删除旧目录到 115 回收站，并把新目录改名为旧目录名。</p>
+              <code>{pendingReplace.slice(0, 3).map((item) => `${item.lib}: ${item.win_folder} -> ${item.lose_folder}`).join('\n')}</code>
+            </div>
+          )}
+        />
+      )}
       <div className="c115Meta">
         <div>
           <strong>115 状态</strong>
@@ -580,7 +752,7 @@ export function C115Panel() {
           </button>
           <button type="button" className="btn" onClick={saveShares} disabled={busy}>
             <DownloadCloud size={16} />
-            {saving ? '提交中' : '创建转存任务'}
+            {saving ? '提交中' : '一条龙转存'}
           </button>
         </div>
       </form>
@@ -679,6 +851,16 @@ export function C115Panel() {
           </div>
         </div>
       )}
+
+      {addNewReports.map((task) => (
+        <AddNewReportCard
+          key={task.id}
+          task={task}
+          report={task.result as AddNewReport}
+          replacing={replacing}
+          onSmartReplace={requestSmartReplace}
+        />
+      ))}
 
       {progressText && <div className="notice c115Progress">{progressText}</div>}
       {error && <div className="notice warn whitespaceNotice">{error}</div>}

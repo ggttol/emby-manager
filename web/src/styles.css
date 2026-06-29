@@ -1202,6 +1202,40 @@ main {
   gap: 7px;
 }
 
+.c115WizardReport {
+  gap: 12px;
+}
+
+.c115WizardDupList {
+  display: grid !important;
+  grid-template-columns: 1fr;
+  gap: 10px !important;
+  width: 100%;
+}
+
+.c115WizardDup {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.c115WizardDup > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.c115WizardDup p {
+  margin: 4px 0;
+  color: var(--text);
+}
+
+.c115WizardDup p span {
+  color: var(--muted);
+}
+
 .badge.warn {
   background: var(--amber-soft);
   color: var(--amber);
