@@ -259,6 +259,63 @@ async fn save_active_task_reuse_includes_sorted_file_ids() {
 }
 
 #[tokio::test]
+async fn save_batch_creates_one_cancelable_task_with_all_items() {
+    let _guard = TEST_DB_LOCK.lock().await;
+    let Some(state) = c115_test_state().await else {
+        eprintln!("skipping c115 save batch DB test; set EMBY_MANAGER_C115_TEST_DATABASE_URL");
+        return;
+    };
+    seed_c115_settings(&state).await;
+
+    let permit = state
+        .clouddrive_slot
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("hold clouddrive slot");
+    let app = c115::router().with_state(state.clone());
+
+    let request = json!({
+        "lib": "电影",
+        "label": "批量转存测试",
+        "items": [
+            {"url": "https://115.com/s/swAAA?password=111", "pwd": "111", "label": "A"},
+            {"url": "https://115.com/s/swBBB?password=222", "pwd": "222", "label": "B"}
+        ]
+    });
+    let (status, body) = post_c115_save_batch(&app, request).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["kind"], "c115_save_batch");
+    assert_eq!(body["label"], "批量转存测试");
+    assert_eq!(body["status"], "pending");
+
+    let task_id = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+    let params: Value = sqlx::query_scalar("SELECT params FROM task_runs WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("load c115 save batch params");
+    assert_eq!(params["cid"], json!("12345"));
+    assert_eq!(params["lib"], json!("电影"));
+    assert_eq!(params["items"].as_array().unwrap().len(), 2);
+
+    let task_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM task_runs WHERE kind = $1")
+        .bind("c115_save_batch")
+        .fetch_one(&state.pool)
+        .await
+        .expect("count c115 save batch tasks");
+    assert_eq!(task_count, 1);
+
+    sqlx::query("UPDATE task_runs SET cancel_requested = TRUE WHERE id = $1")
+        .bind(task_id)
+        .execute(&state.pool)
+        .await
+        .expect("cancel blocked c115 save batch task");
+    drop(permit);
+    sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
 async fn auto_cid_task_records_target_map_and_can_cancel_before_c115_call() {
     let _guard = TEST_DB_LOCK.lock().await;
     let Some(state) = c115_test_state().await else {
@@ -330,13 +387,17 @@ fn openapi_registers_c115_live_ops() {
     let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
     let paths = doc["paths"].as_object().unwrap();
     assert!(paths.contains_key("/api/v2/c115/save"));
+    assert!(paths.contains_key("/api/v2/c115/save/batch"));
     assert!(paths.contains_key("/api/v2/c115/offline"));
+    assert!(paths.contains_key("/api/v2/c115/offline/batch"));
     assert!(paths.contains_key("/api/v2/c115/auto-cid"));
     assert!(paths.contains_key("/api/v2/c115/auto-cid/task"));
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();
     assert!(schemas.contains_key("C115SaveRequest"));
+    assert!(schemas.contains_key("C115SaveBatchRequest"));
     assert!(schemas.contains_key("C115OfflineRequest"));
+    assert!(schemas.contains_key("C115OfflineBatchRequest"));
     assert!(schemas.contains_key("C115AutoCidResponse"));
 }
 
@@ -357,6 +418,31 @@ async fn post_c115_save(app: &axum::Router, body: Value) -> (StatusCode, Value) 
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("read c115 save response body");
+    let body = if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}))
+    };
+    (status, body)
+}
+
+async fn post_c115_save_batch(app: &axum::Router, body: Value) -> (StatusCode, Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v2/c115/save/batch")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("build c115 save batch request"),
+        )
+        .await
+        .expect("send c115 save batch request");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("read c115 save batch response body");
     let body = if bytes.is_empty() {
         json!({})
     } else {

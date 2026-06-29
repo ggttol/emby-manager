@@ -103,10 +103,6 @@ function humanSize(size: number) {
   return `${value >= 10 || idx === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[idx]}`;
 }
 
-function delay(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 function taskSummary(task: TaskRun) {
   return task.label || task.kind || task.id;
 }
@@ -296,39 +292,33 @@ export function C115Panel() {
 
     setSaving(true);
     setError('');
-    const failures: string[] = [];
-    let okCount = 0;
     try {
-      for (const [index, line] of shareLines.entries()) {
-        setProgressText(`转存 ${index + 1}/${shareLines.length}`);
-        const allSelected = selectableFiles.length > 0 && selectedFileIds.size === selectableFiles.length;
+      setProgressText(`创建批量转存任务：${shareLines.length} 项`);
+      const allSelected = selectableFiles.length > 0 && selectedFileIds.size === selectableFiles.length;
+      const items = shareLines.map((line) => {
         const canUseFileSubset =
           shareLines.length === 1 && snapSource?.url === line.url && selectableFiles.length > 0 && !allSelected;
-        try {
-          const task = await api<TaskRun>('/api/v2/c115/save', {
-            method: 'POST',
-            body: JSON.stringify({
+        return {
               url: line.url,
               pwd: resolvePwd(line, defaultPwd),
-              ...(target.cid ? { cid: target.cid } : { lib: target.lib }),
               file_ids: canUseFileSubset ? Array.from(selectedFileIds) : undefined,
               label: snap?.share_title || line.url
-            })
-          });
-          trackTask(task);
-          okCount += 1;
-          toast.push(`任务已创建：${taskSummary(task)}`, 'ok');
-        } catch (e) {
-          failures.push(`${line.url}: ${errorMessage(e)}`);
-        }
-        if (index < shareLines.length - 1) await delay(400);
-      }
-      if (failures.length) {
-        setError(failures.join('\n'));
-        toast.push(`转存任务 ${okCount}/${shareLines.length} 创建成功`, 'warn');
-      } else {
-        toast.push(`已创建 ${okCount} 个转存任务`, 'ok');
-      }
+        };
+      });
+      const task = await api<TaskRun>('/api/v2/c115/save/batch', {
+        method: 'POST',
+        body: JSON.stringify({
+          items,
+          ...(target.cid ? { cid: target.cid } : { lib: target.lib }),
+          label: shareLines.length === 1 ? items[0]?.label : `115 批量转存 ${shareLines.length} 项`
+        })
+      });
+      trackTask(task);
+      toast.push(`批量转存任务已创建：${taskSummary(task)}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`批量转存任务创建失败：${message}`, 'error');
     } finally {
       setSaving(false);
       setProgressText('');
@@ -346,34 +336,22 @@ export function C115Panel() {
 
     setOfflining(true);
     setError('');
-    const failures: string[] = [];
-    let okCount = 0;
     try {
-      for (const [index, line] of lines.entries()) {
-        setProgressText(`离线 ${index + 1}/${lines.length}`);
-        try {
-          const task = await api<TaskRun>('/api/v2/c115/offline', {
-            method: 'POST',
-            body: JSON.stringify({
-              url: line.url,
-              ...(target.cid ? { cid: target.cid } : { lib: target.lib }),
-              label: line.url
-            })
-          });
-          trackTask(task);
-          okCount += 1;
-          toast.push(`任务已创建：${taskSummary(task)}`, 'ok');
-        } catch (e) {
-          failures.push(`${line.url}: ${errorMessage(e)}`);
-        }
-        if (index < lines.length - 1) await delay(400);
-      }
-      if (failures.length) {
-        setError(failures.join('\n'));
-        toast.push(`离线任务 ${okCount}/${lines.length} 创建成功`, 'warn');
-      } else {
-        toast.push(`已创建 ${okCount} 个离线任务`, 'ok');
-      }
+      setProgressText(`创建批量离线任务：${lines.length} 项`);
+      const task = await api<TaskRun>('/api/v2/c115/offline/batch', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: lines.map((line) => ({ url: line.url, label: line.url })),
+          ...(target.cid ? { cid: target.cid } : { lib: target.lib }),
+          label: lines.length === 1 ? lines[0]?.url : `115 批量离线 ${lines.length} 项`
+        })
+      });
+      trackTask(task);
+      toast.push(`批量离线任务已创建：${taskSummary(task)}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`批量离线任务创建失败：${message}`, 'error');
     } finally {
       setOfflining(false);
       setProgressText('');

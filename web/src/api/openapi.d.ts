@@ -148,6 +148,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/c115/offline/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["offline_batch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/c115/parse": {
         parameters: {
             query?: never;
@@ -174,6 +190,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["save"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/c115/save/batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["save_batch"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1370,6 +1402,12 @@ export interface components {
             cid: string;
             name: string;
         };
+        C115OfflineBatchRequest: {
+            cid?: string | null;
+            items: components["schemas"]["C115OfflineRequest"][];
+            label?: string | null;
+            lib?: string | null;
+        };
         C115OfflineRequest: {
             cid?: string | null;
             label?: string | null;
@@ -1386,6 +1424,12 @@ export interface components {
         C115ParseResponse: {
             receive_code?: string | null;
             share?: string | null;
+        };
+        C115SaveBatchRequest: {
+            cid?: string | null;
+            items: components["schemas"]["C115SaveRequest"][];
+            label?: string | null;
+            lib?: string | null;
         };
         C115SaveRequest: {
             cid?: string | null;
@@ -2997,6 +3041,29 @@ export interface operations {
             };
         };
     };
+    offline_batch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["C115OfflineBatchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
     parse_url: {
         parameters: {
             query?: never;
@@ -3030,6 +3097,29 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["C115SaveRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    save_batch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["C115SaveBatchRequest"];
             };
         };
         responses: {

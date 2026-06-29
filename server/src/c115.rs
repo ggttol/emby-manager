@@ -83,7 +83,7 @@ pub struct C115SnapResponse {
     pub files: Vec<C115SnapFile>,
 }
 
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct C115SaveRequest {
     pub url: String,
     pub pwd: Option<String>,
@@ -91,6 +91,14 @@ pub struct C115SaveRequest {
     pub cid: Option<String>,
     pub label: Option<String>,
     pub file_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct C115SaveBatchRequest {
+    pub items: Vec<C115SaveRequest>,
+    pub lib: Option<String>,
+    pub cid: Option<String>,
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -104,9 +112,17 @@ pub struct C115SaveResponse {
     pub msg: String,
 }
 
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct C115OfflineRequest {
     pub url: String,
+    pub lib: Option<String>,
+    pub cid: Option<String>,
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct C115OfflineBatchRequest {
+    pub items: Vec<C115OfflineRequest>,
     pub lib: Option<String>,
     pub cid: Option<String>,
     pub label: Option<String>,
@@ -277,7 +293,9 @@ pub fn router() -> Router<AppState> {
         .route("/api/v2/c115/parse", post(parse_url))
         .route("/api/v2/c115/snap", post(snap))
         .route("/api/v2/c115/save", post(save))
+        .route("/api/v2/c115/save/batch", post(save_batch))
         .route("/api/v2/c115/offline", post(offline))
+        .route("/api/v2/c115/offline/batch", post(offline_batch))
         .route("/api/v2/c115/auto-cid", post(auto_cid))
         .route("/api/v2/c115/auto-cid/task", post(auto_cid_task))
 }
@@ -885,6 +903,39 @@ pub async fn save(
     Ok(Json(task))
 }
 
+#[utoipa::path(post, path = "/api/v2/c115/save/batch", tag = "c115", request_body = C115SaveBatchRequest, responses((status = 200, body = TaskRun)))]
+pub async fn save_batch(
+    State(state): State<AppState>,
+    Json(req): Json<C115SaveBatchRequest>,
+) -> AppResult<Json<TaskRun>> {
+    validate_batch_len(req.items.len(), "转存")?;
+    let cookie =
+        require_c115_cookie(config_store::get_string(&state.pool, C115_COOKIE_KEY).await?)?;
+    let (cid, lib) =
+        match resolve_target_cid(&state.pool, req.cid.as_deref(), req.lib.as_deref()).await {
+            Ok(target) => target,
+            Err(_) => resolve_first_save_target(&state.pool, &req).await?,
+        };
+    let label = req
+        .label
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("115 批量转存: {} 项 -> cid={cid}", req.items.len()));
+    let params = serde_json::json!({
+        "items": &req.items,
+        "cid": cid,
+        "lib": lib,
+        "label": &req.label,
+    });
+    let (task, created) =
+        insert_or_reuse_c115_task_with_params(&state, "c115_save_batch", &label, params).await?;
+    if created {
+        spawn_c115_save_batch(state, task.id, cookie, req.items, cid, lib);
+    }
+    Ok(Json(task))
+}
+
 #[utoipa::path(post, path = "/api/v2/c115/offline", tag = "c115", request_body = C115OfflineRequest, responses((status = 200, body = TaskRun)))]
 pub async fn offline(
     State(state): State<AppState>,
@@ -898,6 +949,39 @@ pub async fn offline(
     let (task, created) = insert_or_reuse_c115_task(&state, "c115_offline", &label).await?;
     if created {
         spawn_c115_offline(state, task.id, cookie, req, cid, lib);
+    }
+    Ok(Json(task))
+}
+
+#[utoipa::path(post, path = "/api/v2/c115/offline/batch", tag = "c115", request_body = C115OfflineBatchRequest, responses((status = 200, body = TaskRun)))]
+pub async fn offline_batch(
+    State(state): State<AppState>,
+    Json(req): Json<C115OfflineBatchRequest>,
+) -> AppResult<Json<TaskRun>> {
+    validate_batch_len(req.items.len(), "离线")?;
+    let cookie =
+        require_c115_cookie(config_store::get_string(&state.pool, C115_COOKIE_KEY).await?)?;
+    let (cid, lib) =
+        match resolve_target_cid(&state.pool, req.cid.as_deref(), req.lib.as_deref()).await {
+            Ok(target) => target,
+            Err(_) => resolve_first_offline_target(&state.pool, &req).await?,
+        };
+    let label = req
+        .label
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("115 批量离线: {} 项 -> cid={cid}", req.items.len()));
+    let params = serde_json::json!({
+        "items": &req.items,
+        "cid": cid,
+        "lib": lib,
+        "label": &req.label,
+    });
+    let (task, created) =
+        insert_or_reuse_c115_task_with_params(&state, "c115_offline_batch", &label, params).await?;
+    if created {
+        spawn_c115_offline_batch(state, task.id, cookie, req.items, cid, lib);
     }
     Ok(Json(task))
 }
@@ -984,6 +1068,42 @@ fn c115_save_task_params(req: &C115SaveRequest, cid: &str, lib: Option<&str>) ->
         "label": &req.label,
         "file_ids": file_ids,
     })
+}
+
+fn validate_batch_len(len: usize, label: &str) -> AppResult<()> {
+    if len == 0 {
+        return Err(AppError::BadRequest(format!(
+            "{label}批量任务至少需要 1 项"
+        )));
+    }
+    if len > 100 {
+        return Err(AppError::BadRequest(format!(
+            "{label}批量任务一次最多 100 项"
+        )));
+    }
+    Ok(())
+}
+
+async fn resolve_first_save_target(
+    pool: &sqlx::PgPool,
+    req: &C115SaveBatchRequest,
+) -> AppResult<(String, Option<String>)> {
+    let first = req
+        .items
+        .first()
+        .ok_or_else(|| AppError::BadRequest("转存批量任务至少需要 1 项".to_string()))?;
+    resolve_target_cid(pool, first.cid.as_deref(), first.lib.as_deref()).await
+}
+
+async fn resolve_first_offline_target(
+    pool: &sqlx::PgPool,
+    req: &C115OfflineBatchRequest,
+) -> AppResult<(String, Option<String>)> {
+    let first = req
+        .items
+        .first()
+        .ok_or_else(|| AppError::BadRequest("离线批量任务至少需要 1 项".to_string()))?;
+    resolve_target_cid(pool, first.cid.as_deref(), first.lib.as_deref()).await
 }
 
 async fn insert_or_reuse_c115_task_with_params(
@@ -1079,6 +1199,168 @@ fn spawn_c115_offline(
     });
 }
 
+fn spawn_c115_save_batch(
+    state: AppState,
+    id: Uuid,
+    cookie: String,
+    items: Vec<C115SaveRequest>,
+    cid: String,
+    lib: Option<String>,
+) {
+    tokio::spawn(async move {
+        run_c115_batch_task(state, id, items.len(), |state, id| async move {
+            let client = C115Client::new_with_site(C115_API, C115_SITE, cookie, state.http.clone());
+            let total_items = items.len();
+            let mut results = Vec::with_capacity(items.len());
+            let mut succeeded = 0usize;
+            for (index, item) in items.into_iter().enumerate() {
+                if tasks::cancel_requested(&state.pool, id).await {
+                    tasks::finish_cancelled(&state.pool, id).await?;
+                    return Err(AppError::Conflict("cancelled".to_string()));
+                }
+                tasks::set_progress(
+                    &state.pool,
+                    id,
+                    index as i64,
+                    &format!("转存 {}/{}", index + 1, total_items),
+                )
+                .await?;
+                let url = item.url.clone();
+                let label = item.label.clone();
+                match client
+                    .save_to_cid(item, cid.clone(), lib.clone())
+                    .await
+                    .and_then(|response| {
+                        if response.ok {
+                            Ok(response)
+                        } else {
+                            Err(AppError::BadRequest(response.msg))
+                        }
+                    }) {
+                    Ok(response) => {
+                        succeeded += 1;
+                        results.push(serde_json::json!({
+                            "ok": true,
+                            "url": url,
+                            "label": label,
+                            "result": response,
+                        }));
+                    }
+                    Err(err) => {
+                        results.push(serde_json::json!({
+                            "ok": false,
+                            "url": url,
+                            "label": label,
+                            "err": err.to_string(),
+                        }));
+                    }
+                }
+                tasks::set_progress(
+                    &state.pool,
+                    id,
+                    (index + 1) as i64,
+                    &format!("已转存 {}/{}", index + 1, total_items),
+                )
+                .await?;
+            }
+            let total = results.len();
+            let failed = total.saturating_sub(succeeded);
+            Ok(serde_json::json!({
+                "ok": failed == 0,
+                "action": "c115_save_batch",
+                "total": total,
+                "succeeded": succeeded,
+                "failed": failed,
+                "cid": cid,
+                "lib": lib,
+                "items": results,
+            }))
+        })
+        .await;
+    });
+}
+
+fn spawn_c115_offline_batch(
+    state: AppState,
+    id: Uuid,
+    cookie: String,
+    items: Vec<C115OfflineRequest>,
+    cid: String,
+    lib: Option<String>,
+) {
+    tokio::spawn(async move {
+        run_c115_batch_task(state, id, items.len(), |state, id| async move {
+            let client = C115Client::new_with_site(C115_API, C115_SITE, cookie, state.http.clone());
+            let total_items = items.len();
+            let mut results = Vec::with_capacity(items.len());
+            let mut succeeded = 0usize;
+            for (index, item) in items.into_iter().enumerate() {
+                if tasks::cancel_requested(&state.pool, id).await {
+                    tasks::finish_cancelled(&state.pool, id).await?;
+                    return Err(AppError::Conflict("cancelled".to_string()));
+                }
+                tasks::set_progress(
+                    &state.pool,
+                    id,
+                    index as i64,
+                    &format!("离线 {}/{}", index + 1, total_items),
+                )
+                .await?;
+                let url = item.url.clone();
+                let label = item.label.clone();
+                match client
+                    .offline_add(item, cid.clone(), lib.clone())
+                    .await
+                    .and_then(|response| {
+                        if response.ok {
+                            Ok(response)
+                        } else {
+                            Err(AppError::BadRequest(response.msg))
+                        }
+                    }) {
+                    Ok(response) => {
+                        succeeded += 1;
+                        results.push(serde_json::json!({
+                            "ok": true,
+                            "url": url,
+                            "label": label,
+                            "result": response,
+                        }));
+                    }
+                    Err(err) => {
+                        results.push(serde_json::json!({
+                            "ok": false,
+                            "url": url,
+                            "label": label,
+                            "err": err.to_string(),
+                        }));
+                    }
+                }
+                tasks::set_progress(
+                    &state.pool,
+                    id,
+                    (index + 1) as i64,
+                    &format!("已离线 {}/{}", index + 1, total_items),
+                )
+                .await?;
+            }
+            let total = results.len();
+            let failed = total.saturating_sub(succeeded);
+            Ok(serde_json::json!({
+                "ok": failed == 0,
+                "action": "c115_offline_batch",
+                "total": total,
+                "succeeded": succeeded,
+                "failed": failed,
+                "cid": cid,
+                "lib": lib,
+                "items": results,
+            }))
+        })
+        .await;
+    });
+}
+
 fn spawn_c115_auto_cid(state: AppState, id: Uuid, plan: C115AutoCidPlan) {
     tokio::spawn(async move {
         run_c115_task(state, id, |state| async move {
@@ -1122,6 +1404,38 @@ where
             .execute(&state.pool)
             .await;
         }
+        Err(err) => {
+            let _ = mark_task_error(&state, id, &err.to_string(), None).await;
+        }
+    }
+}
+
+async fn run_c115_batch_task<F, Fut>(state: AppState, id: Uuid, total: usize, op: F)
+where
+    F: FnOnce(AppState, Uuid) -> Fut,
+    Fut: std::future::Future<Output = AppResult<Value>>,
+{
+    let Ok(_permit) = state.clouddrive_slot.clone().acquire_owned().await else {
+        let _ = mark_task_error(&state, id, "115 任务串行锁不可用", None).await;
+        return;
+    };
+    if task_cancel_requested(&state, id).await {
+        let _ = mark_task_cancelled(&state, id).await;
+        return;
+    }
+    let _ = tasks::set_total(&state.pool, id, total.max(1) as i64).await;
+    let _ = tasks::mark_running(&state.pool, id, "批量 115 任务启动").await;
+    match op(state.clone(), id).await {
+        Ok(result) => {
+            let failed = result.get("failed").and_then(Value::as_u64).unwrap_or(0);
+            let status_text = if failed == 0 {
+                "完成".to_string()
+            } else {
+                format!("完成，{failed} 项失败")
+            };
+            let _ = tasks::finish_done_with_message(&state.pool, id, &status_text, result).await;
+        }
+        Err(AppError::Conflict(message)) if message == "cancelled" => {}
         Err(err) => {
             let _ = mark_task_error(&state, id, &err.to_string(), None).await;
         }

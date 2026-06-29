@@ -2433,15 +2433,15 @@ describe('App shell', () => {
           ]
         });
       }
-      if (url.pathname === '/api/v2/c115/save') {
+      if (url.pathname === '/api/v2/c115/save/batch') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
         savePayload = JSON.parse(String(init?.body));
         return jsonResponse({
           id: '66666666-6666-4666-8666-666666666666',
-          kind: 'c115_save',
-          label: '115 转存: Share Title',
+          kind: 'c115_save_batch',
+          label: 'Share Title',
           status: 'pending',
           progress: 0,
           total: 1,
@@ -2456,15 +2456,15 @@ describe('App shell', () => {
           source: 'api'
         });
       }
-      if (url.pathname === '/api/v2/c115/offline') {
+      if (url.pathname === '/api/v2/c115/offline/batch') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
         offlinePayload = JSON.parse(String(init?.body));
         return jsonResponse({
           id: '77777777-7777-4777-8777-777777777777',
-          kind: 'c115_offline',
-          label: '115 离线: magnet',
+          kind: 'c115_offline_batch',
+          label: 'magnet:?xt=urn:btih:abc',
           status: 'pending',
           progress: 0,
           total: 1,
@@ -2522,20 +2522,26 @@ describe('App shell', () => {
     fireEvent.click(screen.getByRole('button', { name: '创建转存任务' }));
 
     await waitFor(() => expect(savePayload).toEqual({
-      url: 'https://115.com/s/abc?password=urlpw',
-      pwd: 'urlpw',
       lib: '电影',
-      file_ids: ['fid-1'],
-      label: 'Share Title'
+      label: 'Share Title',
+      items: [{
+        url: 'https://115.com/s/abc?password=urlpw',
+        pwd: 'urlpw',
+        file_ids: ['fid-1'],
+        label: 'Share Title'
+      }]
     }));
 
     fireEvent.change(screen.getByLabelText('115 离线链接'), { target: { value: 'magnet:?xt=urn:btih:abc' } });
     fireEvent.click(screen.getByRole('button', { name: '创建离线任务' }));
 
     await waitFor(() => expect(offlinePayload).toEqual({
-      url: 'magnet:?xt=urn:btih:abc',
       lib: '电影',
-      label: 'magnet:?xt=urn:btih:abc'
+      label: 'magnet:?xt=urn:btih:abc',
+      items: [{
+        url: 'magnet:?xt=urn:btih:abc',
+        label: 'magnet:?xt=urn:btih:abc'
+      }]
     }));
 
     fireEvent.click(screen.getByRole('button', { name: '扫目标库' }));
