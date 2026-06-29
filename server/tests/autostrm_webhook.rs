@@ -15,8 +15,11 @@ use std::{env, path::PathBuf, time::Duration};
 use tempfile::TempDir;
 use tokio::time::sleep;
 
+static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn webhook_generates_strm_and_records_seen() {
+    let _guard = DB_LOCK.lock().await;
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping autostrm DB test; set EMBY_MANAGER_AUTOSTRM_TEST_DATABASE_URL");
         return;
@@ -82,6 +85,7 @@ async fn webhook_generates_strm_and_records_seen() {
 
 #[tokio::test]
 async fn webhook_reports_disabled_without_task() {
+    let _guard = DB_LOCK.lock().await;
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping autostrm DB test; set EMBY_MANAGER_AUTOSTRM_TEST_DATABASE_URL");
         return;
