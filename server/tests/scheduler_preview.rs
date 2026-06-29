@@ -63,7 +63,7 @@ async fn run_schedule_creates_real_task_and_finishes_done() {
         "{task}"
     );
 
-    let schedule = load_schedule(&state, job.id).await;
+    let schedule = wait_for_schedule_status(&state, job.id, "done").await;
     assert_eq!(schedule.last_status.as_deref(), Some("done"));
     assert_eq!(schedule.last_task_id, Some(response.tid));
 
@@ -226,6 +226,17 @@ async fn wait_for_task_status(state: &AppState, id: Uuid, status: &str) -> Value
     panic!("task {id} did not reach {status}");
 }
 
+async fn wait_for_schedule_status(state: &AppState, id: Uuid, status: &str) -> ScheduleJob {
+    for _ in 0..50 {
+        let schedule = load_schedule(state, id).await;
+        if schedule.last_status.as_deref() == Some(status) {
+            return schedule;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("schedule {id} did not reach {status}");
+}
+
 async fn test_state() -> Option<AppState> {
     let database_url = scheduler_test_database_url()?;
     let pool = PgPoolOptions::new()
@@ -236,7 +247,7 @@ async fn test_state() -> Option<AppState> {
     db::migrate(&pool)
         .await
         .expect("run scheduler test migrations");
-    sqlx::query("TRUNCATE task_runs, schedule_jobs RESTART IDENTITY CASCADE")
+    sqlx::query("TRUNCATE task_runs, schedule_jobs, app_settings RESTART IDENTITY CASCADE")
         .execute(&pool)
         .await
         .expect("reset scheduler test tables");

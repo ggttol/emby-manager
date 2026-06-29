@@ -118,6 +118,7 @@ async fn delete_execute_skips_deleted_notification_when_no_paths_were_removed() 
     ])
     .await;
     configure_emby(&state, &base_url).await;
+    create_library_roots(&state, "Movies");
 
     let task = media_fs::execute_delete(
         State(state.clone()),
@@ -247,6 +248,8 @@ async fn move_execute_moves_media_rebuilds_strm_refreshes_target_and_writes_undo
     let dst_cd = state.settings.cd_root.join("Archive/Done/Movie");
     let old_strm = state.settings.strm_root.join("Movies/A/Movie");
     let new_strm = state.settings.strm_root.join("Archive/Done/Movie");
+    create_library_roots(&state, "Movies");
+    create_library_roots(&state, "Archive");
     std::fs::create_dir_all(src_cd.join("Season 1")).unwrap();
     std::fs::create_dir_all(&old_strm).unwrap();
     std::fs::write(src_cd.join("Season 1/E01.mkv"), "media").unwrap();
@@ -342,6 +345,11 @@ async fn configure_emby(state: &AppState, base_url: &str) {
     }
 }
 
+fn create_library_roots(state: &AppState, lib: &str) {
+    std::fs::create_dir_all(state.settings.cd_root.join(lib)).unwrap();
+    std::fs::create_dir_all(state.settings.strm_root.join(lib)).unwrap();
+}
+
 async fn wait_for_task_status(state: &AppState, id: Uuid, status: &str) -> Value {
     for _ in 0..80 {
         let task: Value =
@@ -384,6 +392,10 @@ async fn test_state() -> Option<(TempDir, AppState)> {
     db::migrate(&pool)
         .await
         .expect("run manage test migrations");
+    sqlx::query("TRUNCATE task_runs, undo_entries, app_settings RESTART IDENTITY CASCADE")
+        .execute(&pool)
+        .await
+        .expect("reset manage execute test tables");
     let tmp = tempfile::tempdir().unwrap();
     let cd_root = tmp.path().join("cd");
     let strm_root = tmp.path().join("strm");

@@ -15,12 +15,16 @@ use tokio::time::sleep;
 use utoipa::OpenApi;
 use uuid::Uuid;
 
+static DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn delete_preview_creates_task_and_finishes_done() {
+    let _guard = DB_LOCK.lock().await;
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping manage preview DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
         return;
     };
+    create_strm_library_root(&state, "Movies");
     let req = ManageDeleteRequest {
         lib: "Movies".to_string(),
         folder: "A/Movie".to_string(),
@@ -66,10 +70,13 @@ async fn delete_preview_creates_task_and_finishes_done() {
 
 #[tokio::test]
 async fn move_preview_creates_task_and_finishes_done() {
+    let _guard = DB_LOCK.lock().await;
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping manage preview DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
         return;
     };
+    create_strm_library_root(&state, "Movies");
+    create_strm_library_root(&state, "Archive");
     let req = ManageMoveRequest {
         from_lib: "Movies".to_string(),
         from_folder: "A/Movie".to_string(),
@@ -108,6 +115,7 @@ async fn move_preview_creates_task_and_finishes_done() {
 
 #[tokio::test]
 async fn traversal_is_rejected_without_creating_task() {
+    let _guard = DB_LOCK.lock().await;
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping manage preview DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
         return;
@@ -186,6 +194,10 @@ async fn task_count_for_reason(state: &AppState, reason: &str) -> i64 {
         .expect("count tasks")
 }
 
+fn create_strm_library_root(state: &AppState, lib: &str) {
+    std::fs::create_dir_all(state.settings.strm_root.join(lib)).unwrap();
+}
+
 async fn test_state() -> Option<(TempDir, AppState)> {
     let database_url = manage_test_database_url()?;
     let pool = PgPoolOptions::new()
@@ -196,6 +208,10 @@ async fn test_state() -> Option<(TempDir, AppState)> {
     db::migrate(&pool)
         .await
         .expect("run manage test migrations");
+    sqlx::query("TRUNCATE task_runs RESTART IDENTITY CASCADE")
+        .execute(&pool)
+        .await
+        .expect("reset manage preview test tables");
     let tmp = tempfile::tempdir().unwrap();
     let strm_root = tmp.path().join("strm");
     std::fs::create_dir_all(&strm_root).unwrap();
