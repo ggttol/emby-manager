@@ -29,7 +29,7 @@ type Draft = {
 };
 
 const kindOptions = [
-  { kind: 'scan_all', label: '扫全库', desc: '对每个 strm 库发 Refresh，发现手动加的新 strm' },
+  { kind: 'scan_all', label: '扫全库', desc: '逐库生成缺失 STRM、清孤儿并刷新变更库' },
   { kind: 'zhuigeng_scan_airing', label: '追更扫描', desc: '对所有在更剧用剧名扫对应库，拿新集' },
   { kind: 'fix_posters_all', label: '海报修复', desc: '对所有无海报项跑保守自动匹配' },
   { kind: 'refresh_no_rating_all', label: '刷新无评分', desc: '对所有无评分剧调 Emby Refresh 重拉 TMDb' },

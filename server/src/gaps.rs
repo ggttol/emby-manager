@@ -5,7 +5,11 @@ use crate::{
     state::AppState,
     tasks::{self, TaskRun},
 };
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::{get, post},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
@@ -16,6 +20,11 @@ const TASK_CANCELLED_SENTINEL: &str = "__task_cancelled__";
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct GapsScanLibRequest {
     pub lib: String,
+}
+
+#[derive(Debug, Clone, Deserialize, utoipa::IntoParams)]
+pub struct SeriesGapsQuery {
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -62,8 +71,24 @@ pub struct SeasonGaps {
     pub gapcount: usize,
 }
 
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct SeriesGapsResponse {
+    pub ok: bool,
+    pub id: String,
+    pub mode: String,
+    pub have: usize,
+    pub gaps: usize,
+    pub max_ep: i32,
+    pub tmdb_max: i32,
+    pub noidx: usize,
+    pub gap_list: Vec<String>,
+    pub seasons: Vec<SeasonGaps>,
+}
+
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/v2/gaps/scan-lib", post(scan_library_gaps))
+    Router::new()
+        .route("/api/v2/gaps/scan-lib", post(scan_library_gaps))
+        .route("/api/v2/gaps/series", get(series_gaps_detail))
 }
 
 #[utoipa::path(post, path = "/api/v2/gaps/scan-lib", tag = "gaps", request_body = GapsScanLibRequest, responses((status = 200, body = TaskRun)))]
@@ -120,6 +145,35 @@ pub async fn scan_library_gaps(
     .await?;
     spawn_gaps_scan(state, task.id, client, library.name, library_id);
     Ok(Json(task))
+}
+
+#[utoipa::path(get, path = "/api/v2/gaps/series", tag = "gaps", params(SeriesGapsQuery), responses((status = 200, body = SeriesGapsResponse)))]
+pub async fn series_gaps_detail(
+    State(state): State<AppState>,
+    Query(query): Query<SeriesGapsQuery>,
+) -> AppResult<Json<SeriesGapsResponse>> {
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    if api_key.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "api_key 未配置，无法连接 Emby".to_string(),
+        ));
+    }
+
+    let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+    Ok(Json(series_gaps_for_client(&client, &query.id).await?))
+}
+
+pub async fn series_gaps_for_client(
+    client: &EmbyClient,
+    series_id: &str,
+) -> AppResult<SeriesGapsResponse> {
+    let id = series_id.trim();
+    if id.is_empty() {
+        return Err(AppError::BadRequest("id is required".to_string()));
+    }
+    let gaps = series_gaps(&client.episodes(id).await?);
+    Ok(SeriesGapsResponse::from_gaps(id.to_string(), gaps))
 }
 
 fn spawn_gaps_scan(
@@ -435,6 +489,23 @@ pub fn series_gaps(episodes: &[EmbyEpisode]) -> SeriesGaps {
     }
 }
 
+impl SeriesGapsResponse {
+    fn from_gaps(id: String, gaps: SeriesGaps) -> Self {
+        Self {
+            ok: true,
+            id,
+            mode: gaps.mode,
+            have: gaps.have,
+            gaps: gaps.gaps,
+            max_ep: gaps.max_ep,
+            tmdb_max: gaps.tmdb_max,
+            noidx: gaps.noidx,
+            gap_list: gaps.gap_list,
+            seasons: gaps.seasons,
+        }
+    }
+}
+
 fn compact_ints(values: &[i32]) -> Vec<String> {
     if values.is_empty() {
         return Vec::new();
@@ -469,6 +540,11 @@ fn format_range(start: i32, end: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     fn episode(season: Option<i32>, number: Option<i32>, virtual_item: bool) -> EmbyEpisode {
         EmbyEpisode {
@@ -516,5 +592,66 @@ mod tests {
         assert_eq!(gaps.max_ep, 60);
         assert_eq!(gaps.tmdb_max, 61);
         assert_eq!(gaps.gap_list, vec!["10-11", "55", "61"]);
+    }
+
+    #[tokio::test]
+    async fn series_detail_fetches_single_series_episodes() {
+        let (base_url, requests) = spawn_fake_emby(
+            r#"{
+                "Items": [
+                    {"ParentIndexNumber": 1, "IndexNumber": 1, "LocationType": "FileSystem"},
+                    {"ParentIndexNumber": 1, "IndexNumber": 3, "LocationType": "FileSystem"},
+                    {"ParentIndexNumber": 1, "IndexNumber": 4, "LocationType": "Virtual"},
+                    {"ParentIndexNumber": 2, "IndexNumber": 1, "LocationType": "FileSystem"}
+                ]
+            }"#,
+        )
+        .await;
+        let client = EmbyClient::new(base_url, "secret-key", reqwest::Client::new());
+
+        let detail = series_gaps_for_client(&client, "series/1").await.unwrap();
+
+        assert!(detail.ok);
+        assert_eq!(detail.id, "series/1");
+        assert_eq!(detail.mode, "season");
+        assert_eq!(detail.have, 3);
+        assert_eq!(detail.gaps, 2);
+        assert_eq!(detail.seasons[0].season, Some(1));
+        assert_eq!(detail.seasons[0].gaps, vec!["2", "4"]);
+        let request = requests.lock().unwrap().join("\n");
+        assert!(
+            request.starts_with("GET /Shows/series%2F1/Episodes?"),
+            "{request}"
+        );
+        assert!(request.contains("api_key=secret-key"), "{request}");
+        assert!(
+            request.contains("Fields=ParentIndexNumber%2CIndexNumber%2CLocationType"),
+            "{request}"
+        );
+    }
+
+    async fn spawn_fake_emby(body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            captured
+                .lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..n]).to_string());
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        (format!("http://{addr}"), requests)
     }
 }

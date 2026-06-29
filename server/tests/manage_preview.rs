@@ -84,6 +84,7 @@ async fn move_preview_creates_task_and_finishes_done() {
         to_folder: Some("Done/Movie".to_string()),
         item_id: Some("item-move".to_string()),
         reason: Some(format!("move-preview-{}", Uuid::new_v4())),
+        on_conflict: None,
     };
 
     let task = media_fs::preview_move(State(state.clone()), Json(req.clone()))
@@ -143,6 +144,7 @@ async fn traversal_is_rejected_without_creating_task() {
         to_folder: Some("Done/Movie".to_string()),
         item_id: None,
         reason: Some(marker.clone()),
+        on_conflict: None,
     };
 
     let err = media_fs::preview_move(State(state.clone()), Json(req))

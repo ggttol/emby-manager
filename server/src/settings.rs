@@ -63,11 +63,15 @@ fn validate_bootstrap_password(password: String) -> anyhow::Result<String> {
     if trimmed.len() < 12 {
         anyhow::bail!("EMBY_MANAGER_BOOTSTRAP_PASSWORD must be at least 12 characters");
     }
+    let lower = trimmed.to_ascii_lowercase();
     if matches!(
-        trimmed.to_ascii_lowercase().as_str(),
+        lower.as_str(),
         "admin" | "password" | "emby_manager" | "changeme"
     ) {
         anyhow::bail!("EMBY_MANAGER_BOOTSTRAP_PASSWORD is too weak");
+    }
+    if lower.contains("change-me") || lower.contains("changeme") || lower.contains("example") {
+        anyhow::bail!("EMBY_MANAGER_BOOTSTRAP_PASSWORD must not be a placeholder value");
     }
     Ok(trimmed.to_string())
 }
@@ -90,6 +94,10 @@ mod tests {
     fn rejects_weak_bootstrap_passwords() {
         assert!(validate_bootstrap_password("admin".to_string()).is_err());
         assert!(validate_bootstrap_password("short".to_string()).is_err());
+        assert!(
+            validate_bootstrap_password("change-me-to-a-long-random-password".to_string()).is_err()
+        );
+        assert!(validate_bootstrap_password("example-bootstrap-password".to_string()).is_err());
         assert!(validate_bootstrap_password("a-strong-preview-password".to_string()).is_ok());
     }
 

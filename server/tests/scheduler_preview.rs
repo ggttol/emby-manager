@@ -33,7 +33,14 @@ async fn run_schedule_creates_real_task_and_finishes_done() {
         );
         return;
     };
-    let (base_url, requests) = spawn_fake_emby(vec![FakeResponse::no_content()]).await;
+    seed_scan_all_media(&state);
+    let (base_url, requests) = spawn_fake_emby(vec![
+        FakeResponse::ok_json(
+            r#"[{"ItemId":"lib-movies","Name":"Movies","CollectionType":"movies","Locations":["/strm/MovieFolder"]}]"#,
+        ),
+        FakeResponse::no_content(),
+    ])
+    .await;
     configure_emby(&state, &base_url).await;
     let job = insert_schedule(&state, "preview_ok", "scan_all", true).await;
 
@@ -53,8 +60,14 @@ async fn run_schedule_creates_real_task_and_finishes_done() {
     assert_eq!(task["params"]["params"], json!({"scope": "test"}));
     assert_eq!(task["result"]["dry_run"], false);
     assert_eq!(task["result"]["preview"], false);
-    assert_eq!(task["result"]["detail"]["action"], "refresh_library");
-    assert_eq!(task["result"]["detail"]["refresh_code"], 204);
+    assert_eq!(task["result"]["detail"]["action"], "scan_all");
+    assert_eq!(task["result"]["detail"]["libs_scanned"], json!(1));
+    assert_eq!(task["result"]["detail"]["new_count"], json!(1));
+    assert_eq!(task["result"]["detail"]["orphans_cleaned"], json!(0));
+    assert_eq!(
+        task["result"]["detail"]["results"][0]["result"]["mode"],
+        json!("scan_all_strm_generate")
+    );
     assert!(
         task["status_text"]
             .as_str()
@@ -68,11 +81,27 @@ async fn run_schedule_creates_real_task_and_finishes_done() {
     assert_eq!(schedule.last_task_id, Some(response.tid));
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert!(
-        requests[0].starts_with("POST /Library/Refresh?api_key=secret-key"),
+        requests[0].starts_with("GET /Library/VirtualFolders?api_key=secret-key"),
         "{}",
         requests[0]
+    );
+    assert!(
+        requests[1].starts_with("POST /Items/lib-movies/Refresh?"),
+        "{}",
+        requests[1]
+    );
+    let generated = state
+        .settings
+        .strm_root
+        .join("MovieFolder")
+        .join("Old Movie [tmdbid-100]")
+        .join("movie.strm");
+    assert!(generated.exists());
+    assert_eq!(
+        std::fs::read_to_string(generated).unwrap(),
+        "/media/MovieFolder/Old Movie [tmdbid-100]/movie.mkv"
     );
 }
 
@@ -121,7 +150,14 @@ async fn scheduler_tick_starts_due_real_task_once() {
         );
         return;
     };
-    let (base_url, requests) = spawn_fake_emby(vec![FakeResponse::no_content()]).await;
+    seed_scan_all_media(&state);
+    let (base_url, requests) = spawn_fake_emby(vec![
+        FakeResponse::ok_json(
+            r#"[{"ItemId":"lib-movies","Name":"Movies","CollectionType":"movies","Locations":["/strm/MovieFolder"]}]"#,
+        ),
+        FakeResponse::no_content(),
+    ])
+    .await;
     configure_emby(&state, &base_url).await;
     let now = Utc::now();
     let job = sqlx::query_as::<_, ScheduleJob>(
@@ -149,10 +185,11 @@ async fn scheduler_tick_starts_due_real_task_once() {
     assert_eq!(task["source"], "schedule");
     assert_eq!(task["params"]["schedule_id"], json!(job.id));
     assert_eq!(task["result"]["dry_run"], false);
-    assert_eq!(task["result"]["detail"]["action"], "refresh_library");
+    assert_eq!(task["result"]["detail"]["action"], "scan_all");
+    assert_eq!(task["result"]["detail"]["new_count"], json!(1));
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
 
     let started_again = scheduler::tick_due_schedules(&state, now)
         .await
@@ -251,7 +288,8 @@ async fn test_state() -> Option<AppState> {
         .execute(&pool)
         .await
         .expect("reset scheduler test tables");
-    Some(AppState::new(pool, test_settings(database_url)))
+    let base = env::temp_dir().join(format!("emby-manager-scheduler-{}", Uuid::new_v4()));
+    Some(AppState::new(pool, test_settings(database_url, base)))
 }
 
 fn scheduler_test_database_url() -> Option<String> {
@@ -262,19 +300,31 @@ fn scheduler_test_database_url() -> Option<String> {
     url.to_ascii_lowercase().contains("test").then_some(url)
 }
 
-fn test_settings(database_url: String) -> Settings {
+fn test_settings(database_url: String, base: PathBuf) -> Settings {
     Settings {
         host: "127.0.0.1".to_string(),
         port: 0,
         database_url,
-        web_dist: PathBuf::from("/tmp"),
-        legacy_dir: PathBuf::from("/tmp"),
+        web_dist: base.join("web"),
+        legacy_dir: base.join("legacy"),
         bootstrap_password: "admin".to_string(),
-        cd_root: PathBuf::from("/tmp/cd"),
-        strm_root: PathBuf::from("/tmp/strm"),
+        cd_root: base.join("cd"),
+        strm_root: base.join("strm"),
         docker_bin: PathBuf::from("/usr/bin/docker"),
         task_concurrency: 1,
     }
+}
+
+fn seed_scan_all_media(state: &AppState) {
+    let media = state
+        .settings
+        .cd_root
+        .join("MovieFolder")
+        .join("Old Movie [tmdbid-100]");
+    std::fs::create_dir_all(&media).expect("create scheduler media fixture");
+    std::fs::write(media.join("movie.mkv"), "video").expect("write scheduler video fixture");
+    std::fs::create_dir_all(state.settings.strm_root.join("MovieFolder"))
+        .expect("create scheduler strm fixture");
 }
 
 #[derive(Clone)]
@@ -284,6 +334,13 @@ struct FakeResponse {
 }
 
 impl FakeResponse {
+    fn ok_json(body: &'static str) -> Self {
+        Self {
+            status: "200 OK",
+            body,
+        }
+    }
+
     fn no_content() -> Self {
         Self {
             status: "204 No Content",

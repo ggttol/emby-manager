@@ -378,9 +378,8 @@ async fn flush_catalog_batch(
         return Ok(());
     }
 
-    let mut builder = QueryBuilder::<Postgres>::new(
-        "WITH incoming(name, sheet, link, is_pkg, link_type) AS (",
-    );
+    let mut builder =
+        QueryBuilder::<Postgres>::new("WITH incoming(name, sheet, link, is_pkg, link_type) AS (");
     builder.push_values(batch.iter(), |mut row, item| {
         row.push_bind(&item.name)
             .push_bind(&item.sheet)

@@ -2,6 +2,7 @@ use crate::{
     config_store,
     emby::{EmbyCleanupItem, EmbyClient, EmbyLibrary},
     error::{AppError, AppResult},
+    media_fs::{library_folder_name, mount_alive, safe_under},
     state::AppState,
     tasks::{self, TaskRun},
 };
@@ -18,6 +19,7 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
 };
+use tokio::time::{Duration as TokioDuration, sleep};
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -31,7 +33,14 @@ const EMPTY_DIR_CLEANUP_SAMPLE_LIMIT: usize = 20;
 const CLEANUP_SUGGEST_TOP_DEFAULT: usize = 20;
 const CLEANUP_SUGGEST_TOP_MAX: usize = 200;
 const CLEANUP_SUGGEST_ITEM_LIMIT: usize = 3000;
+const REFRESH_NO_RATING_LIMIT_DEFAULT: usize = 500;
+const REFRESH_NO_RATING_LIMIT_MAX: usize = 5000;
+const REFRESH_NO_RATING_SCAN_LIMIT: usize = 30_000;
+const CLEANUP_TASK_CANCELLED: &str = "__cleanup_task_cancelled__";
 const SUBTITLE_EXTENSIONS: &[&str] = &["ass", "idx", "smi", "srt", "ssa", "sub", "sup", "vtt"];
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "mkv", "mp4", "ts", "m2ts", "avi", "iso", "mov", "flv", "wmv", "rmvb",
+];
 const CLEANUP_DIMENSIONS: &[&str] = &["rating", "age", "idle", "size", "meta"];
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -91,11 +100,19 @@ pub struct CleanupSuggestRequest {
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CleanupCandidate {
+    pub id: String,
     pub item_id: String,
     pub name: String,
     pub lib: String,
+    pub folder: Option<String>,
     pub path: Option<String>,
+    pub tmdb: Option<String>,
+    pub rating: Option<f64>,
+    pub year: Option<i32>,
+    pub size_gb: Option<f64>,
     pub score: f64,
+    pub total_score: f64,
+    pub scores: BTreeMap<String, f64>,
     pub reasons: Vec<String>,
     pub dimensions: BTreeMap<String, CleanupDimensionScore>,
 }
@@ -237,8 +254,41 @@ pub struct LogInsight {
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct EmptyDirCleanupRequest {
+    pub lib: Option<String>,
     pub execute: Option<bool>,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct EmptyFolderCleanupRequest {
+    pub lib: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct RefreshNoRatingRequest {
+    pub lib: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RefreshNoRatingTaskItem {
+    pub lib: String,
+    pub id: String,
+    pub name: String,
+    pub path: Option<String>,
+    pub refresh_code: u16,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RefreshNoRatingTaskResult {
+    pub ok: bool,
+    pub lib: String,
+    pub scanned: usize,
+    pub no_rating_count: usize,
+    pub refresh_triggered: usize,
+    pub items: Vec<RefreshNoRatingTaskItem>,
+    pub msg: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -269,11 +319,34 @@ pub struct EmptyDirCleanupTaskResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EmptyFolderCandidate {
+    pub folder: String,
+    pub other_files: usize,
+    pub size_bytes: u64,
+    pub size_kb: f64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EmptyFolderCleanupTaskResult {
+    pub ok: bool,
+    pub lib: String,
+    pub folder: String,
+    pub root: String,
+    pub items: Vec<EmptyFolderCandidate>,
+    pub total_scanned: usize,
+    pub total_size_kb: f64,
+    pub truncated: bool,
+    pub warnings: Vec<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/gaps/scan", post(gaps_summary))
         .route("/api/v2/cleanup/suggest", post(cleanup_summary))
         .route("/api/v2/cleanup/empty-dirs", post(cleanup_empty_dirs))
+        .route("/api/v2/cleanup/empty-folders", post(cleanup_empty_folders))
+        .route("/api/v2/cleanup/refresh-no-rating", post(refresh_no_rating))
         .route("/api/v2/autostrm/status", get(autostrm_status))
 }
 
@@ -341,7 +414,7 @@ pub async fn cleanup_summary(
 
     Ok(Json(CleanupSummaryResponse {
         ok: true,
-        complete_business_port: false,
+        complete_business_port: true,
         meta: insight_meta(
             vec![
                 "task_runs",
@@ -353,12 +426,14 @@ pub async fn cleanup_summary(
                 "strm_root filesystem metadata",
             ],
             vec![
-                "只读清理候选摘要",
+                "清理候选评分摘要",
                 "覆盖失败任务、日志异常、定时任务最近错误、catalog 重复项、strm 目录信号",
+                "候选可交给 /api/v2/manage/delete/batch/execute 执行删除并进入 undo",
             ],
             vec![
-                "不删除、不移动、不重命名任何文件",
-                "评分建议只读读取 Emby 元数据，不连接 115，不会执行删除",
+                "评分建议接口本身只读；删除动作由 manage 接口二次确认后执行",
+                "refresh-no-rating 只触发 Emby 元数据刷新，不访问 115",
+                "size 维度不递归读取 CloudDrive/媒体文件大小，避免挂载被密集 stat 压垮",
                 "strm 统计只看文件名和元数据，不读取文件内容",
             ],
         ),
@@ -372,6 +447,33 @@ pub async fn cleanup_summary(
         warnings,
         cleanup_candidates,
     }))
+}
+
+#[utoipa::path(post, path = "/api/v2/cleanup/refresh-no-rating", tag = "insights", request_body = RefreshNoRatingRequest, responses((status = 200, body = TaskRun)))]
+pub async fn refresh_no_rating(
+    State(state): State<AppState>,
+    Json(req): Json<RefreshNoRatingRequest>,
+) -> AppResult<Json<TaskRun>> {
+    let lib = req.lib.trim().to_string();
+    if lib.is_empty() {
+        return Err(AppError::BadRequest("lib is required".to_string()));
+    }
+    let limit = refresh_no_rating_limit(req.limit);
+    let params = serde_json::json!({
+        "lib": lib,
+        "limit": limit,
+    });
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "cleanup_refresh_no_rating",
+        &format!("刷新无评分元数据: {lib}"),
+        1,
+        "manual",
+        params,
+    )
+    .await?;
+    spawn_refresh_no_rating(state, task.id, lib, limit);
+    Ok(Json(task))
 }
 
 #[utoipa::path(post, path = "/api/v2/cleanup/empty-dirs", tag = "insights", request_body = EmptyDirCleanupRequest, responses((status = 200, body = EmptyDirCleanupResponse)))]
@@ -427,6 +529,34 @@ pub async fn cleanup_empty_dirs(
         warnings: scan.warnings,
         task: Some(task),
     }))
+}
+
+#[utoipa::path(post, path = "/api/v2/cleanup/empty-folders", tag = "insights", request_body = EmptyFolderCleanupRequest, responses((status = 200, body = TaskRun)))]
+pub async fn cleanup_empty_folders(
+    State(state): State<AppState>,
+    Json(req): Json<EmptyFolderCleanupRequest>,
+) -> AppResult<Json<TaskRun>> {
+    let lib = req.lib.trim();
+    if lib.is_empty() {
+        return Err(AppError::BadRequest("lib 不能为空".to_string()));
+    }
+    let limit = empty_dir_cleanup_limit(req.limit);
+    let params = serde_json::json!({
+        "lib": lib,
+        "limit": limit,
+        "execute": false,
+    });
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "cleanup_empty_folders",
+        &format!("扫描空 115 folder: {lib}"),
+        1,
+        "manual",
+        params,
+    )
+    .await?;
+    spawn_empty_folder_cleanup(state, task.id, lib.to_string(), limit);
+    Ok(Json(task))
 }
 
 #[utoipa::path(get, path = "/api/v2/autostrm/status", tag = "autostrm", responses((status = 200, body = AutostrmStatusResponse)))]
@@ -506,11 +636,6 @@ async fn cleanup_candidates(
                 .to_string(),
         );
     }
-    if dimensions.iter().any(|dimension| dimension == "idle") {
-        warnings
-            .push("idle 维度需要播放历史/最近访问数据；当前仅返回降级提示，不参与评分".to_string());
-    }
-
     for library in selected {
         let Some(parent_id) = library.id.as_deref() else {
             warnings.push(format!("Emby 库「{}」缺少 ItemId，已跳过", library.name));
@@ -530,8 +655,7 @@ async fn cleanup_candidates(
             ));
         }
         for item in page.items {
-            if let Some(candidate) = score_cleanup_item(&library.name, item, &dimensions, min_score)
-            {
+            if let Some(candidate) = score_cleanup_item(library, item, &dimensions, min_score) {
                 candidates.push(candidate);
             }
         }
@@ -600,6 +724,7 @@ fn select_cleanup_libraries<'a>(
         .filter(|library| {
             library.name.eq_ignore_ascii_case(requested)
                 || library.id.as_deref().is_some_and(|id| id == requested)
+                || library_folder_name(library).eq_ignore_ascii_case(requested)
         })
         .collect();
     if selected.is_empty() {
@@ -619,7 +744,7 @@ fn cleanup_item_types(library: &EmbyLibrary) -> &'static str {
 }
 
 fn score_cleanup_item(
-    lib: &str,
+    library: &EmbyLibrary,
     item: EmbyCleanupItem,
     dimensions: &[String],
     min_score: f64,
@@ -633,17 +758,12 @@ fn score_cleanup_item(
             "rating" => score_rating(&item),
             "meta" => score_meta(&item),
             "age" => score_age(&item),
+            "idle" => score_idle(&item),
             "size" => CleanupDimensionScore {
                 score: 0.0,
                 reason: "size 维度已降级，未读取本地媒体文件大小".to_string(),
                 value: item.path.clone(),
                 warning: Some("no_safe_local_size_metadata".to_string()),
-            },
-            "idle" => CleanupDimensionScore {
-                score: 0.0,
-                reason: "idle 维度已降级，当前没有最近播放/访问数据".to_string(),
-                value: None,
-                warning: Some("idle_source_unavailable".to_string()),
             },
             _ => continue,
         };
@@ -659,28 +779,40 @@ fn score_cleanup_item(
         return None;
     }
 
+    let id = item.id.clone()?;
+    let name = item.name.clone().unwrap_or_else(|| "(unnamed)".to_string());
+    let folder = cleanup_item_folder(library, item.path.as_deref(), &name);
+    let tmdb = item.provider_id("Tmdb");
+    let path = item.path;
+    let scores = details
+        .iter()
+        .map(|(dimension, detail)| (dimension.clone(), detail.score))
+        .collect();
+
     Some(CleanupCandidate {
-        item_id: item.id?,
-        name: item.name.unwrap_or_else(|| "(unnamed)".to_string()),
-        lib: lib.to_string(),
-        path: item.path,
+        id: id.clone(),
+        item_id: id,
+        name,
+        lib: library.name.clone(),
+        folder,
+        path,
+        tmdb,
+        rating: item.community_rating.map(round_score),
+        year: item.production_year,
+        size_gb: None,
         score,
+        total_score: score,
+        scores,
         reasons,
         dimensions: details,
     })
 }
 
 fn score_rating(item: &EmbyCleanupItem) -> CleanupDimensionScore {
-    match item.rating() {
-        Some(rating) if rating <= 5.0 => CleanupDimensionScore {
-            score: round_score((6.0 - rating).max(0.0) * 8.0),
+    match item.community_rating.filter(|rating| rating.is_finite()) {
+        Some(rating) if rating > 0.0 && rating < 5.0 => CleanupDimensionScore {
+            score: round_score((5.0 - rating).max(0.0) * 20.0),
             reason: format!("评分较低 ({rating:.1})"),
-            value: Some(format!("{rating:.1}")),
-            warning: None,
-        },
-        Some(rating) if rating <= 6.5 => CleanupDimensionScore {
-            score: round_score((6.8 - rating).max(0.0) * 4.0),
-            reason: format!("评分偏低 ({rating:.1})"),
             value: Some(format!("{rating:.1}")),
             warning: None,
         },
@@ -700,19 +832,20 @@ fn score_rating(item: &EmbyCleanupItem) -> CleanupDimensionScore {
 }
 
 fn score_meta(item: &EmbyCleanupItem) -> CleanupDimensionScore {
-    let missing_provider = !item.has_provider_id("Tmdb")
-        && !item.has_provider_id("Imdb")
-        && !item.has_provider_id("Tvdb");
     let missing_image = !item.has_primary_image();
+    let missing_overview = item
+        .overview
+        .as_deref()
+        .is_none_or(|overview| overview.trim().is_empty());
     let mut score = 0.0;
     let mut parts = Vec::new();
-    if missing_provider {
-        score += 18.0;
-        parts.push("缺少 TMDb/IMDb/TVDb 标识");
-    }
     if missing_image {
-        score += 8.0;
+        score += 10.0;
         parts.push("缺少主图");
+    }
+    if missing_overview {
+        score += 5.0;
+        parts.push("缺少简介");
     }
 
     CleanupDimensionScore {
@@ -728,39 +861,159 @@ fn score_meta(item: &EmbyCleanupItem) -> CleanupDimensionScore {
 }
 
 fn score_age(item: &EmbyCleanupItem) -> CleanupDimensionScore {
-    let Some(year) = item.production_year else {
+    let Some(days) = days_since(item.date_created.as_deref()) else {
         return CleanupDimensionScore {
             score: 0.0,
-            reason: "缺少年份数据".to_string(),
+            reason: "缺少入库时间".to_string(),
             value: None,
-            warning: Some("production_year_unavailable".to_string()),
+            warning: Some("date_created_unavailable".to_string()),
         };
     };
-    let current_year = Utc::now()
-        .format("%Y")
-        .to_string()
-        .parse::<i32>()
-        .unwrap_or(2026);
-    let age = (current_year - year).max(0);
-    let score = if age >= 25 {
-        18.0
-    } else if age >= 15 {
-        12.0
-    } else if age >= 8 {
-        6.0
+    let score = if days > 365 {
+        ((days - 365) as f64 / 30.0).floor().min(50.0)
     } else {
         0.0
     };
     CleanupDimensionScore {
         score,
         reason: if score > 0.0 {
-            format!("年份较早 ({year})")
+            format!("入库 {days} 天")
         } else {
-            "年份较新".to_string()
+            "入库时间较近".to_string()
         },
-        value: Some(year.to_string()),
+        value: Some(days.to_string()),
         warning: None,
     }
+}
+
+fn score_idle(item: &EmbyCleanupItem) -> CleanupDimensionScore {
+    let play_count = item
+        .user_data
+        .as_ref()
+        .and_then(|user_data| user_data.play_count)
+        .unwrap_or(0);
+    let days_in_lib = days_since(item.date_created.as_deref());
+    let days_since_play = item
+        .user_data
+        .as_ref()
+        .and_then(|user_data| days_since(user_data.last_played_date.as_deref()));
+
+    if play_count <= 0 {
+        return match days_in_lib {
+            Some(days) if days > 180 => CleanupDimensionScore {
+                score: 40.0,
+                reason: format!("入库 {days} 天从未播放"),
+                value: Some(days.to_string()),
+                warning: None,
+            },
+            Some(days) if days > 60 => CleanupDimensionScore {
+                score: 20.0,
+                reason: format!("入库 {days} 天未播放"),
+                value: Some(days.to_string()),
+                warning: None,
+            },
+            Some(days) => CleanupDimensionScore {
+                score: 0.0,
+                reason: "暂无闲置风险".to_string(),
+                value: Some(days.to_string()),
+                warning: None,
+            },
+            None => CleanupDimensionScore {
+                score: 0.0,
+                reason: "缺少入库时间，无法判断未播放闲置时长".to_string(),
+                value: None,
+                warning: Some("date_created_unavailable".to_string()),
+            },
+        };
+    }
+
+    match days_since_play {
+        Some(days) if days > 365 => CleanupDimensionScore {
+            score: 30.0,
+            reason: format!("{days} 天未看"),
+            value: Some(days.to_string()),
+            warning: None,
+        },
+        Some(days) => CleanupDimensionScore {
+            score: 0.0,
+            reason: "最近播放过".to_string(),
+            value: Some(days.to_string()),
+            warning: None,
+        },
+        None => CleanupDimensionScore {
+            score: 0.0,
+            reason: "缺少最近播放时间".to_string(),
+            value: Some(play_count.to_string()),
+            warning: Some("last_played_unavailable".to_string()),
+        },
+    }
+}
+
+fn days_since(value: Option<&str>) -> Option<i64> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let parsed = DateTime::parse_from_rfc3339(value).ok()?;
+    Some(
+        Utc::now()
+            .signed_duration_since(parsed.with_timezone(&Utc))
+            .num_days()
+            .max(0),
+    )
+}
+
+fn cleanup_item_folder(
+    library: &EmbyLibrary,
+    path: Option<&str>,
+    fallback_name: &str,
+) -> Option<String> {
+    let path = normalize_media_path(path?);
+    if path.is_empty() {
+        return non_empty_string(fallback_name);
+    }
+    let mut roots: Vec<String> = library
+        .paths
+        .iter()
+        .filter_map(|root| {
+            let normalized = normalize_media_path(root);
+            (!normalized.is_empty()).then_some(normalized)
+        })
+        .collect();
+    roots.sort_by_key(|root| std::cmp::Reverse(root.len()));
+    for root in roots {
+        if path == root {
+            return non_empty_string(fallback_name);
+        }
+        if let Some(rest) = path.strip_prefix(&(root + "/"))
+            && let Some(folder) = rest.split('/').find(|part| !part.trim().is_empty())
+        {
+            return Some(folder.to_string());
+        }
+    }
+
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    if let Some(index) = parts
+        .iter()
+        .position(|part| part.eq_ignore_ascii_case(&library.name))
+        && let Some(folder) = parts.get(index + 1)
+    {
+        return Some((*folder).to_string());
+    }
+    non_empty_string(fallback_name)
+}
+
+fn normalize_media_path(value: &str) -> String {
+    value
+        .trim()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn round_score(score: f64) -> f64 {
@@ -1180,6 +1433,170 @@ fn empty_dir_cleanup_limit(limit: Option<usize>) -> usize {
         .clamp(1, EMPTY_DIR_CLEANUP_LIMIT_MAX)
 }
 
+fn refresh_no_rating_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(REFRESH_NO_RATING_LIMIT_DEFAULT)
+        .clamp(1, REFRESH_NO_RATING_LIMIT_MAX)
+}
+
+fn spawn_refresh_no_rating(state: AppState, task_id: Uuid, lib: String, limit: usize) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, task_id, "任务并发槽不可用", None).await;
+            return;
+        };
+        if tasks::cancel_requested(&state.pool, task_id).await {
+            let _ = tasks::finish_cancelled(&state.pool, task_id).await;
+            return;
+        }
+        let _ = tasks::mark_running(&state.pool, task_id, "读取 Emby 无评分条目").await;
+        match run_refresh_no_rating(&state, task_id, &lib, limit).await {
+            Ok(result) => {
+                let _ = tasks::finish_done_with_message(
+                    &state.pool,
+                    task_id,
+                    "无评分元数据刷新已提交",
+                    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+                )
+                .await;
+            }
+            Err(err) if err.to_string() == CLEANUP_TASK_CANCELLED => {
+                let _ = tasks::finish_cancelled(&state.pool, task_id).await;
+            }
+            Err(err) => {
+                let _ = tasks::finish_error(&state.pool, task_id, &err.to_string(), None).await;
+            }
+        }
+    });
+}
+
+async fn run_refresh_no_rating(
+    state: &AppState,
+    task_id: Uuid,
+    lib: &str,
+    limit: usize,
+) -> AppResult<RefreshNoRatingTaskResult> {
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    if api_key.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "api_key 未配置，无法刷新 Emby 元数据".to_string(),
+        ));
+    }
+
+    tasks::set_progress(&state.pool, task_id, 0, "读取 Emby 库").await?;
+    let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+    let libraries = client.libraries().await?;
+    let selected = select_cleanup_libraries(&libraries, Some(lib))?;
+    let library = selected
+        .first()
+        .copied()
+        .ok_or_else(|| AppError::NotFound(format!("Emby library not found: {lib}")))?;
+    let parent_id = library
+        .id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest(format!("Emby 库「{}」缺少 ItemId", library.name)))?;
+
+    tasks::set_progress(&state.pool, task_id, 0, "读取无评分条目").await?;
+    let page = client
+        .cleanup_items(
+            parent_id,
+            cleanup_item_types(library),
+            REFRESH_NO_RATING_SCAN_LIMIT,
+        )
+        .await?;
+    let scanned = page.items.len();
+    let mut targets = page
+        .items
+        .into_iter()
+        .filter(|item| item.community_rating.unwrap_or(0.0) <= 0.0)
+        .filter_map(|item| {
+            let id = item.id?;
+            let name = item.name.unwrap_or_else(|| "(unnamed)".to_string());
+            Some((id, name, item.path))
+        })
+        .collect::<Vec<_>>();
+    let no_rating_count = targets.len();
+    targets.truncate(limit);
+
+    tasks::set_total(&state.pool, task_id, targets.len().max(1) as i64).await?;
+    if targets.is_empty() {
+        tasks::set_progress(&state.pool, task_id, 1, "没有无评分条目").await?;
+        return Ok(RefreshNoRatingTaskResult {
+            ok: true,
+            lib: library.name.clone(),
+            scanned,
+            no_rating_count,
+            refresh_triggered: 0,
+            items: Vec::new(),
+            msg: format!(
+                "库「{}」扫描 {} 个条目，未发现 CommunityRating 为空或 0 的条目。",
+                library.name, scanned
+            ),
+        });
+    }
+
+    let mut refreshed = Vec::new();
+    for (index, (id, name, path)) in targets.iter().enumerate() {
+        if tasks::cancel_requested(&state.pool, task_id).await {
+            return Err(AppError::Conflict(CLEANUP_TASK_CANCELLED.to_string()));
+        }
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            index as i64,
+            &format!("刷新 {}", truncate_label(name, 30)),
+        )
+        .await?;
+        let code = client
+            .refresh_item_with_options(id, true, true, false)
+            .await?;
+        refreshed.push(RefreshNoRatingTaskItem {
+            lib: library.name.clone(),
+            id: id.clone(),
+            name: name.clone(),
+            path: path.clone(),
+            refresh_code: code,
+        });
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            (index + 1) as i64,
+            &format!("无评分刷新 {}/{}", index + 1, targets.len()),
+        )
+        .await?;
+        sleep(TokioDuration::from_millis(500)).await;
+    }
+
+    let capped_note = if no_rating_count > refreshed.len() {
+        format!("本次按 limit={} 只提交前 {} 个。", limit, refreshed.len())
+    } else {
+        String::new()
+    };
+    Ok(RefreshNoRatingTaskResult {
+        ok: true,
+        lib: library.name.clone(),
+        scanned,
+        no_rating_count,
+        refresh_triggered: refreshed.len(),
+        items: refreshed,
+        msg: format!(
+            "已对 {} 个无评分条目发起 Emby 元数据刷新。Emby 后台会逐步拉 TMDb，完成后回智能清理重新分析。{}",
+            no_rating_count.min(limit),
+            capped_note
+        ),
+    })
+}
+
+fn truncate_label(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
 fn scan_empty_strm_dirs(root: &Path, limit: usize) -> EmptyDirScan {
     let mut scan = EmptyDirScan {
         root: root.display().to_string(),
@@ -1343,6 +1760,42 @@ fn spawn_empty_dir_cleanup(state: AppState, task_id: Uuid, limit: usize) {
     });
 }
 
+fn spawn_empty_folder_cleanup(state: AppState, task_id: Uuid, lib: String, limit: usize) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, task_id, "任务并发槽不可用", None).await;
+            return;
+        };
+        let Ok(_cloud_permit) = state.clouddrive_slot.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, task_id, "CloudDrive 任务并发槽不可用", None)
+                .await;
+            return;
+        };
+        if tasks::cancel_requested(&state.pool, task_id).await {
+            let _ = tasks::finish_cancelled(&state.pool, task_id).await;
+            return;
+        }
+        let _ = tasks::mark_running(&state.pool, task_id, "扫描 115 空 folder").await;
+        match run_empty_folder_cleanup(&state, task_id, &lib, limit).await {
+            Ok(result) => {
+                let _ = tasks::finish_done_with_message(
+                    &state.pool,
+                    task_id,
+                    "115 空 folder 扫描完成",
+                    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+                )
+                .await;
+            }
+            Err(err) if err.to_string() == CLEANUP_TASK_CANCELLED => {
+                let _ = tasks::finish_cancelled(&state.pool, task_id).await;
+            }
+            Err(err) => {
+                let _ = tasks::finish_error(&state.pool, task_id, &err.to_string(), None).await;
+            }
+        }
+    });
+}
+
 async fn run_empty_dir_cleanup(
     state: &AppState,
     task_id: Uuid,
@@ -1430,6 +1883,139 @@ async fn run_empty_dir_cleanup(
         failures,
         warnings: scan.warnings,
     })
+}
+
+async fn run_empty_folder_cleanup(
+    state: &AppState,
+    task_id: Uuid,
+    lib: &str,
+    limit: usize,
+) -> AppResult<EmptyFolderCleanupTaskResult> {
+    tasks::set_progress(&state.pool, task_id, 0, "读取 Emby 库").await?;
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    if api_key.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "api_key 未配置，无法从 Emby 解析库目录".to_string(),
+        ));
+    }
+    let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+    let libraries = client.libraries().await?;
+    let selected = select_cleanup_libraries(&libraries, Some(lib))?;
+    let library = selected
+        .first()
+        .copied()
+        .ok_or_else(|| AppError::NotFound(format!("Emby library not found: {lib}")))?;
+    let folder = library_folder_name(library);
+    let cd_base = safe_under(&state.settings.cd_root, &folder)?;
+    if !cd_base.is_dir() {
+        return Err(AppError::NotFound(format!(
+            "115 库目录不存在: {}",
+            cd_base.display()
+        )));
+    }
+    if !mount_alive(&state.settings.cd_root, std::time::Duration::from_secs(5)) {
+        return Err(AppError::BadRequest(
+            "115 挂载探测失败，拒绝扫描空 folder".to_string(),
+        ));
+    }
+
+    let mut tops = std::fs::read_dir(&cd_base)
+        .map_err(|err| AppError::Anyhow(err.into()))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .collect::<Vec<_>>();
+    tops.sort_by_key(|entry| entry.file_name());
+    let total = tops.len().max(1);
+    tasks::set_total(&state.pool, task_id, total as i64).await?;
+
+    let mut items = Vec::new();
+    let mut truncated = false;
+    let mut warnings = Vec::new();
+    for (index, entry) in tops.iter().enumerate() {
+        if tasks::cancel_requested(&state.pool, task_id).await {
+            return Err(AppError::Conflict(CLEANUP_TASK_CANCELLED.to_string()));
+        }
+        let top = entry.file_name().to_string_lossy().to_string();
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            index as i64,
+            &format!("扫描 {}", truncate_label(&top, 30)),
+        )
+        .await?;
+        match scan_empty_media_folder(entry.path(), top) {
+            Ok(Some(candidate)) if items.len() < limit => items.push(candidate),
+            Ok(Some(_)) => truncated = true,
+            Ok(None) => {}
+            Err(err) => warnings.push(err),
+        }
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            (index + 1) as i64,
+            &format!("115 空 folder {}/{}", index + 1, tops.len()),
+        )
+        .await?;
+    }
+
+    let total_size_kb = round_kb(items.iter().map(|item| item.size_bytes).sum());
+    Ok(EmptyFolderCleanupTaskResult {
+        ok: warnings.is_empty(),
+        lib: library.name.clone(),
+        folder,
+        root: cd_base.display().to_string(),
+        items,
+        total_scanned: tops.len(),
+        total_size_kb,
+        truncated,
+        warnings,
+    })
+}
+
+fn scan_empty_media_folder(
+    path: PathBuf,
+    folder: String,
+) -> Result<Option<EmptyFolderCandidate>, String> {
+    let mut has_video = false;
+    let mut other_files = 0usize;
+    let mut size_bytes = 0u64;
+    for entry in WalkDir::new(&path).follow_links(false).into_iter() {
+        let entry = entry.map_err(|err| format!("{}: {err}", folder))?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if is_video_path(entry.path()) {
+            has_video = true;
+            break;
+        }
+        other_files += 1;
+        if let Ok(metadata) = entry.metadata() {
+            size_bytes = size_bytes.saturating_add(metadata.len());
+        }
+    }
+    if has_video {
+        Ok(None)
+    } else {
+        Ok(Some(EmptyFolderCandidate {
+            folder,
+            other_files,
+            size_bytes,
+            size_kb: round_kb(size_bytes),
+        }))
+    }
+}
+
+fn is_video_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        .is_some_and(|ext| VIDEO_EXTENSIONS.contains(&ext))
+}
+
+fn round_kb(bytes: u64) -> f64 {
+    ((bytes as f64 / 1024.0) * 10.0).round() / 10.0
 }
 
 fn gaps_todos(

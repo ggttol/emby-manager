@@ -15,6 +15,7 @@ fn openapi_registers_dedup_wizard_and_zhuigeng_modules() {
         "/api/v2/zhuigeng/scan-airing",
         "/api/v2/zhuigeng/gaps-summary",
         "/api/v2/libraries/items",
+        "/api/v2/gaps/series",
     ] {
         assert!(
             paths.contains_key(path),
@@ -32,6 +33,7 @@ fn openapi_registers_dedup_wizard_and_zhuigeng_modules() {
         "AddNewReport",
         "ZhuigengStatusResponse",
         "ZhuigengGapsSummaryResponse",
+        "SeriesGapsResponse",
     ] {
         assert!(
             schemas.contains_key(schema),

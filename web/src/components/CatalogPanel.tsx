@@ -17,6 +17,8 @@ type CatalogItem = components['schemas']['CatalogItem'];
 type CatalogSearchResponse = components['schemas']['CatalogSearchResponse'];
 type CatalogStatsResponse = components['schemas']['CatalogStatsResponse'];
 type CatalogTransferPlanItem = components['schemas']['CatalogTransferPlanItem'];
+type CatalogTransferPlanRequest = components['schemas']['CatalogTransferPlanRequest'];
+type CatalogTransferPlanResponse = components['schemas']['CatalogTransferPlanResponse'];
 type CatalogTransferTarget = components['schemas']['CatalogTransferTarget'];
 type ConfigResponse = components['schemas']['ConfigResponse'];
 type TaskRun = components['schemas']['TaskRun'];
@@ -33,6 +35,7 @@ type PendingTransfer = {
   items: CatalogItem[];
   mode: 'single' | 'batch';
   target: TransferTarget;
+  plans: CatalogTransferPlanResponse[];
 };
 
 type CatalogTransferExecuteRequest = {
@@ -102,6 +105,12 @@ function statText(stats: CatalogStatsResponse | null) {
 
 function taskSummary(task: TaskRun) {
   return task.label || task.kind || task.id;
+}
+
+function planActionLabel(action: CatalogTransferPlanResponse['action']) {
+  if (action === 'save_share') return '115 秒传';
+  if (action === 'offline_download') return '离线下载';
+  return '不支持';
 }
 
 export function CatalogPanel() {
@@ -198,12 +207,36 @@ export function CatalogPanel() {
     return null;
   };
 
-  const requestTransfer = (transferItems: CatalogItem[], mode: PendingTransfer['mode']) => {
+  const planTransferItem = async (item: CatalogItem, target: TransferTarget): Promise<CatalogTransferPlanResponse> => {
+    const request: CatalogTransferPlanRequest = {
+      item: itemToPlanItem(item),
+      ...(target.cid ? { cid: target.cid } : { lib: target.lib })
+    };
+    return api<CatalogTransferPlanResponse>('/api/v2/catalog/transfer-plan', {
+      method: 'POST',
+      body: JSON.stringify(request)
+    });
+  };
+
+  const requestTransfer = async (transferItems: CatalogItem[], mode: PendingTransfer['mode']) => {
     if (!transferItems.length || transferring) return;
     const target = parseTarget();
     if (!target) return;
-    setPackageAck('');
-    setPending({ items: transferItems, mode, target });
+    setTransferring(true);
+    setProgressText('正在预检目录转存计划...');
+    try {
+      const plans = await Promise.all(transferItems.map((item) => planTransferItem(item, target)));
+      setPackageAck('');
+      setPending({ items: transferItems, mode, target, plans });
+      setError('');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`目录转存预检失败：${message}`, 'error');
+    } finally {
+      setTransferring(false);
+      setProgressText('');
+    }
   };
 
   const createTransferBatchTask = async (transferItems: CatalogItem[], target: TransferTarget): Promise<TaskRun> => {
@@ -250,9 +283,10 @@ export function CatalogPanel() {
     });
   };
 
-  const packageCount = pending?.items.filter((item) => item.is_pkg).length || 0;
-  const offlineCount = pending?.items.filter((item) => item.link_type === 'magnet' || item.link_type === 'ed2k').length || 0;
-  const shareCount = pending ? pending.items.length - offlineCount : 0;
+  const packageCount = pending?.plans.filter((plan) => plan.is_pkg).length || 0;
+  const offlineCount = pending?.plans.filter((plan) => plan.action === 'offline_download').length || 0;
+  const shareCount = pending?.plans.filter((plan) => plan.action === 'save_share').length || 0;
+  const unsupportedCount = pending?.plans.filter((plan) => plan.action === 'unsupported').length || 0;
   const confirmDisabled = transferring || (packageCount > 0 && packageAck.trim() !== '整包');
 
   return (
@@ -414,7 +448,17 @@ export function CatalogPanel() {
               <div><dt>115 秒传</dt><dd>{shareCount}</dd></div>
               <div><dt>离线下载</dt><dd>{offlineCount}</dd></div>
               <div><dt>整包</dt><dd>{packageCount}</dd></div>
+              <div><dt>不支持</dt><dd>{unsupportedCount}</dd></div>
             </dl>
+            {unsupportedCount > 0 && (
+              <div className="notice warn catalogPlanWarning">
+                {pending.plans.filter((plan) => plan.action === 'unsupported').map((plan, index) => (
+                  <div key={`${plan.unsupported?.link || plan.label || index}`}>
+                    {plan.label || plan.unsupported?.link || `第 ${index + 1} 项`}：{plan.unsupported?.reason || '后端标记为不支持'}
+                  </div>
+                ))}
+              </div>
+            )}
             {packageCount > 0 && (
               <label className="packageAck">
                 <span>
@@ -425,7 +469,9 @@ export function CatalogPanel() {
               </label>
             )}
             <ul>
-              {pending.items.slice(0, 5).map((item) => <li key={item.link}>{item.name}</li>)}
+              {pending.items.slice(0, 5).map((item, index) => (
+                <li key={item.link}>{item.name} · {planActionLabel(pending.plans[index]?.action || 'unsupported')}</li>
+              ))}
               {pending.items.length > 5 && <li>还有 {pending.items.length - 5} 条...</li>}
             </ul>
           </div>

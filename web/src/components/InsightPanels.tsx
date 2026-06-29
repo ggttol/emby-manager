@@ -20,18 +20,27 @@ import { useToast } from './Toast';
 type CatalogInsight = components['schemas']['CatalogInsight'];
 type CatalogDuplicateGroup = components['schemas']['CatalogDuplicateGroup'];
 type CatalogDuplicatesResponse = components['schemas']['CatalogDuplicatesResponse'];
+type CleanupCandidate = components['schemas']['CleanupCandidate'];
+type CleanupSuggestRequest = components['schemas']['CleanupSuggestRequest'];
 type CleanupSummaryResponse = components['schemas']['CleanupSummaryResponse'];
 type DedupAnalysisResponse = components['schemas']['DedupAnalysisResponse'];
 type DedupAutoAllResponse = components['schemas']['DedupAutoAllResponse'];
+type DedupExecuteRequest = components['schemas']['DedupExecuteRequest'];
+type DedupExecuteResponse = components['schemas']['DedupExecuteResponse'];
 type DedupGroup = components['schemas']['DedupGroup'];
 type DedupReviewGroup = components['schemas']['DedupReviewGroup'];
+type DedupRow = components['schemas']['DedupRow'];
 type EmbyLibrary = components['schemas']['EmbyLibrary'];
 type GapsScanLibResult = components['schemas']['GapsScanLibResult'];
 type GapsSummaryResponse = components['schemas']['GapsSummaryResponse'];
 type InsightMeta = components['schemas']['InsightMeta'];
 type InsightTodo = components['schemas']['InsightTodo'];
 type LibrariesResponse = components['schemas']['LibrariesResponse'];
+type ManageDeleteBatchRequest = components['schemas']['ManageDeleteBatchRequest'];
+type ManageDeleteRequest = components['schemas']['ManageDeleteRequest'];
+type ManageMoveBatchRequest = components['schemas']['ManageMoveBatchRequest'];
 type ReplaceExecuteResponse = components['schemas']['ReplaceExecuteResponse'];
+type SeriesGapsResponse = components['schemas']['SeriesGapsResponse'];
 type StrmReadOnlyOverview = components['schemas']['StrmReadOnlyOverview'];
 type TaskRun = components['schemas']['TaskRun'];
 type TaskHistorySummary = components['schemas']['TaskHistorySummary'];
@@ -55,6 +64,13 @@ type EmptyDirCleanupResponse = {
 };
 
 type Tone = 'neutral' | 'ok' | 'warn' | 'error';
+
+const CLEANUP_DIMENSIONS = [
+  { value: 'rating', label: '评分' },
+  { value: 'idle', label: '闲置' },
+  { value: 'size', label: '体积' },
+  { value: 'meta', label: '元数据' }
+];
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -93,7 +109,42 @@ function isActiveTask(task?: TaskRun | null) {
 }
 
 function shouldRefreshCleanup(task: TaskRun) {
-  return task.status === 'done' && task.kind.startsWith('cleanup_');
+  return task.status === 'done' && (task.kind.startsWith('cleanup_') || task.kind === 'manage_delete_batch_execute');
+}
+
+function candidateKey(candidate: CleanupCandidate) {
+  return `${candidate.lib}\u0000${candidate.item_id}\u0000${candidate.path || candidate.name}`;
+}
+
+function folderFromCandidate(candidate: CleanupCandidate) {
+  const explicitFolder = (candidate as CleanupCandidate & { folder?: string | null }).folder?.trim();
+  if (explicitFolder) return explicitFolder;
+  const path = candidate.path?.trim();
+  if (path) {
+    const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '');
+    const parts = normalized.split('/').filter(Boolean);
+    const filename = parts.pop();
+    if (filename?.includes('.') && parts.length > 0) return parts[parts.length - 1];
+    if (filename) return filename;
+  }
+  return candidate.name;
+}
+
+function deleteRequestFromCandidate(candidate: CleanupCandidate): ManageDeleteRequest {
+  return {
+    lib: candidate.lib,
+    folder: folderFromCandidate(candidate),
+    item_id: candidate.item_id || null,
+    reason: `智能清理 score ${candidate.score}`
+  };
+}
+
+function zhuigengArchiveKey(item: ZhuigengItem) {
+  return `${item.lib}\u0000${item.folder || item.name}\u0000${item.id || item.tmdb || ''}`;
+}
+
+function dedupRowKey(tmdb: string | null | undefined, row: DedupRow) {
+  return `${tmdb || 'unknown'}\u0000${row.lib}\u0000${row.folder}`;
 }
 
 function asGapsScanResult(result: unknown): GapsScanLibResult | null {
@@ -344,33 +395,78 @@ function CleanupLayout({
   subtitle,
   notice,
   data,
+  libraries,
+  selectedLib,
+  top,
+  minScore,
+  dimensions,
+  selectedCandidateKeys,
+  deleteTask,
+  refreshNoRatingTask,
   loading,
   error,
+  actionLoading,
   onRefresh,
+  onSubmitSuggest,
+  onLibChange,
+  onTopChange,
+  onMinScoreChange,
+  onToggleDimension,
+  onToggleCandidate,
+  onToggleAllCandidates,
+  onRequestDeleteSelected,
+  onRefreshNoRating,
   variant,
   duplicates,
   emptyCleanup,
   emptyCleanupTask,
   emptyCleanupLoading,
-  onExecuteEmptyCleanup
+  emptyCleanupLib,
+  onExecuteEmptyCleanup,
+  onEmptyCleanupLibChange
 }: {
   title: string;
   subtitle: string;
   notice: string;
   data: CleanupSummaryResponse | null;
+  libraries?: EmbyLibrary[];
+  selectedLib?: string;
+  top?: number;
+  minScore?: number;
+  dimensions?: string[];
+  selectedCandidateKeys?: Set<string>;
+  deleteTask?: TaskRun | null;
+  refreshNoRatingTask?: TaskRun | null;
   duplicates?: CatalogDuplicatesResponse | null;
   emptyCleanup?: EmptyDirCleanupResponse | null;
   emptyCleanupTask?: TaskRun | null;
   emptyCleanupLoading?: boolean;
+  emptyCleanupLib?: string;
   loading: boolean;
   error: string;
+  actionLoading?: string | null;
   onRefresh: () => void;
+  onSubmitSuggest?: (event: FormEvent<HTMLFormElement>) => void;
+  onLibChange?: (value: string) => void;
+  onTopChange?: (value: number) => void;
+  onMinScoreChange?: (value: number) => void;
+  onToggleDimension?: (dimension: string) => void;
+  onToggleCandidate?: (candidate: CleanupCandidate) => void;
+  onToggleAllCandidates?: () => void;
+  onRequestDeleteSelected?: () => void;
+  onRefreshNoRating?: () => void;
   onExecuteEmptyCleanup?: () => void;
+  onEmptyCleanupLibChange?: (value: string) => void;
   variant: 'cleanup' | 'dedup';
 }) {
   const duplicateTotal = Number(data?.catalog?.duplicate_links || 0) + Number(data?.catalog?.duplicate_names || 0);
   const emptyCandidateCount = Number(emptyCleanup?.candidate_count ?? data?.strm?.empty_directories ?? 0);
   const emptyCleanupActive = isActiveTask(emptyCleanupTask);
+  const candidates = data?.cleanup_candidates || [];
+  const selectedCount = candidates.filter((candidate) => selectedCandidateKeys?.has(candidateKey(candidate))).length;
+  const allCandidatesSelected = candidates.length > 0 && selectedCount === candidates.length;
+  const deleteActive = isActiveTask(deleteTask);
+  const refreshNoRatingActive = isActiveTask(refreshNoRatingTask);
   const emptyCleanupAction = variant === 'cleanup' ? (
     <button
       className="btn compact"
@@ -389,16 +485,66 @@ function CleanupLayout({
           <strong>{title}</strong>
           <span>{subtitle}</span>
         </div>
-        <button className="btn ghost" onClick={onRefresh} disabled={loading}>
+        <button className="btn ghost" onClick={() => onRefresh()} disabled={loading}>
           <RefreshCw size={16} />
           {loading ? '加载中' : '刷新'}
         </button>
       </div>
       <div className="notice warn scanNotice">{notice}</div>
       {error && <div className="notice warn whitespaceNotice">{error}</div>}
+      {variant === 'cleanup' && onSubmitSuggest && (
+        <form className="cleanupControls" onSubmit={onSubmitSuggest}>
+          <label>
+            媒体库
+            <select className="input" aria-label="智能清理媒体库" value={selectedLib || ''} onChange={(event) => onLibChange?.(event.target.value)}>
+              <option value="">全部媒体库</option>
+              {(libraries || []).map((library) => (
+                <option key={`${library.id || library.name}-${library.type}`} value={library.name}>{library.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            top
+            <input className="input compactInput" aria-label="智能清理 top" type="number" min={1} max={500} value={top ?? 50} onChange={(event) => onTopChange?.(Number(event.target.value))} />
+          </label>
+          <label>
+            min_score
+            <input className="input compactInput" aria-label="智能清理 min_score" type="number" min={0} max={100} step={0.5} value={minScore ?? 10} onChange={(event) => onMinScoreChange?.(Number(event.target.value))} />
+          </label>
+          <div className="cleanupDimensionGroup" role="group" aria-label="智能清理 dimensions">
+            {CLEANUP_DIMENSIONS.map((dimension) => (
+              <label className="switchRow" key={dimension.value}>
+                <input
+                  type="checkbox"
+                  checked={(dimensions || []).includes(dimension.value)}
+                  onChange={() => onToggleDimension?.(dimension.value)}
+                />
+                {dimension.label}
+              </label>
+            ))}
+          </div>
+          <label>
+            空目录 lib
+            <select className="input" aria-label="空目录清理 lib" value={emptyCleanupLib || ''} onChange={(event) => onEmptyCleanupLibChange?.(event.target.value)}>
+              <option value="">全部 / 后端默认</option>
+              {(libraries || []).map((library) => (
+                <option key={`empty-${library.id || library.name}-${library.type}`} value={library.name}>{library.name}</option>
+              ))}
+            </select>
+          </label>
+          <button className="btn" disabled={loading || actionLoading === 'suggest'}>
+            <SearchX size={16} />
+            {loading || actionLoading === 'suggest' ? '分析中' : '生成建议'}
+          </button>
+          <button className="btn ghost" type="button" onClick={onRefreshNoRating} disabled={Boolean(actionLoading) || refreshNoRatingActive}>
+            <RefreshCw size={16} />
+            {actionLoading === 'refresh-no-rating' ? '提交中' : '刷新无评分'}
+          </button>
+        </form>
+      )}
       <div className="statGrid">
         <StatCard icon={<CheckCircle2 />} label="业务状态" value={data?.complete_business_port ? '完整' : '只读'} tone={data?.complete_business_port ? 'ok' : 'warn'} hint="Rust preview" />
-        <StatCard icon={<ListChecks />} label={variant === 'dedup' ? '重复信号' : '待处理'} value={count(variant === 'dedup' ? duplicateTotal : data?.todos.length)} tone={(variant === 'dedup' ? duplicateTotal : data?.todos.length) ? 'warn' : 'ok'} hint="不执行写操作" />
+        <StatCard icon={<ListChecks />} label={variant === 'dedup' ? '重复信号' : '清理候选'} value={count(variant === 'dedup' ? duplicateTotal : candidates.length)} tone={(variant === 'dedup' ? duplicateTotal : candidates.length) ? 'warn' : 'ok'} hint={variant === 'dedup' ? '不执行写操作' : `${count(selectedCount)} 已选`} />
         <StatCard icon={<FileText />} label="strm / 字幕" value={`${count(data?.strm?.strm_files)} / ${count(data?.strm?.subtitle_files)}`} hint={data?.strm?.root || '等待数据'} />
         <StatCard icon={<AlertTriangle />} label="异常任务" value={count(taskProblemCount(data?.task_history))} tone={taskProblemCount(data?.task_history) ? 'warn' : 'ok'} hint={`运行中 ${count(data?.task_history?.running)}`} />
       </div>
@@ -416,8 +562,52 @@ function CleanupLayout({
         </section>
       ) : (
         <section className="readonlyBlock">
-          <h2>清理待办</h2>
-          <TodoList items={data?.todos || []} empty="当前只读预检没有生成清理待办" />
+          <div className="sectionTitleRow">
+            <h2>清理候选</h2>
+            <div className="inlineActions compactActions">
+              <button className="btn ghost compact" onClick={onToggleAllCandidates} disabled={candidates.length === 0}>
+                <ListChecks size={14} />
+                {allCandidatesSelected ? '取消全选' : '全选候选'}
+              </button>
+              <button className="btn danger compact" onClick={onRequestDeleteSelected} disabled={selectedCount === 0 || Boolean(actionLoading) || deleteActive}>
+                <Trash2 size={14} />
+                删除选中 {count(selectedCount)}
+              </button>
+            </div>
+          </div>
+          <div className="insightList compact cleanupCandidateList">
+            {candidates.map((candidate) => {
+              const key = candidateKey(candidate);
+              const checked = Boolean(selectedCandidateKeys?.has(key));
+              return (
+                <article key={key}>
+                  <input
+                    type="checkbox"
+                    aria-label={`选择清理候选：${candidate.name}`}
+                    checked={checked}
+                    onChange={() => onToggleCandidate?.(candidate)}
+                  />
+                  <div className="cleanupCandidateBody">
+                    <strong>{candidate.name}</strong>
+                    <small>{candidate.lib} · score {candidate.score} · {folderFromCandidate(candidate)}</small>
+                    {candidate.reasons.length > 0 && <small>{candidate.reasons.join('；')}</small>}
+                    <div className="cleanupDimensions">
+                      {Object.entries(candidate.dimensions || {}).map(([name, score]) => (
+                        <span key={`${key}-${name}`} className={score.warning ? 'warn' : ''}>
+                          {name}: {score.score}{score.value ? ` · ${score.value}` : ''}{score.warning ? ` · ${score.warning}` : ''}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+            {data && candidates.length === 0 && <div className="empty inlineEmpty">当前条件没有清理候选</div>}
+            {!data && <div className="empty inlineEmpty">等待清理建议</div>}
+          </div>
+          {deleteTask && <div className="notice">已创建任务：{deleteTask.label} · {deleteTask.status}</div>}
+          {refreshNoRatingTask && <div className="notice">无评分刷新任务：{refreshNoRatingTask.label} · {refreshNoRatingTask.status}</div>}
+          {data?.todos?.length ? <TodoList items={data.todos} empty="" /> : null}
         </section>
       )}
       {variant === 'dedup' && <CatalogDuplicateDetails data={duplicates} />}
@@ -449,24 +639,59 @@ function CleanupLayout({
 
 export function CleanupPanel() {
   const [data, setData] = useState<CleanupSummaryResponse | null>(null);
+  const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
+  const [selectedLib, setSelectedLib] = useState('');
+  const [emptyCleanupLib, setEmptyCleanupLib] = useState('');
+  const [top, setTop] = useState(50);
+  const [minScore, setMinScore] = useState(10);
+  const [dimensions, setDimensions] = useState<string[]>(CLEANUP_DIMENSIONS.map((dimension) => dimension.value));
+  const [selectedCandidateKeys, setSelectedCandidateKeys] = useState<Set<string>>(new Set());
+  const [pendingDelete, setPendingDelete] = useState<ManageDeleteBatchRequest | null>(null);
+  const [deleteTask, setDeleteTask] = useState<TaskRun | null>(null);
+  const [refreshNoRatingTask, setRefreshNoRatingTask] = useState<TaskRun | null>(null);
   const [emptyCleanup, setEmptyCleanup] = useState<EmptyDirCleanupResponse | null>(null);
   const [emptyCleanupTask, setEmptyCleanupTask] = useState<TaskRun | null>(null);
   const [emptyCleanupLoading, setEmptyCleanupLoading] = useState(false);
   const [confirmEmptyCleanup, setConfirmEmptyCleanup] = useState(false);
+  const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState('');
   const toast = useToast();
 
-  const load = useCallback(async () => {
+  const emptyCleanupPayload = useCallback((execute: boolean) => ({
+    execute,
+    lib: emptyCleanupLib || null
+  }), [emptyCleanupLib]);
+
+  const suggestPayload = useCallback((): CleanupSuggestRequest => ({
+    lib: selectedLib || null,
+    top,
+    min_score: minScore,
+    dimensions
+  }), [dimensions, minScore, selectedLib, top]);
+
+  const load = useCallback(async (payload?: CleanupSuggestRequest) => {
     setLoading(true);
     setError('');
     try {
-      const [summary, emptyPreview] = await Promise.all([
-        api<CleanupSummaryResponse>('/api/v2/cleanup/suggest', { method: 'POST', body: JSON.stringify({}) }),
-        api<EmptyDirCleanupResponse>('/api/v2/cleanup/empty-dirs', { method: 'POST', body: JSON.stringify({ execute: false }) })
+      const [libs, summary, emptyPreview] = await Promise.all([
+        api<LibrariesResponse>('/api/v2/libraries'),
+        api<CleanupSummaryResponse>('/api/v2/cleanup/suggest', { method: 'POST', body: JSON.stringify(payload || suggestPayload()) }),
+        api<EmptyDirCleanupResponse>('/api/v2/cleanup/empty-dirs', { method: 'POST', body: JSON.stringify(emptyCleanupPayload(false)) })
       ]);
+      const nextLibraries = libs.libraries || [];
+      setLibraries(nextLibraries);
+      if (!selectedLib && nextLibraries[0]?.name) {
+        setSelectedLib(nextLibraries[0].name);
+      }
       setData(summary);
       setEmptyCleanup(emptyPreview);
+      setSelectedCandidateKeys((previous) => {
+        const available = new Set((summary.cleanup_candidates || []).map(candidateKey));
+        const next = new Set([...previous].filter((key) => available.has(key)));
+        return next;
+      });
     } catch (e) {
       const message = errorMessage(e);
       setError(message);
@@ -474,17 +699,21 @@ export function CleanupPanel() {
     } finally {
       setLoading(false);
     }
-  }, [toast]);
+  }, [emptyCleanupPayload, selectedLib, suggestPayload, toast]);
 
   useEffect(() => {
     load();
-  }, [load]);
+  }, []);
 
   useEffect(() => {
     const onTaskCompleted = (event: Event) => {
       const detail = (event as CustomEvent<TaskCompleteDetail>).detail;
       if (detail?.task && shouldRefreshCleanup(detail.task)) {
-        setEmptyCleanupTask(detail.task);
+        if (detail.task.kind === 'manage_delete_batch_execute') {
+          setDeleteTask(detail.task);
+        } else {
+          setEmptyCleanupTask(detail.task);
+        }
         load();
       }
     };
@@ -492,13 +721,110 @@ export function CleanupPanel() {
     return () => window.removeEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
   }, [load]);
 
+  const submitSuggest = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setActionLoading('suggest');
+    try {
+      await load(suggestPayload());
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const toggleDimension = (dimension: string) => {
+    setDimensions((current) => {
+      if (current.includes(dimension)) {
+        const next = current.filter((item) => item !== dimension);
+        return next.length ? next : current;
+      }
+      return [...current, dimension];
+    });
+  };
+
+  const toggleCandidate = (candidate: CleanupCandidate) => {
+    const key = candidateKey(candidate);
+    setSelectedCandidateKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleAllCandidates = () => {
+    const candidates = data?.cleanup_candidates || [];
+    const allKeys = candidates.map(candidateKey);
+    setSelectedCandidateKeys((current) => {
+      if (allKeys.length > 0 && allKeys.every((key) => current.has(key))) return new Set();
+      return new Set(allKeys);
+    });
+  };
+
+  const requestDeleteSelected = () => {
+    const selected = (data?.cleanup_candidates || []).filter((candidate) => selectedCandidateKeys.has(candidateKey(candidate)));
+    if (selected.length === 0) {
+      toast.push('先选择要删除的清理候选', 'warn');
+      return;
+    }
+    const payload: ManageDeleteBatchRequest = {
+      items: selected.map(deleteRequestFromCandidate),
+      reason: `智能清理 min_score ${minScore}`
+    };
+    setPendingDelete(payload);
+    setConfirmDeleteSelected(true);
+  };
+
+  const executeDeleteSelected = async () => {
+    if (!pendingDelete) return;
+    setConfirmDeleteSelected(false);
+    setActionLoading('delete-selected');
+    setError('');
+    try {
+      const task = await api<TaskRun>('/api/v2/manage/delete/batch/execute', {
+        method: 'POST',
+        body: JSON.stringify(pendingDelete)
+      });
+      setDeleteTask(task);
+      toast.push(`已创建智能清理删除任务：${task.label || task.kind}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`智能清理删除失败：${message}`, 'error');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const refreshNoRating = async () => {
+    if (!selectedLib) {
+      toast.push('先选择要刷新的库', 'warn');
+      return;
+    }
+    setActionLoading('refresh-no-rating');
+    setError('');
+    try {
+      const task = await api<TaskRun>('/api/v2/cleanup/refresh-no-rating', {
+        method: 'POST',
+        body: JSON.stringify({ lib: selectedLib })
+      });
+      setRefreshNoRatingTask(task);
+      toast.push(`已创建无评分刷新任务：${task.label || task.kind}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`刷新无评分失败：${message}`, 'error');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   const executeEmptyCleanup = async () => {
     setEmptyCleanupLoading(true);
     setConfirmEmptyCleanup(false);
     try {
       const result = await api<EmptyDirCleanupResponse>('/api/v2/cleanup/empty-dirs', {
         method: 'POST',
-        body: JSON.stringify({ execute: true })
+        body: JSON.stringify(emptyCleanupPayload(true))
       });
       setEmptyCleanup(result);
       setEmptyCleanupTask(result.task || null);
@@ -526,25 +852,67 @@ export function CleanupPanel() {
           )}
         />
       )}
+      {confirmDeleteSelected && pendingDelete && (
+        <ConfirmDanger
+          title="确认删除智能清理候选"
+          confirmText="确认删除选中"
+          onCancel={() => setConfirmDeleteSelected(false)}
+          onConfirm={executeDeleteSelected}
+          body={(
+            <div className="dangerCopy">
+              <p>将创建批量真实删除任务，按 Emby ItemId 和目录逐项处理。</p>
+              <code>{pendingDelete.items.map((item) => `${item.lib}/${item.folder}${item.item_id ? `/${item.item_id}` : ''}`).join('\n')}</code>
+            </div>
+          )}
+        />
+      )}
       <CleanupLayout
         title="智能清理预检"
-        subtitle="汇总任务、catalog、strm、autostrm 和日志信号。"
-        notice="当前 Rust 版智能清理只读预检，不做评分删除、不移动文件、不调用 Emby/115。"
+        subtitle="按评分、闲置、体积和元数据维度生成可执行候选。"
+        notice="评分删除已接入批量任务；size / idle 仍受挂载状态、播放记录和媒体元数据完整度影响，请先复核候选。"
         data={data}
+        libraries={libraries}
+        selectedLib={selectedLib}
+        top={top}
+        minScore={minScore}
+        dimensions={dimensions}
+        selectedCandidateKeys={selectedCandidateKeys}
+        deleteTask={deleteTask}
+        refreshNoRatingTask={refreshNoRatingTask}
         emptyCleanup={emptyCleanup}
         emptyCleanupTask={emptyCleanupTask}
         emptyCleanupLoading={emptyCleanupLoading}
+        emptyCleanupLib={emptyCleanupLib}
         loading={loading}
         error={error}
+        actionLoading={actionLoading}
         onRefresh={load}
+        onSubmitSuggest={submitSuggest}
+        onLibChange={setSelectedLib}
+        onTopChange={setTop}
+        onMinScoreChange={setMinScore}
+        onToggleDimension={toggleDimension}
+        onToggleCandidate={toggleCandidate}
+        onToggleAllCandidates={toggleAllCandidates}
+        onRequestDeleteSelected={requestDeleteSelected}
+        onRefreshNoRating={refreshNoRating}
         onExecuteEmptyCleanup={() => setConfirmEmptyCleanup(true)}
+        onEmptyCleanupLibChange={setEmptyCleanupLib}
         variant="cleanup"
       />
     </>
   );
 }
 
-function DedupAutoGroups({ groups }: { groups: DedupGroup[] }) {
+function DedupAutoGroups({
+  groups,
+  selectedKeys,
+  onToggle
+}: {
+  groups: DedupGroup[];
+  selectedKeys: Set<string>;
+  onToggle: (tmdb: string, row: DedupRow) => void;
+}) {
   return (
     <section className="readonlyBlock">
       <div className="sectionTitleRow">
@@ -560,6 +928,22 @@ function DedupAutoGroups({ groups }: { groups: DedupGroup[] }) {
               {group.keep.lib} · score {count(group.keep.score)} · 删除 {count(group.remove.length)} 个：
               {group.remove.map((row) => row.folder).join('、') || '无'}
             </small>
+            <div className="dedupRemoveList">
+              {group.remove.map((row) => {
+                const key = dedupRowKey(group.tmdb, row);
+                return (
+                  <label className="switchRow dedupPickRow" key={key}>
+                    <input
+                      type="checkbox"
+                      aria-label={`选择去重删除：${row.lib}/${row.folder}`}
+                      checked={selectedKeys.has(key)}
+                      onChange={() => onToggle(group.tmdb, row)}
+                    />
+                    <span>{row.lib}/{row.folder} · score {count(row.score)} · n {count(row.n)}</span>
+                  </label>
+                );
+              })}
+            </div>
           </article>
         ))}
         {groups.length === 0 && <div className="empty inlineEmpty">没有可自动处理的重复组</div>}
@@ -568,7 +952,15 @@ function DedupAutoGroups({ groups }: { groups: DedupGroup[] }) {
   );
 }
 
-function DedupReviewGroups({ groups }: { groups: DedupReviewGroup[] }) {
+function DedupReviewGroups({
+  groups,
+  selectedKeys,
+  onToggle
+}: {
+  groups: DedupReviewGroup[];
+  selectedKeys: Set<string>;
+  onToggle: (tmdb: string, row: DedupRow) => void;
+}) {
   return (
     <section className="readonlyBlock">
       <div className="sectionTitleRow">
@@ -583,9 +975,49 @@ function DedupReviewGroups({ groups }: { groups: DedupReviewGroup[] }) {
             <small>
               {group.rows.map((row) => `${row.lib}/${row.folder} · score ${row.score} · n ${row.n}`).join('；')}
             </small>
+            <div className="dedupRemoveList">
+              {group.rows.map((row) => {
+                const key = dedupRowKey(group.tmdb, row);
+                return (
+                  <label className="switchRow dedupPickRow" key={key}>
+                    <input
+                      type="checkbox"
+                      aria-label={`选择去重删除：${row.lib}/${row.folder}`}
+                      checked={selectedKeys.has(key)}
+                      onChange={() => onToggle(group.tmdb, row)}
+                    />
+                    <span>{row.lib}/{row.folder} · score {count(row.score)} · n {count(row.n)}</span>
+                  </label>
+                );
+              })}
+            </div>
           </article>
         ))}
         {groups.length === 0 && <div className="empty inlineEmpty">没有需要人工复核的重复组</div>}
+      </div>
+    </section>
+  );
+}
+
+function DedupExecuteResultBlock({ result }: { result: DedupExecuteResponse | null }) {
+  if (!result) return null;
+  return (
+    <section className="readonlyBlock">
+      <h2>人工去重结果</h2>
+      <div className="miniStats">
+        <span>状态 <strong>{result.ok ? '完成' : '异常'}</strong></span>
+        <span>tmdb <strong>{result.tmdb || 'mixed'}</strong></span>
+        <span>删除 folder <strong>{count(result.removed.length)}</strong></span>
+      </div>
+      <div className="insightList compact">
+        {result.removed.map((item) => (
+          <article key={`${item.lib}-${item.folder}-${item.undo_id}`}>
+            <span className="badge warn">removed</span>
+            <strong>{item.lib}/{item.folder}</strong>
+            <small>{item.deleted_from.join('、') || '无路径'} · undo {item.undo_id}</small>
+          </article>
+        ))}
+        {result.removed.length === 0 && <div className="empty inlineEmpty">没有删除任何目录</div>}
       </div>
     </section>
   );
@@ -652,9 +1084,12 @@ function ReplaceResultBlock({ result }: { result: ReplaceExecuteResponse | null 
 export function DedupPanel() {
   const [data, setData] = useState<DedupAnalysisResponse | null>(null);
   const [autoAllResult, setAutoAllResult] = useState<DedupAutoAllResponse | null>(null);
+  const [executeResult, setExecuteResult] = useState<DedupExecuteResponse | null>(null);
   const [replaceResult, setReplaceResult] = useState<ReplaceExecuteResponse | null>(null);
   const [replaceDraft, setReplaceDraft] = useState({ lib: '', win_folder: '', lose_folder: '', reason: '' });
-  const [confirmAction, setConfirmAction] = useState<'auto-all' | 'replace' | null>(null);
+  const [selectedDedupKeys, setSelectedDedupKeys] = useState<Set<string>>(new Set());
+  const [pendingExecute, setPendingExecute] = useState<DedupExecuteRequest | null>(null);
+  const [confirmAction, setConfirmAction] = useState<'auto-all' | 'replace' | 'execute' | null>(null);
   const [acting, setActing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -664,7 +1099,15 @@ export function DedupPanel() {
     setLoading(true);
     setError('');
     try {
-      setData(await api<DedupAnalysisResponse>('/api/v2/dedup/duplicates'));
+      const next = await api<DedupAnalysisResponse>('/api/v2/dedup/duplicates');
+      setData(next);
+      setSelectedDedupKeys((previous) => {
+        const available = new Set([
+          ...next.dups.flatMap((group) => group.remove.map((row) => dedupRowKey(group.tmdb, row))),
+          ...next.review.flatMap((group) => group.rows.map((row) => dedupRowKey(group.tmdb, row)))
+        ]);
+        return new Set([...previous].filter((key) => available.has(key)));
+      });
     } catch (e) {
       const message = errorMessage(e);
       setError(message);
@@ -680,6 +1123,11 @@ export function DedupPanel() {
 
   const autoGroups = data?.dups || [];
   const reviewGroups = data?.review || [];
+  const manualRows = useMemo(() => [
+    ...autoGroups.flatMap((group) => group.remove.map((row) => ({ tmdb: group.tmdb, row }))),
+    ...reviewGroups.flatMap((group) => group.rows.map((row) => ({ tmdb: group.tmdb, row })))
+  ], [autoGroups, reviewGroups]);
+  const selectedManualRows = manualRows.filter((item) => selectedDedupKeys.has(dedupRowKey(item.tmdb, item.row)));
   const removeTotal = autoGroups.reduce((total, group) => total + group.remove.length, 0);
   const reviewRows = reviewGroups.reduce((total, group) => total + group.rows.length, 0);
   const replaceReady = Boolean(
@@ -690,6 +1138,43 @@ export function DedupPanel() {
 
   const patchReplaceDraft = (patch: Partial<typeof replaceDraft>) => {
     setReplaceDraft((current) => ({ ...current, ...patch }));
+  };
+
+  const toggleDedupRow = (tmdb: string, row: DedupRow) => {
+    const key = dedupRowKey(tmdb, row);
+    setSelectedDedupKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const clearDedupSelection = () => {
+    setSelectedDedupKeys(new Set());
+  };
+
+  const requestExecuteSelected = () => {
+    if (selectedManualRows.length === 0) {
+      toast.push('先选择要人工删除的重复目录', 'warn');
+      return;
+    }
+    const seen = new Set<string>();
+    const remove = selectedManualRows
+      .map(({ row }) => ({ lib: row.lib, folder: row.folder }))
+      .filter((item) => {
+        const key = `${item.lib}\u0000${item.folder}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    const tmdbs = [...new Set(selectedManualRows.map((item) => item.tmdb).filter(Boolean))];
+    setPendingExecute({
+      tmdb: tmdbs.length === 1 ? tmdbs[0] : undefined,
+      remove,
+      reason: `人工复核去重 ${remove.length} 项`
+    });
+    setConfirmAction('execute');
   };
 
   const submitReplace = (event: FormEvent) => {
@@ -716,6 +1201,27 @@ export function DedupPanel() {
       toast.push(`auto-all 失败：${errorMessage(e)}`, 'error');
     } finally {
       setActing(false);
+    }
+  };
+
+  const executeManualDedup = async () => {
+    if (!pendingExecute) return;
+    setActing(true);
+    setConfirmAction(null);
+    try {
+      const result = await api<DedupExecuteResponse>('/api/v2/dedup/execute', {
+        method: 'POST',
+        body: JSON.stringify(pendingExecute)
+      });
+      setExecuteResult(result);
+      setSelectedDedupKeys(new Set());
+      toast.push(`人工去重完成：删除 ${result.removed.length} 个 folder`, 'ok');
+      await load();
+    } catch (e) {
+      toast.push(`人工去重失败：${errorMessage(e)}`, 'error');
+    } finally {
+      setActing(false);
+      setPendingExecute(null);
     }
   };
 
@@ -772,6 +1278,20 @@ export function DedupPanel() {
           )}
         />
       )}
+      {confirmAction === 'execute' && pendingExecute && (
+        <ConfirmDanger
+          title="确认人工去重删除"
+          confirmText="确认删除选中重复目录"
+          onCancel={() => setConfirmAction(null)}
+          onConfirm={executeManualDedup}
+          body={(
+            <div className="dangerCopy">
+              <p>将按选中的 lib/folder 调用去重删除，并写入 undo 与 Emby 更新。</p>
+              <code>{pendingExecute.remove.map((item) => `${item.lib}/${item.folder}`).join('\n')}</code>
+            </div>
+          )}
+        />
+      )}
       <section className="insightPanel">
         <div className="insightToolbar">
           <div>
@@ -794,10 +1314,20 @@ export function DedupPanel() {
         <section className="readonlyBlock">
           <div className="sectionTitleRow">
             <h2>执行入口</h2>
-            <button className="btn danger compact" onClick={() => setConfirmAction('auto-all')} disabled={loading || acting || autoGroups.length === 0}>
-              <Trash2 size={14} />
-              {acting ? '执行中' : 'auto-all'}
-            </button>
+            <div className="inlineActions compactActions">
+              <button className="btn ghost compact" onClick={clearDedupSelection} disabled={selectedManualRows.length === 0 || acting}>
+                <ListChecks size={14} />
+                清空选择
+              </button>
+              <button className="btn danger compact" onClick={requestExecuteSelected} disabled={loading || acting || selectedManualRows.length === 0}>
+                <Trash2 size={14} />
+                人工删除 {count(selectedManualRows.length)}
+              </button>
+              <button className="btn danger compact" onClick={() => setConfirmAction('auto-all')} disabled={loading || acting || autoGroups.length === 0}>
+                <Trash2 size={14} />
+                {acting ? '执行中' : 'auto-all'}
+              </button>
+            </div>
           </div>
           <form className="manageForm" onSubmit={submitReplace}>
             <div className="manageFormHead">
@@ -822,11 +1352,12 @@ export function DedupPanel() {
             <button className="btn danger" type="submit" disabled={acting || !replaceReady}>replace</button>
           </form>
         </section>
+        <DedupExecuteResultBlock result={executeResult} />
         <DedupAutoAllResultBlock result={autoAllResult} />
         <ReplaceResultBlock result={replaceResult} />
         <div className="readonlySplit">
-          <DedupAutoGroups groups={autoGroups} />
-          <DedupReviewGroups groups={reviewGroups} />
+          <DedupAutoGroups groups={autoGroups} selectedKeys={selectedDedupKeys} onToggle={toggleDedupRow} />
+          <DedupReviewGroups groups={reviewGroups} selectedKeys={selectedDedupKeys} onToggle={toggleDedupRow} />
         </div>
       </section>
     </>
@@ -876,7 +1407,15 @@ function CopyTextBlock({
   );
 }
 
-function ZhuigengItemList({ items }: { items: ZhuigengItem[] }) {
+function ZhuigengItemList({
+  items,
+  selectedArchiveKeys,
+  onToggleArchive
+}: {
+  items: ZhuigengItem[];
+  selectedArchiveKeys?: Set<string>;
+  onToggleArchive?: (item: ZhuigengItem) => void;
+}) {
   return (
     <section className="readonlyBlock">
       <div className="sectionTitleRow">
@@ -888,9 +1427,19 @@ function ZhuigengItemList({ items }: { items: ZhuigengItem[] }) {
           const tone = zhuigengItemTone(item);
           const lastEpisode = episodeSummaryText(item.last_episode_to_air);
           const nextEpisode = episodeSummaryText(item.next_episode_to_air);
+          const archiveable = Boolean(item.ended && item.folder && item.id);
+          const archiveKey = zhuigengArchiveKey(item);
           return (
             <article key={`${item.lib}-${item.id || item.folder}-${item.tmdb}`} className={tone === 'error' ? 'error' : ''}>
               <div>
+                {archiveable && (
+                  <input
+                    type="checkbox"
+                    aria-label={`选择归档：${item.name}`}
+                    checked={Boolean(selectedArchiveKeys?.has(archiveKey))}
+                    onChange={() => onToggleArchive?.(item)}
+                  />
+                )}
                 <strong>{item.name}</strong>
                 <span className={`badge ${tone}`}>{item.continuing ? 'continuing' : item.ended ? 'ended' : item.state}</span>
                 {item.behind > 0 && <span className="badge warn">behind {count(item.behind)}</span>}
@@ -1001,6 +1550,43 @@ function ZhuigengGapsSummaryBlock({
   );
 }
 
+function SeriesGapsDetailBlock({ detail }: { detail: SeriesGapsResponse }) {
+  const seasonRows = detail.seasons || [];
+  return (
+    <div className="taskInlineStatus">
+      <div>
+        <strong>{detail.id || '单剧缺集'}</strong>
+        <span className="badge">{detail.mode}</span>
+      </div>
+      <div className="miniStats">
+        <span>已有 <strong>{count(detail.have)}</strong></span>
+        <span>缺口 <strong>{count(detail.gaps)}</strong></span>
+        <span>本地最大 <strong>{count(detail.max_ep)}</strong></span>
+        <span>TMDb 最大 <strong>{count(detail.tmdb_max)}</strong></span>
+      </div>
+      {detail.mode === 'absolute' ? (
+        <p>{detail.gap_list.length ? `E${detail.gap_list.join(',')}` : '没有缺集'}</p>
+      ) : (
+        <div className="gapResultList">
+          {seasonRows.map((season) => (
+            <article key={`${season.season ?? 'none'}-${season.lo}-${season.hi}`}>
+              <div>
+                <strong>S{String(season.season ?? 0).padStart(2, '0')}</strong>
+                <span className="badge">已有 {count(season.count)}</span>
+                <span className={season.gapcount ? 'badge warn' : 'badge done'}>缺 {count(season.gapcount)}</span>
+              </div>
+              <p>{season.gaps.length ? `E${season.gaps.join(',')}` : '齐全'}</p>
+              <small>E{season.lo} - E{season.hi}</small>
+            </article>
+          ))}
+          {seasonRows.length === 0 && <div className="empty inlineEmpty">没有季集详情</div>}
+        </div>
+      )}
+      {detail.noidx > 0 && <small>{count(detail.noidx)} 集缺少 IndexNumber，未参与缺集判定</small>}
+    </div>
+  );
+}
+
 function GapsScanResultBlock({
   result,
   onCopy
@@ -1063,8 +1649,15 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
   const [libraryError, setLibraryError] = useState('');
   const [scanTask, setScanTask] = useState<TaskRun | null>(null);
   const [scanResult, setScanResult] = useState<GapsScanLibResult | null>(null);
+  const [seriesId, setSeriesId] = useState('');
+  const [seriesDetail, setSeriesDetail] = useState<SeriesGapsResponse | null>(null);
+  const [seriesDetailLoading, setSeriesDetailLoading] = useState(false);
+  const [archiveTargetLib, setArchiveTargetLib] = useState('');
+  const [selectedArchiveKeys, setSelectedArchiveKeys] = useState<Set<string>>(new Set());
+  const [archiveTask, setArchiveTask] = useState<TaskRun | null>(null);
+  const [confirmArchive, setConfirmArchive] = useState(false);
   const [startingScan, setStartingScan] = useState(false);
-  const [zhuigengAction, setZhuigengAction] = useState<'scan-airing' | 'gaps-summary' | ''>('');
+  const [zhuigengAction, setZhuigengAction] = useState<'scan-airing' | 'gaps-summary' | 'archive' | ''>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const toast = useToast();
@@ -1079,16 +1672,22 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     : '全库扫描只读 Emby 元数据，不修改媒体文件、不写 STRM、不调用 115。';
 
   const loadLibraries = async () => {
-    if (isZhuigeng) return;
     setLibraryError('');
     try {
       const res = await api<LibrariesResponse>('/api/v2/libraries');
       const tv = res.libraries.filter((library) => library.type === 'tvshows');
       setLibraries(tv);
-      setSelectedLib((current) => {
-        if (current && tv.some((library) => library.name === current)) return current;
-        return tv[0]?.name || '';
-      });
+      if (isZhuigeng) {
+        setArchiveTargetLib((current) => {
+          if (current && tv.some((library) => library.name === current)) return current;
+          return tv.find((library) => /完结/.test(library.name))?.name || tv[0]?.name || '';
+        });
+      } else {
+        setSelectedLib((current) => {
+          if (current && tv.some((library) => library.name === current)) return current;
+          return tv[0]?.name || '';
+        });
+      }
     } catch (e) {
       const message = errorMessage(e);
       setLibraryError(message);
@@ -1101,7 +1700,15 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     setError('');
     try {
       if (isZhuigeng) {
-        setZhuigeng(await api<ZhuigengStatusResponse>('/api/v2/zhuigeng'));
+        const [status] = await Promise.all([
+          api<ZhuigengStatusResponse>('/api/v2/zhuigeng'),
+          loadLibraries()
+        ]);
+        setZhuigeng(status);
+        setSelectedArchiveKeys((previous) => {
+          const available = new Set((status.items || []).filter((item) => item.ended && item.folder && item.id).map(zhuigengArchiveKey));
+          return new Set([...previous].filter((key) => available.has(key)));
+        });
       } else {
         setData(await api<GapsSummaryResponse>('/api/v2/gaps/scan', { method: 'POST', body: JSON.stringify({}) }));
         await loadLibraries();
@@ -1175,6 +1782,27 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     }
   };
 
+  const loadSeriesDetail = async (event?: FormEvent<HTMLFormElement>) => {
+    event?.preventDefault();
+    const id = seriesId.trim();
+    if (!id) {
+      toast.push('先填写 Emby Series Id', 'warn');
+      return;
+    }
+    setSeriesDetailLoading(true);
+    setSeriesDetail(null);
+    try {
+      const params = new URLSearchParams({ id });
+      const detail = await api<SeriesGapsResponse>(`/api/v2/gaps/series?${params.toString()}`);
+      setSeriesDetail(detail);
+      toast.push(`已读取单剧缺集：${id}`, 'ok');
+    } catch (e) {
+      toast.push(`单剧缺集查询失败：${errorMessage(e)}`, 'error');
+    } finally {
+      setSeriesDetailLoading(false);
+    }
+  };
+
   const copyText = async (text: string, label: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -1210,6 +1838,76 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     }
   };
 
+  const archiveableItems = (zhuigeng?.items || []).filter((item) => item.ended && item.folder && item.id);
+  const selectedArchiveItems = archiveableItems.filter((item) => selectedArchiveKeys.has(zhuigengArchiveKey(item)));
+
+  const toggleArchiveItem = (item: ZhuigengItem) => {
+    const key = zhuigengArchiveKey(item);
+    setSelectedArchiveKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleAllArchiveItems = () => {
+    const keys = archiveableItems.map(zhuigengArchiveKey);
+    setSelectedArchiveKeys((current) => {
+      if (keys.length > 0 && keys.every((key) => current.has(key))) return new Set();
+      return new Set(keys);
+    });
+  };
+
+  const requestArchiveSelected = () => {
+    if (!archiveTargetLib) {
+      toast.push('先选择归档目标库', 'warn');
+      return;
+    }
+    if (selectedArchiveItems.length === 0) {
+      toast.push('先选择要归档的完结剧', 'warn');
+      return;
+    }
+    setConfirmArchive(true);
+  };
+
+  const executeArchiveSelected = async () => {
+    setConfirmArchive(false);
+    setZhuigengAction('archive');
+    try {
+      const byLib = selectedArchiveItems.reduce<Record<string, ZhuigengItem[]>>((acc, item) => {
+        (acc[item.lib] ||= []).push(item);
+        return acc;
+      }, {});
+      const tasks: TaskRun[] = [];
+      for (const [fromLib, group] of Object.entries(byLib)) {
+        const payload: ManageMoveBatchRequest = {
+          from_lib: fromLib,
+          to_lib: archiveTargetLib,
+          items: group.map((item) => ({
+            folder: item.folder || '',
+            item_id: item.id || null,
+            to_folder: null
+          })),
+          on_conflict: 'smart',
+          reason: '追更完结剧智能归档'
+        };
+        const task = await api<TaskRun>('/api/v2/manage/move/batch/execute', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+        tasks.push(task);
+      }
+      setArchiveTask(tasks[tasks.length - 1] || null);
+      setSelectedArchiveKeys(new Set());
+      toast.push(`已创建 ${tasks.length} 个归档任务`, 'ok');
+    } catch (e) {
+      toast.push(`归档任务创建失败：${errorMessage(e)}`, 'error');
+    } finally {
+      setZhuigengAction('');
+    }
+  };
+
   if (isZhuigeng) {
     const items = zhuigeng?.items || [];
     const behind = items.reduce((total, item) => total + item.behind, 0);
@@ -1217,6 +1915,20 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     const actionRunning = Boolean(zhuigengAction);
     return (
       <section className="insightPanel">
+        {confirmArchive && (
+          <ConfirmDanger
+            title="确认智能归档完结剧"
+            confirmText="确认归档"
+            onCancel={() => setConfirmArchive(false)}
+            onConfirm={executeArchiveSelected}
+            body={(
+              <div className="dangerCopy">
+                <p>将把选中的完结剧按来源库分组，移动到目标库，并启用 smart 冲突处理。</p>
+                <code>{selectedArchiveItems.map((item) => `${item.lib}/${item.folder} -> ${archiveTargetLib}`).join('\n')}</code>
+              </div>
+            )}
+          />
+        )}
         <div className="insightToolbar">
           <div>
             <strong>{title}</strong>
@@ -1239,6 +1951,20 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
           <div className="sectionTitleRow">
             <h2>操作</h2>
             <div className="inlineActions">
+              <select className="input compactSelect" aria-label="归档目标库" value={archiveTargetLib} onChange={(event) => setArchiveTargetLib(event.target.value)}>
+                {libraries.length === 0 && <option value="">无目标库</option>}
+                {libraries.map((library) => (
+                  <option key={library.id || library.name} value={library.name}>{library.name}</option>
+                ))}
+              </select>
+              <button className="btn ghost compact" onClick={toggleAllArchiveItems} disabled={archiveableItems.length === 0 || actionRunning}>
+                <ListChecks size={14} />
+                {selectedArchiveItems.length === archiveableItems.length && archiveableItems.length > 0 ? '取消全选' : '全选完结'}
+              </button>
+              <button className="btn danger compact" onClick={requestArchiveSelected} disabled={selectedArchiveItems.length === 0 || !archiveTargetLib || actionRunning}>
+                <Trash2 size={14} />
+                {zhuigengAction === 'archive' ? '提交中' : `智能归档 ${count(selectedArchiveItems.length)}`}
+              </button>
               <button className="btn compact" onClick={runScanAiring} disabled={loading || actionRunning}>
                 <Play size={14} />
                 {zhuigengAction === 'scan-airing' ? '扫描中' : 'scan-airing'}
@@ -1249,7 +1975,8 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
               </button>
             </div>
           </div>
-          <p className="mutedParagraph">scan-airing 汇总在更剧状态；gaps-summary 只输出 continuing 且 behind 的求资源清单。</p>
+          <p className="mutedParagraph">scan-airing 汇总在更剧状态；gaps-summary 输出 continuing 且 behind 的求资源清单；智能归档只处理已完结且有 folder/id 的条目。</p>
+          {archiveTask && <div className="notice">归档任务：{archiveTask.label} · {archiveTask.status}</div>}
         </section>
         <CopyTextBlock
           title="追更 copy_text"
@@ -1259,7 +1986,7 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
         />
         <ZhuigengScanAiringBlock result={airingResult} onCopy={copyText} />
         <ZhuigengGapsSummaryBlock result={zhuigengGapResult} onCopy={copyText} />
-        <ZhuigengItemList items={items} />
+        <ZhuigengItemList items={items} selectedArchiveKeys={selectedArchiveKeys} onToggleArchive={toggleArchiveItem} />
       </section>
     );
   }
@@ -1316,6 +2043,30 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
               {scanTask.error && <p className="errorText">{scanTask.error}</p>}
             </div>
           )}
+        </section>
+      )}
+      {!isZhuigeng && (
+        <section className="readonlyBlock">
+          <div className="sectionTitleRow">
+            <h2>单剧详情</h2>
+            <button className="btn ghost compact" onClick={() => setSeriesDetail(null)} disabled={!seriesDetail}>
+              清空
+            </button>
+          </div>
+          <form className="gapScanControls" onSubmit={loadSeriesDetail}>
+            <input
+              className="input"
+              aria-label="Emby Series Id"
+              value={seriesId}
+              onChange={(event) => setSeriesId(event.target.value)}
+              placeholder="series id"
+            />
+            <button className="btn" type="submit" disabled={seriesDetailLoading || !seriesId.trim()}>
+              <SearchX size={16} />
+              {seriesDetailLoading ? '查询中' : '查询缺集'}
+            </button>
+          </form>
+          {seriesDetail && <SeriesGapsDetailBlock detail={seriesDetail} />}
         </section>
       )}
       {scanResult && <GapsScanResultBlock result={scanResult} onCopy={copyText} />}

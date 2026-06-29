@@ -116,6 +116,12 @@ pub struct EmbyCleanupItem {
     pub path: Option<String>,
     #[serde(rename = "ProductionYear")]
     pub production_year: Option<i32>,
+    #[serde(rename = "DateCreated")]
+    pub date_created: Option<String>,
+    #[serde(rename = "PremiereDate")]
+    pub premiere_date: Option<String>,
+    #[serde(rename = "Overview")]
+    pub overview: Option<String>,
     #[serde(rename = "CommunityRating")]
     pub community_rating: Option<f64>,
     #[serde(rename = "CriticRating")]
@@ -132,6 +138,10 @@ pub struct EmbyCleanupItem {
 pub struct EmbyCleanupUserData {
     #[serde(rename = "Rating")]
     pub rating: Option<f64>,
+    #[serde(rename = "PlayCount")]
+    pub play_count: Option<i64>,
+    #[serde(rename = "LastPlayedDate")]
+    pub last_played_date: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
@@ -589,6 +599,17 @@ impl EmbyClient {
         recursive: bool,
         full: bool,
     ) -> anyhow::Result<u16> {
+        self.refresh_item_with_options(item_id, recursive, full, full)
+            .await
+    }
+
+    pub async fn refresh_item_with_options(
+        &self,
+        item_id: &str,
+        recursive: bool,
+        full: bool,
+        replace_all: bool,
+    ) -> anyhow::Result<u16> {
         if item_id.trim().is_empty() {
             bail!("item_id is required for Emby refresh");
         }
@@ -600,8 +621,14 @@ impl EmbyClient {
                 ("Recursive", if recursive { "true" } else { "false" }),
                 ("MetadataRefreshMode", refresh_mode),
                 ("ImageRefreshMode", refresh_mode),
-                ("ReplaceAllMetadata", if full { "true" } else { "false" }),
-                ("ReplaceAllImages", if full { "true" } else { "false" }),
+                (
+                    "ReplaceAllMetadata",
+                    if replace_all { "true" } else { "false" },
+                ),
+                (
+                    "ReplaceAllImages",
+                    if replace_all { "true" } else { "false" },
+                ),
             ],
         )
         .await
@@ -932,7 +959,7 @@ impl EmbyClient {
                 ("IncludeItemTypes", item_types.trim()),
                 (
                     "Fields",
-                    "Path,ProductionYear,ProviderIds,ImageTags,CommunityRating,CriticRating,UserData",
+                    "Path,ProductionYear,DateCreated,PremiereDate,Overview,ProviderIds,ImageTags,CommunityRating,CriticRating,UserData",
                 ),
                 ("SortBy", "SortName"),
                 ("StartIndex", &start_index.to_string()),
@@ -1011,6 +1038,21 @@ impl EmbyCleanupItem {
                 Value::String(s) => !s.trim().is_empty(),
                 Value::Null => false,
                 _ => true,
+            })
+    }
+
+    pub fn provider_id(&self, key: &str) -> Option<String> {
+        self.provider_ids
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+            .and_then(|(_, value)| match value {
+                Value::String(s) => {
+                    let s = s.trim();
+                    (!s.is_empty()).then(|| s.to_string())
+                }
+                Value::Number(n) => Some(n.to_string()),
+                Value::Bool(b) => Some(b.to_string()),
+                _ => None,
             })
     }
 }

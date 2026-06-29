@@ -11,6 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -31,7 +32,7 @@ const VIDEO_EXTENSIONS: &[&str] = &[
     "mkv", "mp4", "ts", "m2ts", "avi", "iso", "mov", "flv", "wmv", "rmvb",
 ];
 const SUBTITLE_EXTENSIONS: &[&str] = &["ass", "idx", "smi", "srt", "ssa", "sub", "sup", "vtt"];
-const TASK_CANCELLED_SENTINEL: &str = "__task_cancelled__";
+pub const SCAN_TASK_CANCELLED_SENTINEL: &str = "__task_cancelled__";
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LibrariesResponse {
@@ -216,17 +217,41 @@ pub struct ManageDeleteRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ManageMoveRequest {
+    #[serde(alias = "from")]
     pub from_lib: String,
+    #[serde(alias = "folder")]
     pub from_folder: String,
+    #[serde(alias = "to")]
     pub to_lib: String,
     pub to_folder: Option<String>,
+    #[serde(alias = "id")]
     pub item_id: Option<String>,
     pub reason: Option<String>,
+    pub on_conflict: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ManageDeleteBatchRequest {
     pub items: Vec<ManageDeleteRequest>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ManageMoveBatchItem {
+    pub folder: String,
+    #[serde(alias = "id")]
+    pub item_id: Option<String>,
+    pub to_folder: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct ManageMoveBatchRequest {
+    #[serde(alias = "from")]
+    pub from_lib: String,
+    #[serde(alias = "to")]
+    pub to_lib: String,
+    pub items: Vec<ManageMoveBatchItem>,
+    pub on_conflict: Option<String>,
     pub reason: Option<String>,
 }
 
@@ -271,6 +296,11 @@ pub struct ManageMoveExecuteResult {
     pub to_lib: String,
     pub to_folder: String,
     pub moved: bool,
+    pub skipped: bool,
+    pub smart_action: Option<String>,
+    pub msg: Option<String>,
+    pub src_count: Option<usize>,
+    pub dst_count: Option<usize>,
     pub old_strm_removed: bool,
     pub strm_written: usize,
     pub emby_gone: bool,
@@ -297,6 +327,28 @@ pub struct ManageDeleteBatchItemResult {
     pub err: Option<String>,
 }
 
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ManageMoveBatchResult {
+    pub ok: bool,
+    pub from_lib: String,
+    pub to_lib: String,
+    pub total: usize,
+    pub ok_count: usize,
+    pub error_count: usize,
+    pub smart_count: usize,
+    pub results: Vec<ManageMoveBatchItemResult>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ManageMoveBatchItemResult {
+    pub folder: String,
+    pub ok: bool,
+    pub skipped: bool,
+    pub smart_action: Option<String>,
+    pub result: Option<ManageMoveExecuteResult>,
+    pub err: Option<String>,
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/libraries", get(libraries).post(create_library))
@@ -311,6 +363,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/v2/manage/move", post(manage_move))
         .route("/api/v2/manage/move/execute", post(execute_move))
+        .route(
+            "/api/v2/manage/move/batch/execute",
+            post(execute_move_batch),
+        )
 }
 
 #[utoipa::path(get, path = "/api/v2/libraries", tag = "media", responses((status = 200, body = LibrariesResponse)))]
@@ -485,7 +541,9 @@ pub async fn list_strm(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        safe_under(&state.settings.strm_root, lib)?
+        let folder =
+            resolve_library_folder_for_roots(&state, lib, &[&state.settings.strm_root]).await?;
+        safe_under(&state.settings.strm_root, folder)?
     } else {
         state.settings.strm_root.clone()
     };
@@ -569,7 +627,13 @@ pub async fn preview_delete(
     State(state): State<AppState>,
     Json(req): Json<ManageDeleteRequest>,
 ) -> AppResult<Json<TaskRun>> {
-    let plan = plan_delete(&state, &req)?;
+    let lib_folder = resolve_library_folder_for_roots(
+        &state,
+        &req.lib,
+        &[&state.settings.strm_root, &state.settings.cd_root],
+    )
+    .await?;
+    let plan = plan_delete(&state, &req, &lib_folder)?;
     let params = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
     let label = format!("预览删除: {}/{}", req.lib.trim(), req.folder.trim());
     let task = tasks::insert_task_with_meta(
@@ -602,7 +666,13 @@ pub async fn execute_delete(
     State(state): State<AppState>,
     Json(req): Json<ManageDeleteRequest>,
 ) -> AppResult<Json<TaskRun>> {
-    let plan = plan_delete_execute(&state, &req)?;
+    let lib_folder = resolve_library_folder_for_roots(
+        &state,
+        &req.lib,
+        &[&state.settings.strm_root, &state.settings.cd_root],
+    )
+    .await?;
+    let plan = plan_delete_execute(&state, &req, &lib_folder)?;
     let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
     let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
     ensure_api_key_configured(&api_key)?;
@@ -627,17 +697,20 @@ pub async fn execute_delete_batch(
     State(state): State<AppState>,
     Json(req): Json<ManageDeleteBatchRequest>,
 ) -> AppResult<Json<TaskRun>> {
-    let items = req
-        .items
-        .into_iter()
-        .take(500)
-        .map(|mut item| {
-            if item.reason.as_deref().and_then(non_empty_trimmed).is_none() {
-                item.reason.clone_from(&req.reason);
-            }
-            plan_delete_execute(&state, &item).map(|plan| (item, plan))
-        })
-        .collect::<AppResult<Vec<_>>>()?;
+    let mut items = Vec::new();
+    for mut item in req.items.into_iter().take(500) {
+        if item.reason.as_deref().and_then(non_empty_trimmed).is_none() {
+            item.reason.clone_from(&req.reason);
+        }
+        let lib_folder = resolve_library_folder_for_roots(
+            &state,
+            &item.lib,
+            &[&state.settings.strm_root, &state.settings.cd_root],
+        )
+        .await?;
+        let plan = plan_delete_execute(&state, &item, &lib_folder)?;
+        items.push((item, plan));
+    }
     if items.is_empty() {
         return Err(AppError::BadRequest("items must not be empty".to_string()));
     }
@@ -668,7 +741,19 @@ pub async fn preview_move(
     State(state): State<AppState>,
     Json(req): Json<ManageMoveRequest>,
 ) -> AppResult<Json<TaskRun>> {
-    let plan = plan_move(&state, &req)?;
+    let from_lib_folder = resolve_library_folder_for_roots(
+        &state,
+        &req.from_lib,
+        &[&state.settings.strm_root, &state.settings.cd_root],
+    )
+    .await?;
+    let to_lib_folder = resolve_library_folder_for_roots(
+        &state,
+        &req.to_lib,
+        &[&state.settings.strm_root, &state.settings.cd_root],
+    )
+    .await?;
+    let plan = plan_move(&state, &req, &from_lib_folder, &to_lib_folder)?;
     let params = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
     let label = format!(
         "预览移动: {}/{} -> {}",
@@ -706,7 +791,19 @@ pub async fn execute_move(
     State(state): State<AppState>,
     Json(req): Json<ManageMoveRequest>,
 ) -> AppResult<Json<TaskRun>> {
-    let plan = plan_move_execute(&state, &req)?;
+    let from_lib_folder = resolve_library_folder_for_roots(
+        &state,
+        &req.from_lib,
+        &[&state.settings.strm_root, &state.settings.cd_root],
+    )
+    .await?;
+    let to_lib_folder = resolve_library_folder_for_roots(
+        &state,
+        &req.to_lib,
+        &[&state.settings.strm_root, &state.settings.cd_root],
+    )
+    .await?;
+    let plan = plan_move_execute(&state, &req, &from_lib_folder, &to_lib_folder)?;
     let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
     let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
     ensure_api_key_configured(&api_key)?;
@@ -729,6 +826,72 @@ pub async fn execute_move(
     )
     .await?;
     spawn_move_execute(state, task.id, emby_url, api_key, req, plan);
+    Ok(Json(task))
+}
+
+#[utoipa::path(post, path = "/api/v2/manage/move/batch/execute", tag = "media", request_body = ManageMoveBatchRequest, responses((status = 200, body = TaskRun)))]
+pub async fn execute_move_batch(
+    State(state): State<AppState>,
+    Json(req): Json<ManageMoveBatchRequest>,
+) -> AppResult<Json<TaskRun>> {
+    if req.items.is_empty() {
+        return Err(AppError::BadRequest("items 不能为空".to_string()));
+    }
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    ensure_api_key_configured(&api_key)?;
+    let from_lib_folder = resolve_library_folder_for_roots(
+        &state,
+        &req.from_lib,
+        &[&state.settings.strm_root, &state.settings.cd_root],
+    )
+    .await?;
+    let to_lib_folder = resolve_library_folder_for_roots(
+        &state,
+        &req.to_lib,
+        &[&state.settings.strm_root, &state.settings.cd_root],
+    )
+    .await?;
+    let items = req
+        .items
+        .iter()
+        .map(|item| ManageMoveRequest {
+            from_lib: req.from_lib.clone(),
+            from_folder: item.folder.clone(),
+            to_lib: req.to_lib.clone(),
+            to_folder: item.to_folder.clone(),
+            item_id: item.item_id.clone(),
+            reason: req.reason.clone(),
+            on_conflict: req.on_conflict.clone(),
+        })
+        .collect::<Vec<_>>();
+    let params = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
+    let label = format!(
+        "批量移动: {} -> {} ({} 项)",
+        req.from_lib.trim(),
+        req.to_lib.trim(),
+        items.len()
+    );
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "manage_move_batch_execute",
+        &label,
+        items.len() as i64,
+        "manual",
+        params,
+    )
+    .await?;
+    spawn_move_batch_execute(
+        state,
+        task.id,
+        emby_url,
+        api_key,
+        req.from_lib,
+        req.to_lib,
+        from_lib_folder,
+        to_lib_folder,
+        items,
+    );
     Ok(Json(task))
 }
 
@@ -788,6 +951,68 @@ fn folder_from_library_path(path: Option<&str>, library: &EmbyLibrary) -> String
     path.split_once(&sep)
         .map(|(_, rest)| rest.split('/').next().unwrap_or_default().to_string())
         .unwrap_or_default()
+}
+
+pub fn library_folder_name(library: &EmbyLibrary) -> String {
+    library
+        .paths
+        .iter()
+        .find_map(|path| folder_from_strm_path(path))
+        .or_else(|| {
+            library.paths.iter().find_map(|path| {
+                let trimmed = path.trim().trim_end_matches('/');
+                (!trimmed.is_empty()).then(|| {
+                    trimmed
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&library.name)
+                        .to_string()
+                })
+            })
+        })
+        .unwrap_or_else(|| library.name.clone())
+}
+
+fn folder_from_strm_path(path: &str) -> Option<String> {
+    let normalized = path.trim().trim_end_matches('/');
+    let (_, rest) = normalized.split_once("/strm/")?;
+    rest.split('/')
+        .next()
+        .filter(|folder| !folder.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+async fn resolve_library_folder_for_roots(
+    state: &AppState,
+    requested: &str,
+    roots: &[&Path],
+) -> AppResult<String> {
+    let requested = required_segment(requested, "lib")?;
+    for root in roots {
+        if safe_under(root, requested)?.exists() {
+            return Ok(requested.to_string());
+        }
+    }
+
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    if api_key.trim().is_empty() {
+        return Ok(requested.to_string());
+    }
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+    let requested_lower = requested.to_ascii_lowercase();
+    match client.libraries().await {
+        Ok(libraries) => Ok(libraries
+            .iter()
+            .find(|library| {
+                library.name.eq_ignore_ascii_case(requested)
+                    || library.id.as_deref().is_some_and(|id| id == requested)
+                    || library_folder_name(library).to_ascii_lowercase() == requested_lower
+            })
+            .map(library_folder_name)
+            .unwrap_or_else(|| requested.to_string())),
+        Err(_) => Ok(requested.to_string()),
+    }
 }
 
 fn spawn_manage_preview(
@@ -873,7 +1098,7 @@ fn spawn_delete_execute(
                 )
                 .await;
             }
-            Err(err) if err.to_string() == TASK_CANCELLED_SENTINEL => {}
+            Err(err) if err.to_string() == SCAN_TASK_CANCELLED_SENTINEL => {}
             Err(err) => {
                 let _ = tasks::finish_error(&state.pool, id, &err.to_string(), None).await;
             }
@@ -965,7 +1190,7 @@ async fn run_delete_execute(
     tasks::set_total(&state.pool, id, 4).await?;
     if tasks::cancel_requested(&state.pool, id).await {
         tasks::finish_cancelled(&state.pool, id).await?;
-        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+        return Err(AppError::Conflict(SCAN_TASK_CANCELLED_SENTINEL.to_string()));
     }
 
     let mut emby_gone = true;
@@ -976,14 +1201,14 @@ async fn run_delete_execute(
     tasks::set_progress(&state.pool, id, 1, "Emby Item 删除请求已完成").await?;
     if tasks::cancel_requested(&state.pool, id).await {
         tasks::finish_cancelled(&state.pool, id).await?;
-        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+        return Err(AppError::Conflict(SCAN_TASK_CANCELLED_SENTINEL.to_string()));
     }
 
     let deleted_from = delete_planned_paths(&plan).await?;
     tasks::set_progress(&state.pool, id, 2, "磁盘删除已完成").await?;
     if tasks::cancel_requested(&state.pool, id).await {
         tasks::finish_cancelled(&state.pool, id).await?;
-        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+        return Err(AppError::Conflict(SCAN_TASK_CANCELLED_SENTINEL.to_string()));
     }
 
     let notified = if deleted_from.is_empty() {
@@ -1092,11 +1317,111 @@ fn spawn_move_execute(
                 )
                 .await;
             }
-            Err(err) if err.to_string() == TASK_CANCELLED_SENTINEL => {}
+            Err(err) if err.to_string() == SCAN_TASK_CANCELLED_SENTINEL => {}
             Err(err) => {
                 let _ = tasks::finish_error(&state.pool, id, &err.to_string(), None).await;
             }
         }
+    });
+}
+
+fn spawn_move_batch_execute(
+    state: AppState,
+    id: Uuid,
+    emby_url: String,
+    api_key: String,
+    from_lib: String,
+    to_lib: String,
+    from_lib_folder: String,
+    to_lib_folder: String,
+    items: Vec<ManageMoveRequest>,
+) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, id, "任务并发槽不可用", None).await;
+            return;
+        };
+        if tasks::cancel_requested(&state.pool, id).await {
+            let _ = tasks::finish_cancelled(&state.pool, id).await;
+            return;
+        }
+        let _ = tasks::mark_running(&state.pool, id, "批量移动启动").await;
+        let client = EmbyClient::new(emby_url, api_key, state.http.clone());
+        let total = items.len();
+        let mut results = Vec::with_capacity(total);
+
+        for (index, req) in items.into_iter().enumerate() {
+            if tasks::cancel_requested(&state.pool, id).await {
+                let _ = tasks::finish_cancelled(&state.pool, id).await;
+                return;
+            }
+            let folder = req.from_folder.trim().to_string();
+            let _ = tasks::set_progress(
+                &state.pool,
+                id,
+                index as i64,
+                &format!("移动 {}", truncate_task_label(&folder, 40)),
+            )
+            .await;
+            let result = match plan_move_execute(&state, &req, &from_lib_folder, &to_lib_folder) {
+                Ok(plan) => match run_move_execute_core(&state, &client, req, plan).await {
+                    Ok(result) => ManageMoveBatchItemResult {
+                        folder,
+                        ok: result.ok,
+                        skipped: result.skipped,
+                        smart_action: result.smart_action.clone(),
+                        result: Some(result),
+                        err: None,
+                    },
+                    Err(err) => ManageMoveBatchItemResult {
+                        folder,
+                        ok: false,
+                        skipped: false,
+                        smart_action: None,
+                        result: None,
+                        err: Some(err.to_string()),
+                    },
+                },
+                Err(err) => ManageMoveBatchItemResult {
+                    folder,
+                    ok: false,
+                    skipped: false,
+                    smart_action: None,
+                    result: None,
+                    err: Some(err.to_string()),
+                },
+            };
+            results.push(result);
+            let _ = tasks::set_progress(
+                &state.pool,
+                id,
+                (index + 1) as i64,
+                &format!("批量移动 {}/{}", index + 1, total),
+            )
+            .await;
+        }
+
+        let ok_count = results.iter().filter(|item| item.ok).count();
+        let smart_count = results
+            .iter()
+            .filter(|item| item.smart_action.is_some())
+            .count();
+        let result = ManageMoveBatchResult {
+            ok: ok_count == total,
+            from_lib,
+            to_lib,
+            total,
+            ok_count,
+            error_count: total.saturating_sub(ok_count),
+            smart_count,
+            results,
+        };
+        let _ = tasks::finish_done(
+            &state.pool,
+            id,
+            serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+        )
+        .await;
     });
 }
 
@@ -1125,22 +1450,75 @@ async fn run_move_execute(
     tasks::set_total(&state.pool, id, 5).await?;
     if tasks::cancel_requested(&state.pool, id).await {
         tasks::finish_cancelled(&state.pool, id).await?;
-        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+        return Err(AppError::Conflict(SCAN_TASK_CANCELLED_SENTINEL.to_string()));
     }
-
-    let target_library_id = resolve_library_item_id(client, &plan.to_lib).await?;
     tasks::set_progress(&state.pool, id, 1, "目标库已确认").await?;
     if tasks::cancel_requested(&state.pool, id).await {
         tasks::finish_cancelled(&state.pool, id).await?;
-        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+        return Err(AppError::Conflict(SCAN_TASK_CANCELLED_SENTINEL.to_string()));
+    }
+    let result = run_move_execute_core(state, client, req, plan).await?;
+    tasks::set_progress(&state.pool, id, 2, "媒体目录已移动").await?;
+    tasks::set_progress(&state.pool, id, 3, "STRM 已重建").await?;
+    tasks::set_progress(&state.pool, id, 4, "旧路径通知已处理").await?;
+    tasks::set_progress(&state.pool, id, 5, "目标库刷新并写入 undo").await?;
+
+    Ok(result)
+}
+
+async fn run_move_execute_core(
+    state: &AppState,
+    client: &EmbyClient,
+    req: ManageMoveRequest,
+    plan: MoveExecutePlan,
+) -> AppResult<ManageMoveExecuteResult> {
+    let target_library_id = resolve_library_item_id(client, &plan.to_lib).await?;
+    let conflict_mode = move_conflict_mode(req.on_conflict.as_deref())?;
+    if plan.to_cd_target.exists() {
+        match conflict_mode {
+            MoveConflictMode::Error => {
+                return Err(AppError::Conflict(format!(
+                    "目标已存在同名文件夹: {}",
+                    plan.to_cd_target.display()
+                )));
+            }
+            MoveConflictMode::Skip => {
+                let undo_id = Uuid::new_v4();
+                return Ok(ManageMoveExecuteResult {
+                    ok: false,
+                    preview: false,
+                    dry_run: false,
+                    operation: "move".to_string(),
+                    from_lib: plan.from_lib,
+                    from_folder: req.from_folder.trim().to_string(),
+                    to_lib: plan.to_lib,
+                    to_folder: plan.to_folder,
+                    moved: false,
+                    skipped: true,
+                    smart_action: None,
+                    msg: Some("目标已存在同名文件夹(skip)".to_string()),
+                    src_count: None,
+                    dst_count: None,
+                    old_strm_removed: false,
+                    strm_written: 0,
+                    emby_gone: true,
+                    notified: false,
+                    refresh_code: None,
+                    undo_id,
+                });
+            }
+            MoveConflictMode::Smart => {
+                if let Some(result) = handle_smart_move_conflict(state, client, &req, &plan).await?
+                {
+                    return Ok(result);
+                }
+            }
+        }
     }
 
     move_cd_folder(&plan).await?;
-    tasks::set_progress(&state.pool, id, 2, "媒体目录已移动").await?;
-
     let old_strm_removed = remove_path_if_exists(&plan.from_strm_target).await?;
     let strm_written = rebuild_strm_for_moved_folder(&plan)?;
-    tasks::set_progress(&state.pool, id, 3, "STRM 已重建").await?;
 
     let mut emby_gone = true;
     if let Some(item_id) = req.item_id.as_deref().and_then(non_empty_trimmed) {
@@ -1153,28 +1531,26 @@ async fn run_move_execute(
         .notify_media_deleted(&plan.from_emby_path)
         .await
         .is_ok();
-    tasks::set_progress(&state.pool, id, 4, "旧路径通知已处理").await?;
 
     let refresh_code = client
         .refresh_item(&target_library_id, true, false)
         .await
         .ok();
     let undo_id = Uuid::new_v4();
-    let to_folder = plan.to_folder.clone();
     let payload = serde_json::json!({
         "from": req.from_lib.trim(),
         "to": req.to_lib.trim(),
         "folder": req.from_folder.trim(),
-        "to_folder": to_folder,
+        "to_folder": plan.to_folder,
         "emby_id": req.item_id.as_deref().and_then(non_empty_trimmed),
         "strm_count": strm_written,
+        "on_conflict": req.on_conflict.as_deref(),
     });
     sqlx::query("INSERT INTO undo_entries(id, op, payload) VALUES ($1, 'move', $2)")
         .bind(undo_id)
         .bind(payload)
         .execute(&state.pool)
         .await?;
-    tasks::set_progress(&state.pool, id, 5, "目标库刷新并写入 undo").await?;
 
     Ok(ManageMoveExecuteResult {
         ok: true,
@@ -1184,8 +1560,13 @@ async fn run_move_execute(
         from_lib: plan.from_lib,
         from_folder: req.from_folder.trim().to_string(),
         to_lib: plan.to_lib,
-        to_folder,
+        to_folder: plan.to_folder,
         moved: true,
+        skipped: false,
+        smart_action: None,
+        msg: None,
+        src_count: None,
+        dst_count: None,
         old_strm_removed,
         strm_written,
         emby_gone,
@@ -1193,6 +1574,89 @@ async fn run_move_execute(
         refresh_code,
         undo_id,
     })
+}
+
+async fn handle_smart_move_conflict(
+    state: &AppState,
+    client: &EmbyClient,
+    req: &ManageMoveRequest,
+    plan: &MoveExecutePlan,
+) -> AppResult<Option<ManageMoveExecuteResult>> {
+    let mut src_count = count_strm_files(&plan.from_strm_target);
+    let dst_count = count_strm_files(&plan.to_strm_target);
+    if src_count == 0 || dst_count == 0 {
+        return Err(AppError::Conflict(
+            "源或目标的 strm 未生成，拒绝智能判定；请先扫描相关库再归档".to_string(),
+        ));
+    }
+    if src_count == dst_count {
+        let src_quality = folder_max_quality_score(&plan.from_strm_target);
+        let dst_quality = folder_max_quality_score(&plan.to_strm_target);
+        if src_quality > dst_quality {
+            src_count = dst_count + 1;
+        }
+    }
+    if src_count > dst_count {
+        delete_path_if_exists(&plan.to_cd_target).await?;
+        let _ = remove_path_if_exists(&plan.to_strm_target).await?;
+        let _ = client.notify_media_deleted(&plan.to_emby_path).await;
+        return Ok(None);
+    }
+
+    delete_path_if_exists(&plan.from_cd_target).await?;
+    let old_strm_removed = remove_path_if_exists(&plan.from_strm_target).await?;
+    let mut emby_gone = true;
+    if let Some(item_id) = req.item_id.as_deref().and_then(non_empty_trimmed) {
+        match client.delete_item(item_id).await {
+            Ok(_) => emby_gone = verify_emby_delete(client, item_id).await,
+            Err(_) => emby_gone = false,
+        }
+    }
+    let notified = client
+        .notify_media_deleted(&plan.from_emby_path)
+        .await
+        .is_ok();
+    let undo_id = Uuid::new_v4();
+    let payload = serde_json::json!({
+        "from": req.from_lib.trim(),
+        "to": req.to_lib.trim(),
+        "folder": req.from_folder.trim(),
+        "to_folder": plan.to_folder,
+        "emby_id": req.item_id.as_deref().and_then(non_empty_trimmed),
+        "action": "deleted_source",
+        "src_n": src_count,
+        "dst_n": dst_count,
+    });
+    sqlx::query("INSERT INTO undo_entries(id, op, payload) VALUES ($1, 'smart_archive', $2)")
+        .bind(undo_id)
+        .bind(payload)
+        .execute(&state.pool)
+        .await?;
+
+    Ok(Some(ManageMoveExecuteResult {
+        ok: true,
+        preview: false,
+        dry_run: false,
+        operation: "move".to_string(),
+        from_lib: plan.from_lib.clone(),
+        from_folder: req.from_folder.trim().to_string(),
+        to_lib: plan.to_lib.clone(),
+        to_folder: plan.to_folder.clone(),
+        moved: false,
+        skipped: false,
+        smart_action: Some("deleted_source".to_string()),
+        msg: Some(format!(
+            "源 {src_count} 集 ≤ 目标 {dst_count} 集，删源保留目标"
+        )),
+        src_count: Some(src_count),
+        dst_count: Some(dst_count),
+        old_strm_removed,
+        strm_written: 0,
+        emby_gone,
+        notified,
+        refresh_code: None,
+        undo_id,
+    }))
 }
 
 async fn delete_planned_paths(plan: &DeleteExecutePlan) -> AppResult<Vec<String>> {
@@ -1218,12 +1682,41 @@ async fn delete_planned_paths(plan: &DeleteExecutePlan) -> AppResult<Vec<String>
     Ok(deleted_from)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveConflictMode {
+    Error,
+    Skip,
+    Smart,
+}
+
+fn move_conflict_mode(value: Option<&str>) -> AppResult<MoveConflictMode> {
+    match value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("error")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "error" => Ok(MoveConflictMode::Error),
+        "skip" => Ok(MoveConflictMode::Skip),
+        "smart" => Ok(MoveConflictMode::Smart),
+        other => Err(AppError::BadRequest(format!(
+            "未知 on_conflict 模式: {other}"
+        ))),
+    }
+}
+
 async fn resolve_library_item_id(client: &EmbyClient, name: &str) -> AppResult<String> {
+    let requested = name.to_ascii_lowercase();
     let library = client
         .libraries()
         .await?
         .into_iter()
-        .find(|item| item.name == name || item.name.eq_ignore_ascii_case(name))
+        .find(|item| {
+            item.name.eq_ignore_ascii_case(name)
+                || item.id.as_deref().is_some_and(|id| id == name)
+                || library_folder_name(item).to_ascii_lowercase() == requested
+        })
         .ok_or_else(|| AppError::NotFound(format!("Emby library not found: {name}")))?;
     library
         .id
@@ -1259,7 +1752,7 @@ async fn move_cd_folder(plan: &MoveExecutePlan) -> AppResult<()> {
     Ok(())
 }
 
-async fn remove_path_if_exists(path: &Path) -> AppResult<bool> {
+async fn delete_path_if_exists(path: &Path) -> AppResult<bool> {
     if !path.exists() {
         return Ok(false);
     }
@@ -1276,6 +1769,10 @@ async fn remove_path_if_exists(path: &Path) -> AppResult<bool> {
             .map_err(anyhow::Error::from)?;
     }
     Ok(true)
+}
+
+async fn remove_path_if_exists(path: &Path) -> AppResult<bool> {
+    delete_path_if_exists(path).await
 }
 
 fn rebuild_strm_for_moved_folder(plan: &MoveExecutePlan) -> AppResult<usize> {
@@ -1301,17 +1798,87 @@ fn rebuild_strm_for_moved_folder(plan: &MoveExecutePlan) -> AppResult<usize> {
         let Some(filename) = entry.path().file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        if write_strm(&plan.to_strm_lib, &plan.to_lib, root_rel, filename)? {
+        if write_strm(&plan.to_strm_lib, &plan.to_lib_folder, root_rel, filename)? {
             written += 1;
         }
     }
     Ok(written)
 }
 
-fn plan_delete(state: &AppState, req: &ManageDeleteRequest) -> AppResult<Vec<PathBuf>> {
+fn count_strm_files(folder: &Path) -> usize {
+    if !folder.is_dir() {
+        return 0;
+    }
+    WalkDir::new(folder)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && has_extension(entry.path(), "strm"))
+        .count()
+}
+
+fn folder_max_quality_score(folder: &Path) -> i64 {
+    if !folder.is_dir() {
+        return 0;
+    }
+    WalkDir::new(folder)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && has_extension(entry.path(), "strm"))
+        .map(|entry| {
+            std::fs::read_to_string(entry.path())
+                .map(|content| quality_score(&content))
+                .unwrap_or_else(|_| quality_score(&entry.file_name().to_string_lossy()))
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn quality_score(value: &str) -> i64 {
+    let lower = value.to_ascii_lowercase();
+    let mut score = 0;
+    if lower.contains("2160p") || lower.contains("4k") {
+        score += 4000;
+    } else if lower.contains("1080p") {
+        score += 1080;
+    } else if lower.contains("720p") {
+        score += 720;
+    }
+    if lower.contains("remux") {
+        score += 200;
+    }
+    if lower.contains("bluray") || lower.contains("blu-ray") {
+        score += 120;
+    }
+    if lower.contains("web-dl") || lower.contains("webrip") {
+        score += 80;
+    }
+    if lower.contains("x265") || lower.contains("h265") || lower.contains("hevc") {
+        score += 30;
+    }
+    if lower.contains("hdr") || lower.contains("dolby vision") || lower.contains("dv.") {
+        score += 20;
+    }
+    score
+}
+
+fn truncate_task_label(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push('…');
+    }
+    out
+}
+
+fn plan_delete(
+    state: &AppState,
+    req: &ManageDeleteRequest,
+    lib_folder: &str,
+) -> AppResult<Vec<PathBuf>> {
     let lib_root = safe_under(
         &state.settings.strm_root,
-        required_segment(&req.lib, "lib")?,
+        required_segment(lib_folder, "lib")?,
     )?;
     let target = safe_under(&lib_root, required_segment(&req.folder, "folder")?)?;
     Ok(vec![target])
@@ -1327,8 +1894,9 @@ struct DeleteExecutePlan {
 fn plan_delete_execute(
     state: &AppState,
     req: &ManageDeleteRequest,
+    lib_folder: &str,
 ) -> AppResult<DeleteExecutePlan> {
-    let lib = required_segment(&req.lib, "lib")?;
+    let lib = required_segment(lib_folder, "lib")?;
     let folder = required_segment(&req.folder, "folder")?;
     let cd_lib = safe_under(&state.settings.cd_root, lib)?;
     let strm_lib = safe_under(&state.settings.strm_root, lib)?;
@@ -1339,10 +1907,15 @@ fn plan_delete_execute(
     })
 }
 
-fn plan_move(state: &AppState, req: &ManageMoveRequest) -> AppResult<Vec<PathBuf>> {
+fn plan_move(
+    state: &AppState,
+    req: &ManageMoveRequest,
+    from_lib_folder: &str,
+    to_lib_folder: &str,
+) -> AppResult<Vec<PathBuf>> {
     let from_lib = safe_under(
         &state.settings.strm_root,
-        required_segment(&req.from_lib, "from_lib")?,
+        required_segment(from_lib_folder, "from_lib")?,
     )?;
     let from = safe_under(
         &from_lib,
@@ -1350,7 +1923,7 @@ fn plan_move(state: &AppState, req: &ManageMoveRequest) -> AppResult<Vec<PathBuf
     )?;
     let to_lib = safe_under(
         &state.settings.strm_root,
-        required_segment(&req.to_lib, "to_lib")?,
+        required_segment(to_lib_folder, "to_lib")?,
     )?;
     let to = if let Some(folder) = req.to_folder.as_deref().and_then(non_empty_trimmed) {
         safe_under(&to_lib, folder)?
@@ -1368,19 +1941,27 @@ fn plan_move(state: &AppState, req: &ManageMoveRequest) -> AppResult<Vec<PathBuf
 struct MoveExecutePlan {
     from_lib: String,
     to_lib: String,
+    to_lib_folder: String,
     to_folder: String,
     from_cd_target: PathBuf,
     to_cd_lib: PathBuf,
     to_cd_target: PathBuf,
     from_strm_target: PathBuf,
     to_strm_lib: PathBuf,
+    to_strm_target: PathBuf,
     from_emby_path: String,
+    to_emby_path: String,
 }
 
-fn plan_move_execute(state: &AppState, req: &ManageMoveRequest) -> AppResult<MoveExecutePlan> {
-    let from_lib = required_segment(&req.from_lib, "from_lib")?;
+fn plan_move_execute(
+    state: &AppState,
+    req: &ManageMoveRequest,
+    from_lib_folder: &str,
+    to_lib_folder: &str,
+) -> AppResult<MoveExecutePlan> {
+    let from_lib = required_segment(from_lib_folder, "from_lib")?;
     let from_folder = required_segment(&req.from_folder, "from_folder")?;
-    let to_lib = required_segment(&req.to_lib, "to_lib")?;
+    let to_lib = required_segment(to_lib_folder, "to_lib")?;
     let to_folder = move_target_folder(req)?;
 
     let from_cd_lib = safe_under(&state.settings.cd_root, from_lib)?;
@@ -1391,18 +1972,21 @@ fn plan_move_execute(state: &AppState, req: &ManageMoveRequest) -> AppResult<Mov
     let from_cd_target = safe_under(&from_cd_lib, from_folder)?;
     let to_cd_target = safe_under(&to_cd_lib, &to_folder)?;
     let from_strm_target = safe_under(&from_strm_lib, from_folder)?;
-    let _to_strm_target = safe_under(&to_strm_lib, &to_folder)?;
+    let to_strm_target = safe_under(&to_strm_lib, &to_folder)?;
 
     Ok(MoveExecutePlan {
-        from_lib: from_lib.to_string(),
-        to_lib: to_lib.to_string(),
-        to_folder,
+        from_lib: req.from_lib.trim().to_string(),
+        to_lib: req.to_lib.trim().to_string(),
+        to_lib_folder: to_lib.to_string(),
+        to_folder: to_folder.clone(),
         from_cd_target,
         to_cd_lib,
         to_cd_target,
         from_strm_target,
         to_strm_lib,
+        to_strm_target,
         from_emby_path: format!("/strm/{from_lib}/{from_folder}"),
+        to_emby_path: format!("/strm/{to_lib}/{to_folder}"),
     })
 }
 
@@ -1449,7 +2033,7 @@ fn spawn_scan_task(
                 )
                 .await;
             }
-            Err(err) if err.to_string() == TASK_CANCELLED_SENTINEL => {}
+            Err(err) if err.to_string() == SCAN_TASK_CANCELLED_SENTINEL => {}
             Err(err) => {
                 let _ = tasks::finish_error(&state.pool, id, &err.to_string(), None).await;
             }
@@ -1476,7 +2060,7 @@ async fn run_scan_task(
             tasks::set_total(&state.pool, id, 1).await?;
             if tasks::cancel_requested(&state.pool, id).await {
                 tasks::finish_cancelled(&state.pool, id).await?;
-                return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+                return Err(AppError::Conflict(SCAN_TASK_CANCELLED_SENTINEL.to_string()));
             }
             tasks::set_progress(&state.pool, id, 0, &format!("全局刷新: {reason}")).await?;
             let code = client.refresh_library().await?;
@@ -1502,7 +2086,7 @@ async fn run_scan_task(
             for (idx, target) in targets.into_iter().enumerate() {
                 if tasks::cancel_requested(&state.pool, id).await {
                     tasks::finish_cancelled(&state.pool, id).await?;
-                    return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+                    return Err(AppError::Conflict(SCAN_TASK_CANCELLED_SENTINEL.to_string()));
                 }
                 tasks::set_progress(
                     &state.pool,
@@ -1538,6 +2122,234 @@ async fn run_scan_task(
     }
 }
 
+pub async fn run_scheduled_scan_all_libraries(
+    state: &AppState,
+    task_id: Uuid,
+    client: &EmbyClient,
+    params: &Value,
+) -> AppResult<Value> {
+    let Ok(_cloud_permit) = state.clouddrive_slot.clone().acquire_owned().await else {
+        return Err(AppError::Conflict(
+            "CloudDrive 任务并发槽不可用".to_string(),
+        ));
+    };
+    let recursive = params_bool(params, "recursive", true);
+    let full = params_bool(params, "full", false);
+    let generate_strm = params_bool(params, "generate_strm", true);
+    let cleanup_orphans = params_bool(params, "cleanup_orphans", true);
+    let default_fullauto = config_store::get_raw(&state.pool, "auto_strm_fullauto")
+        .await?
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let fullauto = params_bool(params, "fullauto", default_fullauto);
+    let requested_libs = requested_scan_all_libraries(params);
+
+    tasks::set_progress(&state.pool, task_id, 0, "读取 Emby 库").await?;
+    let libraries = client
+        .libraries()
+        .await?
+        .into_iter()
+        .filter(|library| {
+            let folder = library_folder_name(library).to_ascii_lowercase();
+            requested_libs.is_empty()
+                || requested_libs.contains(&library.name.to_ascii_lowercase())
+                || requested_libs.contains(&folder)
+                || library
+                    .id
+                    .as_deref()
+                    .is_some_and(|id| requested_libs.contains(&id.to_ascii_lowercase()))
+        })
+        .collect::<Vec<_>>();
+    tasks::set_total(&state.pool, task_id, libraries.len().max(1) as i64).await?;
+
+    if libraries.is_empty() {
+        tasks::set_progress(&state.pool, task_id, 1, "没有可扫描的 Emby 库").await?;
+        return Ok(serde_json::json!({
+            "action": "scan_all",
+            "libs_scanned": 0,
+            "new_count": 0,
+            "orphans_cleaned": 0,
+            "permissions_fixed": 0,
+            "attention": [],
+            "results": [],
+            "generate_strm": generate_strm,
+            "cleanup_orphans": cleanup_orphans,
+            "fullauto": fullauto,
+        }));
+    }
+
+    let mut results = Vec::new();
+    let mut total_new = 0usize;
+    let mut total_orphans = 0usize;
+    let mut total_permissions = 0usize;
+    let mut attention = Vec::<String>::new();
+    let mut ok_count = 0usize;
+
+    for (index, library) in libraries.iter().enumerate() {
+        if tasks::cancel_requested(&state.pool, task_id).await {
+            tasks::finish_cancelled(&state.pool, task_id).await?;
+            return Err(AppError::Conflict(SCAN_TASK_CANCELLED_SENTINEL.to_string()));
+        }
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            index as i64,
+            &format!("扫 {}", library.name),
+        )
+        .await?;
+
+        match run_scheduled_scan_one_library(
+            state,
+            client,
+            library,
+            recursive,
+            full,
+            generate_strm,
+            cleanup_orphans,
+            fullauto,
+        )
+        .await
+        {
+            Ok(result) => {
+                ok_count += usize::from(result.ok);
+                if let Some(strm) = &result.strm {
+                    total_new += strm.new_count;
+                    total_orphans += strm.orphans_cleaned;
+                    total_permissions += strm.permissions_fixed;
+                    attention.extend(
+                        strm.attention
+                            .iter()
+                            .map(|item| format!("{}: {item}", library.name)),
+                    );
+                }
+                results.push(serde_json::json!({
+                    "lib": library.name,
+                    "ok": result.ok,
+                    "result": result,
+                }));
+            }
+            Err(err) => {
+                results.push(serde_json::json!({
+                    "lib": library.name,
+                    "ok": false,
+                    "err": err.to_string(),
+                }));
+            }
+        }
+
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            (index + 1) as i64,
+            &format!("扫全库 {}/{}", index + 1, libraries.len()),
+        )
+        .await?;
+        sleep(Duration::from_millis(500)).await;
+    }
+
+    Ok(serde_json::json!({
+        "action": "scan_all",
+        "libs_scanned": results.len(),
+        "ok_count": ok_count,
+        "error_count": results.len().saturating_sub(ok_count),
+        "new_count": total_new,
+        "orphans_cleaned": total_orphans,
+        "permissions_fixed": total_permissions,
+        "attention": attention,
+        "results": results,
+        "generate_strm": generate_strm,
+        "cleanup_orphans": cleanup_orphans,
+        "fullauto": fullauto,
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_scheduled_scan_one_library(
+    state: &AppState,
+    client: &EmbyClient,
+    library: &EmbyLibrary,
+    recursive: bool,
+    full: bool,
+    generate_strm: bool,
+    cleanup_orphans: bool,
+    fullauto: bool,
+) -> AppResult<ScanLibraryResult> {
+    let folder = library_folder_name(library);
+    let mut strm = generate_strm
+        .then(|| generate_missing_strm_for_library(state, &folder, None, fullauto))
+        .transpose()?;
+    if let Some(strm_result) = &mut strm {
+        strm_result.lib.clone_from(&library.name);
+    }
+    if cleanup_orphans && let Some(strm_result) = &mut strm {
+        let cleaned = cleanup_orphan_strm_for_library(state, &folder, None, strm_result)?;
+        strm_result.orphans_cleaned = cleaned;
+    }
+
+    let should_refresh = if let Some(strm_result) = &strm {
+        strm_result.new_count > 0
+            || strm_result.orphans_cleaned > 0
+            || strm_result.permissions_fixed > 0
+    } else {
+        true
+    };
+    let mut items = Vec::new();
+    if should_refresh {
+        let id = library.id.as_deref().filter(|id| !id.trim().is_empty());
+        if let Some(id) = id {
+            let code = client.refresh_item(id, recursive, full).await?;
+            if let Some(strm_result) = &mut strm {
+                strm_result.refreshed = (200..300).contains(&code);
+                strm_result.refresh_code = Some(code);
+            }
+            items.push(ScanLibraryItemResult {
+                id: Some(id.to_string()),
+                name: library.name.clone(),
+                code,
+            });
+        }
+    }
+
+    let ok = items.iter().all(|item| (200..300).contains(&item.code))
+        && strm
+            .as_ref()
+            .is_none_or(|strm_result| !strm_result.orphan_cleanup_skipped);
+    Ok(ScanLibraryResult {
+        ok,
+        mode: if generate_strm {
+            "scan_all_strm_generate".to_string()
+        } else {
+            "scan_all_refresh".to_string()
+        },
+        requested: Some(library.name.clone()),
+        triggered: items.len(),
+        global_refresh: false,
+        items,
+        strm,
+    })
+}
+
+fn params_bool(params: &Value, key: &str, default: bool) -> bool {
+    params.get(key).and_then(Value::as_bool).unwrap_or(default)
+}
+
+fn requested_scan_all_libraries(params: &Value) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if let Some(lib) = params.get("lib").and_then(Value::as_str) {
+        let lib = lib.trim();
+        if !lib.is_empty() {
+            out.insert(lib.to_ascii_lowercase());
+        }
+    }
+    if let Some(libs) = params.get("libs").and_then(Value::as_array) {
+        out.extend(libs.iter().filter_map(Value::as_str).filter_map(|lib| {
+            let lib = lib.trim();
+            (!lib.is_empty()).then(|| lib.to_ascii_lowercase())
+        }));
+    }
+    out
+}
+
 async fn run_strm_generate_task(
     state: &AppState,
     id: Uuid,
@@ -1553,22 +2365,34 @@ async fn run_strm_generate_task(
         .and_then(non_empty_trimmed)
         .ok_or_else(|| AppError::BadRequest("生成 STRM 需要指定 lib".to_string()))?
         .to_string();
+    let libraries = client.libraries().await?;
+    let requested_lib = lib.to_ascii_lowercase();
+    let library = libraries
+        .iter()
+        .find(|item| {
+            item.name.eq_ignore_ascii_case(&lib)
+                || item.id.as_deref().is_some_and(|id| id == lib)
+                || library_folder_name(item).to_ascii_lowercase() == requested_lib
+        })
+        .ok_or_else(|| AppError::NotFound(format!("Emby library not found: {lib}")))?;
+    let folder = library_folder_name(library);
     tasks::set_total(&state.pool, id, 2).await?;
     if tasks::cancel_requested(&state.pool, id).await {
         tasks::finish_cancelled(&state.pool, id).await?;
-        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+        return Err(AppError::Conflict(SCAN_TASK_CANCELLED_SENTINEL.to_string()));
     }
     tasks::set_progress(&state.pool, id, 0, "生成缺失 STRM").await?;
     let mut strm = generate_missing_strm_for_library(
         state,
-        &lib,
+        &folder,
         req.keyword.as_deref().and_then(non_empty_trimmed),
         req.fullauto.unwrap_or(false),
     )?;
+    strm.lib.clone_from(&library.name);
     if req.cleanup_orphans.unwrap_or(false) {
         let cleaned = cleanup_orphan_strm_for_library(
             state,
-            &lib,
+            &folder,
             req.keyword.as_deref().and_then(non_empty_trimmed),
             &mut strm,
         )?;
@@ -1577,7 +2401,7 @@ async fn run_strm_generate_task(
     tasks::set_progress(&state.pool, id, 1, "STRM 生成完成").await?;
     if tasks::cancel_requested(&state.pool, id).await {
         tasks::finish_cancelled(&state.pool, id).await?;
-        return Err(AppError::Conflict(TASK_CANCELLED_SENTINEL.to_string()));
+        return Err(AppError::Conflict(SCAN_TASK_CANCELLED_SENTINEL.to_string()));
     }
 
     let mut items = Vec::new();
@@ -1651,9 +2475,14 @@ async fn resolve_scan_plan(client: &EmbyClient, req: &ScanLibraryRequest) -> App
 
     let libraries = client.libraries().await?;
     if let Some(lib) = req.lib.as_deref().and_then(non_empty_trimmed) {
+        let requested = lib.to_ascii_lowercase();
         let library = libraries
             .into_iter()
-            .find(|item| item.name == lib || item.name.eq_ignore_ascii_case(lib))
+            .find(|item| {
+                item.name.eq_ignore_ascii_case(lib)
+                    || item.id.as_deref().is_some_and(|id| id == lib)
+                    || library_folder_name(item).to_ascii_lowercase() == requested
+            })
             .ok_or_else(|| AppError::NotFound(format!("Emby library not found: {lib}")))?;
         return library
             .id
@@ -1859,7 +2688,7 @@ fn strm_path_matches_keyword(strm_base: &Path, path: &Path, keyword: &str) -> bo
         .unwrap_or(false)
 }
 
-fn mount_alive(root: &Path, timeout: std::time::Duration) -> bool {
+pub fn mount_alive(root: &Path, timeout: std::time::Duration) -> bool {
     let root = root.to_path_buf();
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {

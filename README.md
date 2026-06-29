@@ -279,18 +279,28 @@ cp .env.example .env
 # 编辑 .env: 至少改 EMBY_MANAGER_BOOTSTRAP_PASSWORD / POSTGRES_PASSWORD,
 # 如需访问 NAS bind mount,同步填 NAS 上有权限的 uid/gid 和路径。
 docker compose build emby-manager-rs
-docker save ghcr.io/ggttol/emby-manager:rs-dev | gzip > emby-manager-rs-dev.tar.gz
+docker save ghcr.io/ggttol/emby-manager:main | gzip > emby-manager-rs-main.tar.gz
 ```
 
-把 `emby-manager-rs-dev.tar.gz`、`docker-compose.yml` 和你的 NAS `.env` 传到 NAS 上的灰度目录,例如 `/volume1/docker/emby-manager-rs/`。NAS 上只加载并启动:
+如果本地开发机不是 amd64,但 NAS 是常见 Synology x86_64/amd64,用 buildx 明确产出 amd64 镜像:
+
+```sh
+docker buildx build --platform linux/amd64 -t ghcr.io/ggttol/emby-manager:main --load .
+docker save ghcr.io/ggttol/emby-manager:main | gzip > emby-manager-rs-main-amd64.tar.gz
+```
+
+把 `emby-manager-rs-main*.tar.gz`、`docker-compose.yml` 和你的 NAS `.env` 传到 NAS 上的灰度目录,例如 `/volume1/docker/emby-manager-rs/`。NAS 上按 **先迁移、再 serve** 的顺序加载并启动:
 
 ```sh
 cd /volume1/docker/emby-manager-rs
-gzip -dc emby-manager-rs-dev.tar.gz | docker load
-docker compose --env-file .env up -d --no-build
+gzip -dc emby-manager-rs-main-amd64.tar.gz | docker load
+docker compose --env-file .env up -d --no-build postgres
+docker compose --env-file .env run --rm --no-build emby-manager-rs migrate --dry-run
+docker compose --env-file .env run --rm --no-build emby-manager-rs migrate --apply
+docker compose --env-file .env up -d --no-build emby-manager-rs
 ```
 
-升级也是同样流程:本地重新 build/save,传 NAS,`docker load`,再 `docker compose up -d --no-build`。回滚/停止 Rust 灰度只用 `docker compose down`,**不要加 `-v`**,也不要删除 `postgres-data` volume;Postgres named volume 里有 Rust 版用户、会话、迁移状态等运行数据。
+升级也是同样流程:本地重新 build/save,传 NAS,`docker load`,先跑 `migrate --dry-run` / `migrate --apply`,再 `docker compose up -d --no-build emby-manager-rs`。回滚/停止 Rust 灰度只用 `docker compose down`,**不要加 `-v`**,也不要删除 `postgres-data` volume;Postgres named volume 里有 Rust 版用户、会话、迁移状态等运行数据。
 
 默认挂载:
 
@@ -327,6 +337,7 @@ EMBY_MANAGER_MEDIA_MODE=ro
 ```
 
 首次启动会创建 Rust 版 `admin` 用户。`EMBY_MANAGER_BOOTSTRAP_PASSWORD` 只在数据库里还没有用户时使用,且 Rust 服务会拒绝缺失、过短或明显弱的 bootstrap 密码。
+`POSTGRES_PASSWORD` 也必须在首次启动前改成随机强密码,不要沿用示例或可猜值。Postgres named volume 创建后,再改 `.env` 里的 `POSTGRES_PASSWORD` 不会自动轮换已有数据库用户密码;需要换密码时请在数据库内执行 `ALTER USER` 后再同步更新 `.env`。
 如果 `/strm` 或 CloudDrive2 bind mount 读不到,优先在 `.env` 里把 `EMBY_MANAGER_UID` / `EMBY_MANAGER_GID` 对齐到 NAS 上拥有这些目录权限的用户/组,而不是把容器改回 root。
 
 ### 开机自启(Synology DSM)
@@ -395,7 +406,7 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 ### Rust Preview
 
 - **默认灰度端口:** compose 默认只映射 `127.0.0.1:8098`,容器内监听 `0.0.0.0` 仅用于 Docker 网络;要局域网直连必须显式设置 `EMBY_MANAGER_BIND_IP=0.0.0.0`。
-- **首次管理员:** 必须显式设置 `EMBY_MANAGER_BOOTSTRAP_PASSWORD`,服务会拒绝缺失、过短或明显弱密码。
+- **首次管理员:** 必须显式设置 `EMBY_MANAGER_BOOTSTRAP_PASSWORD`,服务会拒绝缺失、过短、明显弱或示例 placeholder 密码。
 - **会话:** 登录发 HttpOnly cookie,React 前端只保存 CSRF/用户名,不把 Bearer token 存入 localStorage;Bearer 保留给后续显式 API/CLI 场景。
 - **CSRF:** cookie 模式下所有 POST/PUT/PATCH/DELETE 要带 `X-CSRF-Token`;未登录的 `/api/v2/*` 业务接口默认 401。
 - **运行用户:** Docker runtime 使用非 root 用户;`/media` 和默认 `/strm` 都按只读挂载,写 STRM/cleanup 或真实删除/移动能力需要显式 opt-in。

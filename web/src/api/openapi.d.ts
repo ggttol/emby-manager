@@ -260,6 +260,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/cleanup/empty-dirs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cleanup_empty_dirs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/cleanup/empty-folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cleanup_empty_folders"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/cleanup/refresh-no-rating": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["refresh_no_rating"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/cleanup/suggest": {
         parameters: {
             query?: never;
@@ -420,6 +468,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/gaps/series": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["series_gaps_detail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/libraries": {
         parameters: {
             query?: never;
@@ -558,6 +622,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["preview_move"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/manage/move/batch/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["execute_move_batch"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1383,13 +1463,27 @@ export interface components {
             dimensions: {
                 [key: string]: components["schemas"]["CleanupDimensionScore"];
             };
+            folder?: string | null;
+            id: string;
             item_id: string;
             lib: string;
             name: string;
             path?: string | null;
+            /** Format: double */
+            rating?: number | null;
             reasons: string[];
             /** Format: double */
             score: number;
+            scores: {
+                [key: string]: number;
+            };
+            /** Format: double */
+            size_gb?: number | null;
+            tmdb?: string | null;
+            /** Format: double */
+            total_score: number;
+            /** Format: int32 */
+            year?: number | null;
         };
         CleanupDimensionScore: {
             reason: string;
@@ -1609,6 +1703,59 @@ export interface components {
             Path: string;
             UpdateType: string;
         };
+        EmptyDirCleanupRequest: {
+            execute?: boolean | null;
+            lib?: string | null;
+            limit?: number | null;
+        };
+        EmptyDirCleanupResponse: {
+            candidate_count: number;
+            dry_run: boolean;
+            execute: boolean;
+            ok: boolean;
+            root: string;
+            samples: string[];
+            task?: null | components["schemas"]["TaskRun"];
+            truncated: boolean;
+            warnings: string[];
+        };
+        EmptyDirCleanupTaskResult: {
+            candidate_count: number;
+            deleted: string[];
+            deleted_count: number;
+            dry_run: boolean;
+            failed_count: number;
+            failures: string[];
+            ok: boolean;
+            root: string;
+            skipped: string[];
+            skipped_count: number;
+            warnings: string[];
+        };
+        EmptyFolderCandidate: {
+            folder: string;
+            other_files: number;
+            /** Format: int64 */
+            size_bytes: number;
+            /** Format: double */
+            size_kb: number;
+        };
+        EmptyFolderCleanupRequest: {
+            lib: string;
+            limit?: number | null;
+        };
+        EmptyFolderCleanupTaskResult: {
+            folder: string;
+            items: components["schemas"]["EmptyFolderCandidate"][];
+            lib: string;
+            ok: boolean;
+            root: string;
+            total_scanned: number;
+            /** Format: double */
+            total_size_kb: number;
+            truncated: boolean;
+            warnings: string[];
+        };
         ExtensionCount: {
             /** Format: int64 */
             count: number;
@@ -1768,12 +1915,44 @@ export interface components {
             lib: string;
             reason?: string | null;
         };
+        ManageMoveBatchItem: {
+            folder: string;
+            item_id?: string | null;
+            to_folder?: string | null;
+        };
+        ManageMoveBatchItemResult: {
+            err?: string | null;
+            folder: string;
+            ok: boolean;
+            result?: null | components["schemas"]["ManageMoveExecuteResult"];
+            skipped: boolean;
+            smart_action?: string | null;
+        };
+        ManageMoveBatchRequest: {
+            from_lib: string;
+            items: components["schemas"]["ManageMoveBatchItem"][];
+            on_conflict?: string | null;
+            reason?: string | null;
+            to_lib: string;
+        };
+        ManageMoveBatchResult: {
+            error_count: number;
+            from_lib: string;
+            ok: boolean;
+            ok_count: number;
+            results: components["schemas"]["ManageMoveBatchItemResult"][];
+            smart_count: number;
+            to_lib: string;
+            total: number;
+        };
         ManageMoveExecuteResult: {
             dry_run: boolean;
+            dst_count?: number | null;
             emby_gone: boolean;
             from_folder: string;
             from_lib: string;
             moved: boolean;
+            msg?: string | null;
             notified: boolean;
             ok: boolean;
             old_strm_removed: boolean;
@@ -1781,6 +1960,9 @@ export interface components {
             preview: boolean;
             /** Format: int32 */
             refresh_code?: number | null;
+            skipped: boolean;
+            smart_action?: string | null;
+            src_count?: number | null;
             strm_written: number;
             to_folder: string;
             to_lib: string;
@@ -1791,6 +1973,7 @@ export interface components {
             from_folder: string;
             from_lib: string;
             item_id?: string | null;
+            on_conflict?: string | null;
             reason?: string | null;
             to_folder?: string | null;
             to_lib: string;
@@ -1926,6 +2109,27 @@ export interface components {
             tmdb: string;
             type: string;
         };
+        RefreshNoRatingRequest: {
+            lib: string;
+            limit?: number | null;
+        };
+        RefreshNoRatingTaskItem: {
+            id: string;
+            lib: string;
+            name: string;
+            path?: string | null;
+            /** Format: int32 */
+            refresh_code: number;
+        };
+        RefreshNoRatingTaskResult: {
+            items: components["schemas"]["RefreshNoRatingTaskItem"][];
+            lib: string;
+            msg: string;
+            no_rating_count: number;
+            ok: boolean;
+            refresh_triggered: number;
+            scanned: number;
+        };
         ReplaceExecuteResponse: {
             deleted_from: string[];
             dropped: string;
@@ -2030,6 +2234,20 @@ export interface components {
             max_ep: number;
             mode: string;
             noidx: number;
+            seasons: components["schemas"]["SeasonGaps"][];
+            /** Format: int32 */
+            tmdb_max: number;
+        };
+        SeriesGapsResponse: {
+            gap_list: string[];
+            gaps: number;
+            have: number;
+            id: string;
+            /** Format: int32 */
+            max_ep: number;
+            mode: string;
+            noidx: number;
+            ok: boolean;
             seasons: components["schemas"]["SeasonGaps"][];
             /** Format: int32 */
             tmdb_max: number;
@@ -2721,6 +2939,75 @@ export interface operations {
             };
         };
     };
+    cleanup_empty_dirs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EmptyDirCleanupRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmptyDirCleanupResponse"];
+                };
+            };
+        };
+    };
+    cleanup_empty_folders: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EmptyFolderCleanupRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    refresh_no_rating: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RefreshNoRatingRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
     cleanup_summary: {
         parameters: {
             query?: never;
@@ -2958,6 +3245,27 @@ export interface operations {
             };
         };
     };
+    series_gaps_detail: {
+        parameters: {
+            query: {
+                id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SeriesGapsResponse"];
+                };
+            };
+        };
+    };
     libraries: {
         parameters: {
             query?: never;
@@ -3172,6 +3480,29 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["ManageMoveRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    execute_move_batch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ManageMoveBatchRequest"];
             };
         };
         responses: {

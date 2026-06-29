@@ -20,9 +20,11 @@ import { useToast } from './Toast';
 
 type AutostrmStatusResponse = components['schemas']['AutostrmStatusResponse'];
 type CleanupSummaryResponse = components['schemas']['CleanupSummaryResponse'];
+type DedupAnalysisResponse = components['schemas']['DedupAnalysisResponse'];
 type GapsSummaryResponse = components['schemas']['GapsSummaryResponse'];
 type InsightMeta = components['schemas']['InsightMeta'];
 type InsightTodo = components['schemas']['InsightTodo'];
+type PosterDetectResponse = components['schemas']['PosterDetectResponse'];
 type PathStatus = components['schemas']['PathStatus'];
 type StrmListResponse = components['schemas']['StrmListResponse'];
 type StrmOverview = components['schemas']['StrmOverview'];
@@ -33,6 +35,25 @@ type EmbyHealthSummary = components['schemas']['EmbyHealthSummary'];
 type HostMetrics = components['schemas']['HostMetrics'];
 type LoadAverage = components['schemas']['LoadAverage'];
 type MemorySummary = components['schemas']['MemorySummary'];
+type ZhuigengStatusResponse = components['schemas']['ZhuigengStatusResponse'];
+
+type DashboardTodoParity = {
+  noposter: number;
+  dups_auto: number;
+  dups_review: number;
+  airing_count: number;
+  noposter_by_lib: Record<string, number>;
+  errors: string[];
+};
+
+const EMPTY_DASHBOARD_TODO: DashboardTodoParity = {
+  noposter: 0,
+  dups_auto: 0,
+  dups_review: 0,
+  airing_count: 0,
+  noposter_by_lib: {},
+  errors: []
+};
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
@@ -114,6 +135,41 @@ function todoTone(severity: string) {
 function taskProblemCount(task?: TaskHistorySummary) {
   if (!task) return 0;
   return task.error + task.cancelled + task.interrupted + task.stale_running;
+}
+
+function settledValue<T>(result: PromiseSettledResult<T>): T | null {
+  return result.status === 'fulfilled' ? result.value : null;
+}
+
+function settledError(label: string, result: PromiseSettledResult<unknown>) {
+  return result.status === 'rejected' ? `${label}: ${errorMessage(result.reason)}` : '';
+}
+
+function buildDashboardTodoParity(
+  poster: PromiseSettledResult<PosterDetectResponse>,
+  dedup: PromiseSettledResult<DedupAnalysisResponse>,
+  zhuigeng: PromiseSettledResult<ZhuigengStatusResponse>
+): DashboardTodoParity {
+  const posterData = settledValue(poster);
+  const dedupData = settledValue(dedup);
+  const zhuigengData = settledValue(zhuigeng);
+  const noposterByLib: Record<string, number> = {};
+  for (const item of posterData?.items || []) {
+    if (item.has_poster) continue;
+    noposterByLib[item.lib || '?'] = (noposterByLib[item.lib || '?'] || 0) + 1;
+  }
+  return {
+    noposter: posterData?.missing_primary_total || 0,
+    dups_auto: dedupData?.dups?.length || 0,
+    dups_review: dedupData?.review?.length || 0,
+    airing_count: zhuigengData?.continuing || 0,
+    noposter_by_lib: noposterByLib,
+    errors: [
+      settledError('无海报', poster),
+      settledError('重复项', dedup),
+      settledError('追更', zhuigeng)
+    ].filter(Boolean)
+  };
 }
 
 function buildSystemReport(system: SystemSummary | null) {
@@ -277,6 +333,7 @@ export function DashboardPanel() {
   const [cleanup, setCleanup] = useState<CleanupSummaryResponse | null>(null);
   const [gaps, setGaps] = useState<GapsSummaryResponse | null>(null);
   const [autostrm, setAutostrm] = useState<AutostrmStatusResponse | null>(null);
+  const [dashboardTodo, setDashboardTodo] = useState<DashboardTodoParity>(EMPTY_DASHBOARD_TODO);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const toast = useToast();
@@ -284,6 +341,7 @@ export function DashboardPanel() {
   const load = async () => {
     setLoading(true);
     setError('');
+    setDashboardTodo(EMPTY_DASHBOARD_TODO);
     try {
       const [systemData, cleanupData, gapsData, autostrmData] = await Promise.all([
         api<SystemSummary>('/api/v2/system/summary'),
@@ -295,6 +353,15 @@ export function DashboardPanel() {
       setCleanup(cleanupData);
       setGaps(gapsData);
       setAutostrm(autostrmData);
+      const [posterData, dedupData, zhuigengData] = await Promise.allSettled([
+        api<PosterDetectResponse>('/api/v2/posters/detect-mismatch', {
+          method: 'POST',
+          body: JSON.stringify({ include_missing_primary: true })
+        }),
+        api<DedupAnalysisResponse>('/api/v2/dedup/duplicates'),
+        api<ZhuigengStatusResponse>('/api/v2/zhuigeng')
+      ]);
+      setDashboardTodo(buildDashboardTodoParity(posterData, dedupData, zhuigengData));
     } catch (e) {
       const message = errorMessage(e);
       setError(message);
@@ -316,7 +383,8 @@ export function DashboardPanel() {
     ...(system?.warnings || []),
     ...(cleanup?.warnings || []),
     ...(gaps?.warnings || []),
-    ...(autostrm?.warnings || [])
+    ...(autostrm?.warnings || []),
+    ...dashboardTodo.errors
   ];
 
   return (
@@ -337,15 +405,48 @@ export function DashboardPanel() {
         <StatCard icon={<Database />} label="数据库" value={system?.database?.status || '未知'} tone={system?.database?.status === 'ok' ? 'ok' : 'warn'} hint={system?.database?.current_database || system?.database?.url} />
         <StatCard icon={<ListChecks />} label="待办" value={count(todos.length)} tone={todos.length ? 'warn' : 'ok'} hint="只读预检聚合" />
         <StatCard icon={<Activity />} label="异常任务" value={count(taskProblemCount(cleanup?.task_history))} tone={taskProblemCount(cleanup?.task_history) ? 'warn' : 'ok'} hint={`运行中 ${count(cleanup?.task_history?.running)}`} />
+        <StatCard icon={<AlertTriangle />} label="无海报" value={count(dashboardTodo.noposter)} tone={dashboardTodo.noposter ? 'warn' : 'ok'} hint="旧版 dash/todo" />
+        <StatCard icon={<CheckCircle2 />} label="自动去重" value={count(dashboardTodo.dups_auto)} tone={dashboardTodo.dups_auto ? 'warn' : 'ok'} hint="可自动处理组" />
+        <StatCard icon={<AlertTriangle />} label="人工重复" value={count(dashboardTodo.dups_review)} tone={dashboardTodo.dups_review ? 'warn' : 'ok'} hint="需人工 review" />
+        <StatCard icon={<Webhook />} label="在更剧" value={count(dashboardTodo.airing_count)} tone={dashboardTodo.airing_count ? 'warn' : 'ok'} hint="追更 continuing" />
         <StatCard icon={<FileText />} label="strm / 字幕" value={`${count(cleanup?.strm?.strm_files)} / ${count(cleanup?.strm?.subtitle_files)}`} hint={cleanup?.strm?.root || system?.strm_root} />
         <StatCard icon={<Webhook />} label="Autostrm unmatched" value={count(autostrm?.unmatched?.total)} tone={autostrm?.unmatched?.total ? 'warn' : 'ok'} hint={`${count(autostrm?.seen?.total)} seen`} />
       </div>
       <WarningList warnings={warnings} />
+      <DashboardTodoParityBlock todo={dashboardTodo} />
       <section className="readonlyBlock">
         <h2>待处理信号</h2>
         <TodoList items={todos} empty="当前只读预检没有发现待处理信号" />
       </section>
       <TaskHistory task={cleanup?.task_history} />
+    </section>
+  );
+}
+
+function DashboardTodoParityBlock({ todo }: { todo: DashboardTodoParity }) {
+  const libs = Object.entries(todo.noposter_by_lib).sort((left, right) => right[1] - left[1]);
+  if (!todo.noposter && !todo.dups_auto && !todo.dups_review && !todo.airing_count && libs.length === 0) {
+    return null;
+  }
+  return (
+    <section className="readonlyBlock">
+      <h2>旧版待办计数</h2>
+      <div className="miniStats">
+        <span><strong>{count(todo.noposter)}</strong>无海报</span>
+        <span><strong>{count(todo.dups_auto)}</strong>自动去重</span>
+        <span><strong>{count(todo.dups_review)}</strong>人工重复</span>
+        <span><strong>{count(todo.airing_count)}</strong>在更剧</span>
+      </div>
+      {libs.length > 0 && (
+        <div className="libraryBars">
+          {libs.slice(0, 6).map(([lib, total]) => (
+            <article key={lib}>
+              <strong>{lib}</strong>
+              <span>无海报 {count(total)}</span>
+            </article>
+          ))}
+        </div>
+      )}
     </section>
   );
 }

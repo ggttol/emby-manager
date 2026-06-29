@@ -22,8 +22,11 @@ use tokio::{
 use tower::ServiceExt;
 use uuid::Uuid;
 
+static INSIGHTS_DB_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn insights_endpoints_return_readonly_coverage_and_todos() {
+    let _guard = INSIGHTS_DB_LOCK.lock().await;
     let Some(database_url) = insights_test_database_url() else {
         eprintln!(
             "skipping insights API test; set EMBY_MANAGER_INSIGHTS_TEST_DATABASE_URL to enable it"
@@ -103,7 +106,7 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{cleanup}");
-    assert_eq!(cleanup["complete_business_port"], false);
+    assert_eq!(cleanup["complete_business_port"], true);
     assert_eq!(cleanup["catalog"]["duplicate_links"], 1);
     assert_eq!(cleanup["logs"]["errors_7d"], 1);
     assert_eq!(cleanup["strm"]["empty_directory_samples"][0], "Empty");
@@ -141,9 +144,12 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
                 "Type": "Movie",
                 "Path": "/strm/Movies/Low Old Missing/movie.strm",
                 "ProductionYear": 1995,
+                "DateCreated": "2024-01-01T00:00:00Z",
                 "CommunityRating": 4.0,
+                "Overview": "",
                 "ProviderIds": {},
-                "ImageTags": {}
+                "ImageTags": {},
+                "UserData": {"PlayCount": 0}
             },
             {
                 "Id": "good-new",
@@ -151,9 +157,12 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
                 "Type": "Movie",
                 "Path": "/strm/Movies/Good New/movie.strm",
                 "ProductionYear": 2024,
+                "DateCreated": "2026-06-01T00:00:00Z",
                 "CommunityRating": 8.0,
+                "Overview": "ok",
                 "ProviderIds": {"Tmdb": "123"},
-                "ImageTags": {"Primary": "poster"}
+                "ImageTags": {"Primary": "poster"},
+                "UserData": {"PlayCount": 1, "LastPlayedDate": "2026-06-15T00:00:00Z"}
             },
             {
                 "Id": "old-missing-meta",
@@ -161,14 +170,20 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
                 "Type": "Movie",
                 "Path": "/strm/Movies/Old Missing Meta/movie.strm",
                 "ProductionYear": 2000,
+                "DateCreated": "2023-01-01T00:00:00Z",
+                "CommunityRating": 0,
+                "Overview": "",
                 "ProviderIds": {},
-                "ImageTags": {}
+                "ImageTags": {},
+                "UserData": {"PlayCount": 0}
             }
         ],
         "TotalRecordCount": 3
     }"#;
-    let (emby_base, emby_requests) =
-        spawn_fake_emby_sequence(vec![libraries, items, libraries, items, libraries, items]).await;
+    let (emby_base, emby_requests) = spawn_fake_emby_sequence(vec![
+        libraries, items, libraries, items, libraries, items, libraries, items, "{}",
+    ])
+    .await;
     configure_emby(&pool, &emby_base).await;
 
     let (status, _, scored) = send(
@@ -194,6 +209,21 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
         json!("low-old-missing")
     );
     assert!(scored["cleanup_candidates"][0]["score"].as_f64().unwrap() >= 50.0);
+    assert_eq!(
+        scored["cleanup_candidates"][0]["folder"],
+        json!("Low Old Missing")
+    );
+    assert_eq!(scored["cleanup_candidates"][0]["rating"], json!(4.0));
+    assert_eq!(
+        scored["cleanup_candidates"][0]["total_score"],
+        scored["cleanup_candidates"][0]["score"]
+    );
+    assert!(
+        scored["cleanup_candidates"][0]["scores"]["rating"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
     assert!(scored["cleanup_candidates"][0]["dimensions"]["rating"].is_object());
     assert!(scored["cleanup_candidates"][0]["dimensions"]["meta"].is_object());
     assert!(scored["cleanup_candidates"][0]["dimensions"]["age"].is_object());
@@ -209,7 +239,7 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
         Some(json!({
             "lib": "Movies",
             "top": 5,
-            "min_score": 20,
+            "min_score": 10,
             "dimensions": ["meta"]
         })),
         &[
@@ -260,6 +290,36 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
         "{size_only}"
     );
 
+    let (status, _, refresh_no_rating) = send(
+        &app,
+        Method::POST,
+        "/api/v2/cleanup/refresh-no-rating",
+        Some(json!({
+            "lib": "Movies",
+            "limit": 5
+        })),
+        &[
+            (COOKIE.as_str(), cookie.clone()),
+            ("x-csrf-token", csrf.clone()),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{refresh_no_rating}");
+    assert_eq!(
+        refresh_no_rating["kind"],
+        json!("cleanup_refresh_no_rating")
+    );
+    let refresh_task =
+        wait_for_task_status(&pool, refresh_no_rating["id"].as_str().unwrap(), "done").await;
+    assert_eq!(refresh_task["result"]["lib"], json!("Movies"));
+    assert_eq!(refresh_task["result"]["scanned"], json!(3));
+    assert_eq!(refresh_task["result"]["no_rating_count"], json!(1));
+    assert_eq!(refresh_task["result"]["refresh_triggered"], json!(1));
+    assert_eq!(
+        refresh_task["result"]["items"][0]["id"],
+        json!("old-missing-meta")
+    );
+
     let (status, _, unknown_dimension) = send(
         &app,
         Method::POST,
@@ -275,7 +335,7 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
     assert_eq!(unknown_dimension["code"], json!("bad_request"));
 
     let emby_requests = emby_requests.lock().unwrap();
-    assert_eq!(emby_requests.len(), 6);
+    assert_eq!(emby_requests.len(), 9);
     assert!(
         emby_requests[0].starts_with("GET /Library/VirtualFolders?api_key=secret-key"),
         "{}",
@@ -295,6 +355,21 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
         emby_requests[1].contains("IncludeItemTypes=Movie"),
         "{}",
         emby_requests[1]
+    );
+    assert!(
+        emby_requests[8].starts_with("POST /Items/old-missing-meta/Refresh?"),
+        "{}",
+        emby_requests[8]
+    );
+    assert!(
+        emby_requests[8].contains("MetadataRefreshMode=FullRefresh"),
+        "{}",
+        emby_requests[8]
+    );
+    assert!(
+        emby_requests[8].contains("ReplaceAllMetadata=false"),
+        "{}",
+        emby_requests[8]
     );
 
     let (status, _, empty_preview) = send(
@@ -356,6 +431,106 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
                 .unwrap_or_default()
                 .contains("/api/v2/autostrm/webhook")),
         "{autostrm}"
+    );
+}
+
+#[tokio::test]
+async fn empty_folder_scan_uses_emby_path_folder_mapping() {
+    let _guard = INSIGHTS_DB_LOCK.lock().await;
+    let Some(database_url) = insights_test_database_url() else {
+        eprintln!(
+            "skipping insights API test; set EMBY_MANAGER_INSIGHTS_TEST_DATABASE_URL to enable it"
+        );
+        return;
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let strm_root = tmp.path().join("strm");
+    let cd_root = tmp.path().join("cd").join("MovieFolder");
+    std::fs::create_dir_all(cd_root.join("MetadataOnly")).unwrap();
+    std::fs::write(cd_root.join("MetadataOnly").join("poster.jpg"), "poster").unwrap();
+    std::fs::write(cd_root.join("MetadataOnly").join("movie.nfo"), "nfo").unwrap();
+    std::fs::create_dir_all(cd_root.join("HasVideo").join("Season 1")).unwrap();
+    std::fs::write(
+        cd_root.join("HasVideo").join("Season 1").join("E01.mkv"),
+        "video",
+    )
+    .unwrap();
+    std::fs::create_dir_all(strm_root.join("MovieFolder")).unwrap();
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&database_url)
+        .await
+        .expect("connect insights test database");
+    db::migrate(&pool)
+        .await
+        .expect("run insights test migrations");
+    reset_and_seed_db(&pool).await;
+
+    let username = create_test_user(&pool).await;
+    let app = api::router(
+        pool.clone(),
+        test_settings(&database_url, tmp.path(), strm_root),
+    );
+    let (status, headers, body) = send(
+        &app,
+        Method::POST,
+        "/api/v2/auth/login",
+        Some(json!({
+            "username": username,
+            "password": "secret"
+        })),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let cookie = request_cookie(&headers);
+    let csrf = body["csrf"].as_str().unwrap().to_string();
+
+    let libraries = r#"[
+        {
+            "ItemId": "lib-movies",
+            "Name": "Movies",
+            "CollectionType": "movies",
+            "Locations": ["/strm/MovieFolder"]
+        }
+    ]"#;
+    let (emby_base, emby_requests) = spawn_fake_emby_sequence(vec![libraries]).await;
+    configure_emby(&pool, &emby_base).await;
+
+    let (status, _, task) = send(
+        &app,
+        Method::POST,
+        "/api/v2/cleanup/empty-folders",
+        Some(json!({
+            "lib": "Movies",
+            "limit": 10
+        })),
+        &[(COOKIE.as_str(), cookie), ("x-csrf-token", csrf)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    assert_eq!(task["kind"], json!("cleanup_empty_folders"));
+
+    let task = wait_for_task_status(&pool, task["id"].as_str().unwrap(), "done").await;
+    assert_eq!(task["result"]["lib"], json!("Movies"));
+    assert_eq!(task["result"]["folder"], json!("MovieFolder"));
+    assert_eq!(task["result"]["total_scanned"], json!(2));
+    assert_eq!(task["result"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(task["result"]["items"][0]["folder"], json!("MetadataOnly"));
+    assert_eq!(task["result"]["items"][0]["other_files"], json!(2));
+    assert_eq!(task["result"]["warnings"], json!([]));
+    assert!(
+        cd_root.join("MetadataOnly").exists(),
+        "scan must not delete"
+    );
+
+    let emby_requests = emby_requests.lock().unwrap();
+    assert_eq!(emby_requests.len(), 1);
+    assert!(
+        emby_requests[0].starts_with("GET /Library/VirtualFolders?api_key=secret-key"),
+        "{}",
+        emby_requests[0]
     );
 }
 

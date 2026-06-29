@@ -269,7 +269,10 @@ async fn emby_client_lists_library_items_for_manage_picker() {
     let (base_url, requests) = spawn_fake_emby_many(vec![items]).await;
     let client = EmbyClient::new(base_url, "secret-key", reqwest::Client::new());
 
-    let found = client.library_items("lib movies", "Movie", 10).await.unwrap();
+    let found = client
+        .library_items("lib movies", "Movie", 10)
+        .await
+        .unwrap();
 
     assert_eq!(found.items.len(), 1);
     assert_eq!(found.total_record_count, Some(1));
@@ -283,11 +286,16 @@ async fn emby_client_lists_library_items_for_manage_picker() {
     assert_eq!(requests.len(), 1);
     assert!(requests[0].starts_with("GET /Items?"), "{}", requests[0]);
     assert!(
-        requests[0].contains("ParentId=lib%20movies") || requests[0].contains("ParentId=lib+movies"),
+        requests[0].contains("ParentId=lib%20movies")
+            || requests[0].contains("ParentId=lib+movies"),
         "{}",
         requests[0]
     );
-    assert!(requests[0].contains("IncludeItemTypes=Movie"), "{}", requests[0]);
+    assert!(
+        requests[0].contains("IncludeItemTypes=Movie"),
+        "{}",
+        requests[0]
+    );
     assert!(
         requests[0].contains("Fields=Path%2CProductionYear%2CProviderIds")
             || requests[0].contains("Fields=Path,ProductionYear,ProviderIds"),

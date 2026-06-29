@@ -8,7 +8,7 @@ services:
       args:
         EMBY_MANAGER_UID: ${EMBY_MANAGER_UID:-10001}
         EMBY_MANAGER_GID: ${EMBY_MANAGER_GID:-10001}
-    image: ghcr.io/ggttol/emby-manager:rs-dev
+    image: ghcr.io/ggttol/emby-manager:main
     container_name: emby-manager-rs
     user: "${EMBY_MANAGER_UID:-10001}:${EMBY_MANAGER_GID:-10001}"
     depends_on:

@@ -240,7 +240,7 @@ const autostrmStatus = {
 
 const cleanupSummary = {
   ok: true,
-  complete_business_port: false,
+  complete_business_port: true,
   meta: readonlyMeta,
   task_history: taskHistory,
   catalog: {
@@ -262,6 +262,49 @@ const cleanupSummary = {
   },
   schedules: { total: 2, enabled: 1, last_errors: 0 },
   logs: { errors_7d: 1, warnings_7d: 2, last_error_at: '2026-06-28T00:02:00Z' },
+  cleanup_candidates: [
+    {
+      id: 'movie-old',
+      item_id: 'movie-old',
+      lib: '电影',
+      name: '旧电影',
+      folder: '旧电影 [tmdb-100]',
+      path: '/strm/电影/旧电影 [tmdb-100]',
+      tmdb: '100',
+      rating: 4.2,
+      year: 1995,
+      size_gb: null,
+      score: 82.5,
+      total_score: 82.5,
+      scores: { rating: 35, idle: 30, size: 17.5 },
+      reasons: ['低评分', '长期未播放'],
+      dimensions: {
+        rating: { score: 35, value: '4.2', reason: '低于阈值' },
+        idle: { score: 30, value: '420 天', reason: '长时间未播放' },
+        size: { score: 17.5, value: '48 GB', reason: '占用较大', warning: '挂载统计可能滞后' }
+      }
+    },
+    {
+      id: 'show-stale',
+      item_id: 'show-stale',
+      lib: '剧集',
+      name: '冷门剧',
+      folder: '冷门剧',
+      path: '/strm/剧集/冷门剧',
+      tmdb: null,
+      rating: null,
+      year: 2020,
+      size_gb: null,
+      score: 66,
+      total_score: 66,
+      scores: { meta: 40, idle: 26 },
+      reasons: ['缺少元数据'],
+      dimensions: {
+        meta: { score: 40, value: 'no tmdb', reason: '缺少 tmdbid', warning: '元数据待刷新' },
+        idle: { score: 26, value: '300 天', reason: '长时间未播放' }
+      }
+    }
+  ],
   todos: [{ severity: 'medium', area: 'tasks', message: '存在失败任务', count: 1, source: 'task_runs' }],
   warnings: []
 };
@@ -496,6 +539,9 @@ describe('App shell', () => {
   it('renders the dashboard read-only overview with csrf protected insight calls', async () => {
     let cleanupCalled = false;
     let gapsCalled = false;
+    let posterTodoCalled = false;
+    let dedupTodoCalled = false;
+    let zhuigengTodoCalled = false;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/system/summary') {
         return jsonResponse(systemSummary);
@@ -517,6 +563,37 @@ describe('App shell', () => {
       if (url.pathname === '/api/v2/autostrm/status') {
         return jsonResponse(autostrmStatus);
       }
+      if (url.pathname === '/api/v2/posters/detect-mismatch') {
+        posterTodoCalled = true;
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        return jsonResponse({
+          ok: true,
+          scanned_libraries: 1,
+          scanned_items: 3,
+          total: 2,
+          missing_primary_total: 2,
+          mismatch_total: 0,
+          truncated: false,
+          warnings: [],
+          items: [
+            { id: 'series-a', emby_name: '剧 A', name: '剧 A', lib: '剧集', type: 'Series', path: null, folder: '剧 A', folder_clean: '剧 A', tmdb: '100', declared_tmdb: null, has_poster: false, score: 40, reasons: [], signals: [] },
+            { id: 'movie-a', emby_name: '电影 A', name: '电影 A', lib: '电影', type: 'Movie', path: null, folder: '电影 A', folder_clean: '电影 A', tmdb: '200', declared_tmdb: null, has_poster: false, score: 40, reasons: [], signals: [] }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/dedup/duplicates') {
+        dedupTodoCalled = true;
+        return jsonResponse({
+          dups: [{ tmdb: '100', keep: { lib: '电影', folder: 'A [tmdb-100]', score: 10, n: 1 }, remove: [] }],
+          review: [{ tmdb: '200', why: '人工确认', rows: [] }]
+        });
+      }
+      if (url.pathname === '/api/v2/zhuigeng') {
+        zhuigengTodoCalled = true;
+        return jsonResponse(zhuigengStatus);
+      }
       return undefined;
     });
 
@@ -526,9 +603,14 @@ describe('App shell', () => {
     expect(await screen.findByText('需要处理 unmatched')).toBeInTheDocument();
     expect(await screen.findByText('失败扫库')).toBeInTheDocument();
     expect(await screen.findByText('120 / 9')).toBeInTheDocument();
+    expect(await screen.findByText('旧版待办计数')).toBeInTheDocument();
+    expect(screen.getAllByText('无海报 1').length).toBeGreaterThan(0);
     await waitFor(() => {
       expect(cleanupCalled).toBe(true);
       expect(gapsCalled).toBe(true);
+      expect(posterTodoCalled).toBe(true);
+      expect(dedupTodoCalled).toBe(true);
+      expect(zhuigengTodoCalled).toBe(true);
     });
   });
 
@@ -1009,6 +1091,8 @@ describe('App shell', () => {
     let scanAiringCalled = false;
     let gapsSummaryCalled = false;
     let scanPayload: unknown = null;
+    let seriesDetailQuery = '';
+    let archivePayload: unknown = null;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/zhuigeng') {
         expect(init?.method || 'GET').toBe('GET');
@@ -1042,8 +1126,33 @@ describe('App shell', () => {
         return jsonResponse({
           libraries: [
             { id: 'lib-shows', name: '剧集', type: 'tvshows', paths: ['/strm/剧集'] },
+            { id: 'lib-ended', name: '完结剧库', type: 'tvshows', paths: ['/strm/完结剧库'] },
             { id: 'lib-movies', name: '电影', type: 'movies', paths: ['/strm/电影'] }
           ]
+        });
+      }
+      if (url.pathname === '/api/v2/manage/move/batch/execute') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        archivePayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: '77777777-7777-4777-8777-777777777777',
+          kind: 'manage_move_batch_execute',
+          label: '批量移动: 剧集 -> 完结剧库 (1 项)',
+          source: 'manual',
+          params: {},
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          status_text: '排队中',
+          result: null,
+          error: null,
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:03:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:03:00Z'
         });
       }
       if (url.pathname === '/api/v2/gaps/scan-lib') {
@@ -1068,6 +1177,24 @@ describe('App shell', () => {
           started_at: null,
           ended_at: null,
           updated_at: '2026-06-28T00:03:00Z'
+        });
+      }
+      if (url.pathname === '/api/v2/gaps/series') {
+        expect(init?.method || 'GET').toBe('GET');
+        seriesDetailQuery = url.searchParams.get('id') || '';
+        return jsonResponse({
+          ok: true,
+          id: seriesDetailQuery,
+          mode: 'season',
+          have: 2,
+          gaps: 1,
+          max_ep: 3,
+          tmdb_max: 3,
+          noidx: 0,
+          gap_list: [],
+          seasons: [
+            { season: 1, count: 2, lo: 1, hi: 3, gaps: ['2'], gapcount: 1 }
+          ]
         });
       }
       if (url.pathname === '/api/v2/tasks/44444444-4444-4444-8444-444444444444') {
@@ -1108,6 +1235,19 @@ describe('App shell', () => {
     expect(screen.getByText('示例剧')).toBeInTheDocument();
     expect(screen.getByText('完结剧')).toBeInTheDocument();
     expect(screen.getByText('求 示例剧 [tmdb:100] — S01 E3')).toBeInTheDocument();
+    expect(await screen.findByRole('combobox', { name: '归档目标库' })).toHaveValue('完结剧库');
+    fireEvent.click(screen.getByLabelText('选择归档：完结剧'));
+    fireEvent.click(screen.getByRole('button', { name: /智能归档 1/ }));
+    expect(await screen.findByText('确认智能归档完结剧')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认归档' }));
+    await waitFor(() => expect(archivePayload).toEqual({
+      from_lib: '剧集',
+      to_lib: '完结剧库',
+      items: [{ folder: '完结剧 [tmdb-200]', item_id: 'series-200', to_folder: null }],
+      on_conflict: 'smart',
+      reason: '追更完结剧智能归档'
+    }));
+    expect(await screen.findByText(/归档任务：批量移动: 剧集 -> 完结剧库/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'scan-airing' }));
     await waitFor(() => expect(scanAiringCalled).toBe(true));
     expect(await screen.findByText('在更扫描结果')).toBeInTheDocument();
@@ -1126,25 +1266,69 @@ describe('App shell', () => {
     expect(await screen.findByText('全库缺集报告', undefined, { timeout: 2500 })).toBeInTheDocument();
     expect(screen.getByText('剧 A')).toBeInTheDocument();
     expect(screen.getByText('S01 E2')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Emby Series Id'), { target: { value: 'series-a' } });
+    fireEvent.click(screen.getByRole('button', { name: '查询缺集' }));
+    await waitFor(() => expect(seriesDetailQuery).toBe('series-a'));
+    expect(await screen.findByText('series-a')).toBeInTheDocument();
+    expect(screen.getByText('S01')).toBeInTheDocument();
+    expect(screen.getByText('E2')).toBeInTheDocument();
     await waitFor(() => expect(calls.length).toBeGreaterThanOrEqual(2));
   });
 
   it('renders cleanup and dedup duplicates with minimal execute flow', async () => {
     const calls: string[] = [];
     const emptyPayloads: unknown[] = [];
+    const cleanupPayloads: unknown[] = [];
+    let cleanupBatchPayload: unknown = null;
+    let refreshNoRatingPayload: unknown = null;
+    let dedupExecutePayload: unknown = null;
     let replacePayload: unknown = null;
     let autoAllCalled = false;
     let cleanupSuggestCalls = 0;
     let cleanupTaskStarted = false;
     let cleanupTaskPolls = 0;
     mockApi((url, init) => {
+      if (url.pathname === '/api/v2/libraries') {
+        return jsonResponse({
+          libraries: [
+            { id: 'movie-lib', name: '电影', type: 'movies', paths: ['/strm/电影'] },
+            { id: 'show-lib', name: '剧集', type: 'tvshows', paths: ['/strm/剧集'] }
+          ]
+        });
+      }
       if (url.pathname === '/api/v2/cleanup/suggest') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        cleanupPayloads.push(JSON.parse(String(init?.body)));
         cleanupSuggestCalls += 1;
         calls.push(url.pathname);
         return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/refresh-no-rating') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        refreshNoRatingPayload = JSON.parse(String(init?.body));
+        calls.push(url.pathname);
+        return jsonResponse({
+          id: 'cdcdcdcd-cdcd-4cdc-8cdc-cdcdcdcdcdcd',
+          kind: 'cleanup_refresh_no_rating',
+          label: '刷新无评分',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          source: 'api',
+          params: {},
+          status_text: '排队中',
+          result: null,
+          error: null,
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z'
+        });
       }
       if (url.pathname === '/api/v2/cleanup/empty-dirs') {
         const headers = init?.headers as Headers;
@@ -1224,6 +1408,31 @@ describe('App shell', () => {
           }]
         });
       }
+      if (url.pathname === '/api/v2/manage/delete/batch/execute') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        cleanupBatchPayload = JSON.parse(String(init?.body));
+        calls.push(url.pathname);
+        return jsonResponse({
+          id: 'dededede-dede-4ded-8ded-dededededede',
+          kind: 'manage_delete_batch_execute',
+          label: '智能清理删除: 1 项',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          source: 'api',
+          params: {},
+          status_text: '排队中',
+          result: null,
+          error: null,
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z'
+        });
+      }
       if (url.pathname === '/api/v2/dedup/duplicates') {
         calls.push(url.pathname);
         return jsonResponse({
@@ -1257,6 +1466,25 @@ describe('App shell', () => {
           results: [{ tmdb: '100', ok: true, kept: '示例剧 [tmdb-100]', removed: 1, err: null }]
         });
       }
+      if (url.pathname === '/api/v2/dedup/execute') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        dedupExecutePayload = JSON.parse(String(init?.body));
+        calls.push(url.pathname);
+        return jsonResponse({
+          ok: true,
+          tmdb: '200',
+          removed: [{
+            lib: '剧集',
+            folder: '复核剧 B [tmdb-200]',
+            deleted_from: ['/volume1/strm/剧集/复核剧 B [tmdb-200]'],
+            emby_updates: [{ Path: '/strm/剧集/复核剧 B [tmdb-200]', UpdateType: 'Deleted' }],
+            notified: true,
+            undo_id: '66666666-6666-4666-8666-666666666666'
+          }]
+        });
+      }
       if (url.pathname === '/api/v2/dedup/replace') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
@@ -1284,26 +1512,77 @@ describe('App shell', () => {
     fireEvent.click(await screen.findByRole('button', { name: '智能清理' }));
     expect(await screen.findByText('智能清理预检')).toBeInTheDocument();
     expect(screen.getByText('存在失败任务')).toBeInTheDocument();
-    expect(screen.getByText(/当前 Rust 版智能清理只读预检/)).toBeInTheDocument();
+    expect(screen.getByText(/size \/ idle 仍受挂载状态、播放记录和媒体元数据完整度影响/)).toBeInTheDocument();
+    expect(await screen.findByText('旧电影')).toBeInTheDocument();
+    expect(screen.getByText(/低评分；长期未播放/)).toBeInTheDocument();
+    expect(screen.getByText(/size: 17.5 · 48 GB · 挂载统计可能滞后/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('智能清理媒体库'), { target: { value: '电影' } });
+    fireEvent.change(screen.getByLabelText('智能清理 top'), { target: { value: '25' } });
+    fireEvent.change(screen.getByLabelText('智能清理 min_score'), { target: { value: '70' } });
+    fireEvent.click(screen.getByLabelText('元数据'));
+    fireEvent.click(screen.getByRole('button', { name: '生成建议' }));
+    await waitFor(() => expect(cleanupPayloads).toContainEqual({
+      lib: '电影',
+      top: 25,
+      min_score: 70,
+      dimensions: ['rating', 'idle', 'size']
+    }));
+    fireEvent.click(screen.getByLabelText('选择清理候选：旧电影'));
+    fireEvent.click(screen.getByRole('button', { name: /删除选中 1/ }));
+    expect(await screen.findByText('确认删除智能清理候选')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认删除选中' }));
+    await waitFor(() => expect(cleanupBatchPayload).toEqual({
+      items: [{
+        lib: '电影',
+        folder: '旧电影 [tmdb-100]',
+        item_id: 'movie-old',
+        reason: '智能清理 score 82.5'
+      }],
+      reason: '智能清理 min_score 70'
+    }));
+    expect(await screen.findByText(/已创建任务：智能清理删除: 1 项/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '刷新无评分' }));
+    await waitFor(() => expect(refreshNoRatingPayload).toEqual({ lib: '电影' }));
+    expect(await screen.findByText(/无评分刷新任务：刷新无评分 · pending/)).toBeInTheDocument();
     expect(await screen.findByText('可清理')).toBeInTheDocument();
     expect(screen.getByText('电影/空目录')).toBeInTheDocument();
     expect(screen.getByText('电影/poster.jpg')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('空目录清理 lib'), { target: { value: '电影' } });
     fireEvent.click(screen.getByRole('button', { name: '清理空 STRM 目录' }));
     expect(await screen.findByText('确认清理空 STRM 目录')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '确认清理' }));
-    await waitFor(() => expect(emptyPayloads).toEqual([{ execute: false }, { execute: true }]));
+    await waitFor(() => expect(emptyPayloads).toEqual([
+      { execute: false, lib: null },
+      { execute: false, lib: null },
+      { execute: true, lib: '电影' }
+    ]));
     expect(await screen.findByText(/已创建任务：清理空 STRM 目录/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '任务中心' }));
     await waitFor(() => expect(within(getTaskCenterDrawer()).getByText('清理空 STRM 目录')).toBeInTheDocument());
     clickTaskCenterRefresh();
     await waitFor(() => expect(cleanupSuggestCalls).toBeGreaterThanOrEqual(2));
-    await waitFor(() => expect(emptyPayloads).toEqual([{ execute: false }, { execute: true }, { execute: false }]));
+    await waitFor(() => expect(emptyPayloads).toEqual([
+      { execute: false, lib: null },
+      { execute: false, lib: null },
+      { execute: true, lib: '电影' },
+      { execute: false, lib: '电影' }
+    ]));
     fireEvent.click(within(getTaskCenterDrawer()).getByRole('button', { name: '关闭' }));
 
     fireEvent.click(screen.getByRole('button', { name: '去重' }));
     expect(await screen.findByText('去重闭环')).toBeInTheDocument();
-    expect(screen.getByText(/示例剧 重复 \[tmdb-100\]/)).toBeInTheDocument();
+    expect(screen.getAllByText(/示例剧 重复 \[tmdb-100\]/).length).toBeGreaterThan(0);
     expect(screen.getByText('分数接近，需要人工确认')).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('选择去重删除：剧集/复核剧 B [tmdb-200]'));
+    fireEvent.click(screen.getByRole('button', { name: /人工删除 1/ }));
+    expect(await screen.findByText('确认人工去重删除')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认删除选中重复目录' }));
+    await waitFor(() => expect(dedupExecutePayload).toEqual({
+      tmdb: '200',
+      remove: [{ lib: '剧集', folder: '复核剧 B [tmdb-200]' }],
+      reason: '人工复核去重 1 项'
+    }));
+    expect(await screen.findByText('人工去重结果')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'auto-all' }));
     expect(await screen.findByText('确认自动去重')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '确认执行 auto-all' }));
@@ -1326,7 +1605,10 @@ describe('App shell', () => {
     await waitFor(() => expect(calls).toEqual(expect.arrayContaining([
       '/api/v2/cleanup/suggest',
       '/api/v2/cleanup/empty-dirs',
+      '/api/v2/cleanup/refresh-no-rating',
+      '/api/v2/manage/delete/batch/execute',
       '/api/v2/dedup/duplicates',
+      '/api/v2/dedup/execute',
       '/api/v2/dedup/auto-all',
       '/api/v2/dedup/replace'
     ])));
@@ -1763,6 +2045,7 @@ describe('App shell', () => {
   });
 
   it('searches catalog and creates catalog transfer execute tasks with csrf', async () => {
+    const planPayloads: unknown[] = [];
     const executePayloads: unknown[] = [];
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/catalog/stats') {
@@ -1801,6 +2084,43 @@ describe('App shell', () => {
           ]
         });
       }
+      if (url.pathname === '/api/v2/catalog/transfer-plan') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        const payload = JSON.parse(String(init?.body));
+        planPayloads.push(payload);
+        const item = payload.item;
+        const isOffline = item.link_type === 'magnet' || item.link_type === 'ed2k';
+        const action = isOffline ? 'offline_download' : item.link_type === 'share115' ? 'save_share' : 'unsupported';
+        return jsonResponse({
+          ok: action !== 'unsupported',
+          transfer: action !== 'unsupported',
+          action,
+          link_type: item.link_type,
+          is_pkg: Boolean(item.is_pkg),
+          label: item.name,
+          target: payload.cid ? { cid: payload.cid } : { lib: payload.lib },
+          save: action === 'save_share'
+            ? {
+                endpoint: '/api/v2/c115/save',
+                method: 'POST',
+                share: item.share,
+                receive_code: item.rc,
+                payload: { url: item.link, pwd: item.rc, lib: payload.lib, cid: payload.cid, label: item.name }
+              }
+            : null,
+          offline: action === 'offline_download'
+            ? {
+                endpoint: '/api/v2/c115/offline',
+                method: 'POST',
+                protocol: item.link_type,
+                payload: { url: item.link, lib: payload.lib, cid: payload.cid, label: item.name }
+              }
+            : null,
+          unsupported: action === 'unsupported' ? { link: item.link, reason: 'unsupported type' } : null
+        });
+      }
       if (url.pathname === '/api/v2/catalog/transfer/execute') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
@@ -1827,7 +2147,7 @@ describe('App shell', () => {
           source: 'api'
         });
       }
-      if (['/api/v2/catalog/transfer-plan', '/api/v2/c115/save', '/api/v2/c115/offline'].includes(url.pathname)) {
+      if (['/api/v2/c115/save', '/api/v2/c115/offline'].includes(url.pathname)) {
         throw new Error(`legacy catalog transfer endpoint called: ${url.pathname}`);
       }
       return undefined;
@@ -1845,6 +2165,19 @@ describe('App shell', () => {
     expect(screen.getByText('The Magnet')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '转存' }));
+    await waitFor(() => expect(planPayloads).toHaveLength(1));
+    expect(planPayloads[0]).toEqual({
+      item: {
+        name: 'The Movie',
+        sheet: '电影',
+        link: 'https://115.com/s/abc?password=xy12',
+        link_type: 'share115',
+        is_pkg: false,
+        share: 'abc',
+        rc: 'xy12'
+      },
+      lib: '电影'
+    });
     fireEvent.click(screen.getAllByRole('button', { name: '转存' }).at(-1)!);
 
     await waitFor(() => expect(executePayloads).toHaveLength(1));
@@ -1864,6 +2197,33 @@ describe('App shell', () => {
 
     fireEvent.click(screen.getByRole('button', { name: '全选' }));
     fireEvent.click(screen.getByRole('button', { name: '转存选中' }));
+    await waitFor(() => expect(planPayloads).toHaveLength(3));
+    expect(planPayloads.slice(1)).toEqual([
+      {
+        item: {
+          name: 'The Movie',
+          sheet: '电影',
+          link: 'https://115.com/s/abc?password=xy12',
+          link_type: 'share115',
+          is_pkg: false,
+          share: 'abc',
+          rc: 'xy12'
+        },
+        lib: '电影'
+      },
+      {
+        item: {
+          name: 'The Magnet',
+          sheet: '电影',
+          link: 'magnet:?xt=urn:btih:123',
+          link_type: 'magnet',
+          is_pkg: false,
+          share: null,
+          rc: null
+        },
+        lib: '电影'
+      }
+    ]);
     fireEvent.click(screen.getByRole('button', { name: '开始提交' }));
 
     await waitFor(() => expect(executePayloads).toHaveLength(2));

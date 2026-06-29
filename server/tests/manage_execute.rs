@@ -1,7 +1,9 @@
 use axum::{Json, extract::State};
 use emby_manager::{
     db,
-    media_fs::{self, ManageDeleteRequest, ManageMoveRequest},
+    media_fs::{
+        self, ManageDeleteRequest, ManageMoveBatchItem, ManageMoveBatchRequest, ManageMoveRequest,
+    },
     settings::Settings,
     state::AppState,
 };
@@ -264,6 +266,7 @@ async fn move_execute_moves_media_rebuilds_strm_refreshes_target_and_writes_undo
             to_folder: Some("Done/Movie".to_string()),
             item_id: Some("item-move".to_string()),
             reason: Some(format!("move-execute-{}", Uuid::new_v4())),
+            on_conflict: None,
         }),
     )
     .await
@@ -326,6 +329,202 @@ async fn move_execute_moves_media_rebuilds_strm_refreshes_target_and_writes_undo
     assert_eq!(undo_payload["to_folder"], "Done/Movie");
     assert_eq!(undo_payload["emby_id"], "item-move");
     assert_eq!(undo_payload["strm_count"], 1);
+}
+
+#[tokio::test]
+async fn move_execute_uses_emby_path_folder_when_library_name_differs() {
+    let _guard = DB_LOCK.lock().await;
+    let Some((_tmp, state)) = test_state().await else {
+        eprintln!("skipping manage execute DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
+        return;
+    };
+    let libraries = r#"[
+        {"ItemId":"movie-lib","Name":"Movies","CollectionType":"movies","Locations":["/strm/MovieFolder"]},
+        {"ItemId":"archive-lib","Name":"Archive","CollectionType":"movies","Locations":["/strm/ArchiveFolder"]}
+    ]"#;
+    let (base_url, requests) = spawn_fake_emby(vec![
+        FakeResponse::json(libraries),
+        FakeResponse::json(libraries),
+        FakeResponse::json(libraries),
+        FakeResponse::no_content(),
+        FakeResponse::json(r#"{"Items":[]}"#),
+        FakeResponse::no_content(),
+        FakeResponse::no_content(),
+    ])
+    .await;
+    configure_emby(&state, &base_url).await;
+
+    let src_cd = state.settings.cd_root.join("MovieFolder/A/Movie");
+    let dst_cd = state.settings.cd_root.join("ArchiveFolder/Done/Movie");
+    let old_strm = state.settings.strm_root.join("MovieFolder/A/Movie");
+    let new_strm = state.settings.strm_root.join("ArchiveFolder/Done/Movie");
+    create_library_roots(&state, "MovieFolder");
+    create_library_roots(&state, "ArchiveFolder");
+    std::fs::create_dir_all(src_cd.join("Season 1")).unwrap();
+    std::fs::create_dir_all(&old_strm).unwrap();
+    std::fs::write(src_cd.join("Season 1/E01.mkv"), "media").unwrap();
+    std::fs::write(old_strm.join("old.strm"), "old").unwrap();
+
+    let task = media_fs::execute_move(
+        State(state.clone()),
+        Json(ManageMoveRequest {
+            from_lib: "Movies".to_string(),
+            from_folder: "A/Movie".to_string(),
+            to_lib: "Archive".to_string(),
+            to_folder: Some("Done/Movie".to_string()),
+            item_id: Some("item-mapped".to_string()),
+            reason: Some(format!("move-mapped-{}", Uuid::new_v4())),
+            on_conflict: None,
+        }),
+    )
+    .await
+    .expect("move execute should create a task")
+    .0;
+
+    let task = wait_for_task_status(&state, task.id, "done").await;
+    assert_eq!(task["result"]["ok"], true);
+    assert_eq!(task["result"]["from_lib"], "Movies");
+    assert_eq!(task["result"]["to_lib"], "Archive");
+    assert!(!src_cd.exists());
+    assert!(dst_cd.join("Season 1/E01.mkv").exists());
+    assert!(!old_strm.exists());
+    assert_eq!(
+        std::fs::read_to_string(new_strm.join("Season 1/E01.strm")).unwrap(),
+        "/media/ArchiveFolder/Done/Movie/Season 1/E01.mkv"
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 7);
+    assert!(
+        requests[0].starts_with("GET /Library/VirtualFolders?"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[1].starts_with("GET /Library/VirtualFolders?"),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        requests[2].starts_with("GET /Library/VirtualFolders?"),
+        "{}",
+        requests[2]
+    );
+    assert!(
+        requests[3].starts_with("DELETE /Items/item-mapped?"),
+        "{}",
+        requests[3]
+    );
+    let notify_body = request_body(&requests[5]);
+    assert!(notify_body.contains(r#""Path":"/strm/MovieFolder/A/Movie""#));
+    assert!(
+        requests[6].starts_with("POST /Items/archive-lib/Refresh?"),
+        "{}",
+        requests[6]
+    );
+}
+
+#[tokio::test]
+async fn move_batch_smart_deletes_source_when_target_has_more_strm() {
+    let _guard = DB_LOCK.lock().await;
+    let Some((_tmp, state)) = test_state().await else {
+        eprintln!("skipping manage execute DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
+        return;
+    };
+    let libraries = r#"[
+        {"ItemId":"movie-lib","Name":"Movies","CollectionType":"movies","Locations":["/strm/Movies"]},
+        {"ItemId":"archive-lib","Name":"Archive","CollectionType":"movies","Locations":["/strm/Archive"]}
+    ]"#;
+    let (base_url, requests) = spawn_fake_emby(vec![
+        FakeResponse::json(libraries),
+        FakeResponse::no_content(),
+        FakeResponse::json(r#"{"Items":[]}"#),
+        FakeResponse::no_content(),
+    ])
+    .await;
+    configure_emby(&state, &base_url).await;
+    create_library_roots(&state, "Movies");
+    create_library_roots(&state, "Archive");
+
+    let src_cd = state.settings.cd_root.join("Movies/Show");
+    let dst_cd = state.settings.cd_root.join("Archive/Show");
+    let src_strm = state.settings.strm_root.join("Movies/Show");
+    let dst_strm = state.settings.strm_root.join("Archive/Show");
+    std::fs::create_dir_all(&src_cd).unwrap();
+    std::fs::create_dir_all(&dst_cd).unwrap();
+    std::fs::create_dir_all(&src_strm).unwrap();
+    std::fs::create_dir_all(&dst_strm).unwrap();
+    std::fs::write(src_cd.join("E01.mkv"), "source media").unwrap();
+    std::fs::write(dst_cd.join("E01.mkv"), "target media").unwrap();
+    std::fs::write(src_strm.join("E01.strm"), "/media/Movies/Show/E01.mkv").unwrap();
+    std::fs::write(dst_strm.join("E01.strm"), "/media/Archive/Show/E01.mkv").unwrap();
+    std::fs::write(dst_strm.join("E02.strm"), "/media/Archive/Show/E02.mkv").unwrap();
+
+    let task = media_fs::execute_move_batch(
+        State(state.clone()),
+        Json(ManageMoveBatchRequest {
+            from_lib: "Movies".to_string(),
+            to_lib: "Archive".to_string(),
+            items: vec![ManageMoveBatchItem {
+                folder: "Show".to_string(),
+                item_id: Some("item-smart".to_string()),
+                to_folder: None,
+            }],
+            on_conflict: Some("smart".to_string()),
+            reason: Some(format!("move-batch-smart-{}", Uuid::new_v4())),
+        }),
+    )
+    .await
+    .expect("move batch should create task")
+    .0;
+
+    assert_eq!(task.kind, "manage_move_batch_execute");
+    let task = wait_for_task_status(&state, task.id, "done").await;
+    assert_eq!(task["result"]["ok"], true);
+    assert_eq!(task["result"]["ok_count"], json!(1));
+    assert_eq!(task["result"]["smart_count"], json!(1));
+    assert_eq!(
+        task["result"]["results"][0]["smart_action"],
+        json!("deleted_source")
+    );
+    assert_eq!(
+        task["result"]["results"][0]["result"]["src_count"],
+        json!(1)
+    );
+    assert_eq!(
+        task["result"]["results"][0]["result"]["dst_count"],
+        json!(2)
+    );
+    assert!(!src_cd.exists(), "source cd should be deleted");
+    assert!(!src_strm.exists(), "source strm should be deleted");
+    assert!(dst_cd.exists(), "target cd should be kept");
+    assert!(
+        dst_strm.join("E02.strm").exists(),
+        "target strm should be kept"
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 4);
+    assert!(requests[0].starts_with("GET /Library/VirtualFolders?"));
+    assert!(requests[1].starts_with("DELETE /Items/item-smart?"));
+    assert!(requests[2].starts_with("GET /Items?"));
+    assert!(requests[3].starts_with("POST /Library/Media/Updated?"));
+    drop(requests);
+
+    let undo_payload = undo_payload_for_op(
+        &state,
+        task["result"]["results"][0]["result"]["undo_id"]
+            .as_str()
+            .unwrap(),
+        "smart_archive",
+    )
+    .await;
+    assert_eq!(undo_payload["from"], "Movies");
+    assert_eq!(undo_payload["to"], "Archive");
+    assert_eq!(undo_payload["folder"], "Show");
+    assert_eq!(undo_payload["action"], "deleted_source");
+    assert_eq!(undo_payload["src_n"], json!(1));
+    assert_eq!(undo_payload["dst_n"], json!(2));
 }
 
 async fn configure_emby(state: &AppState, base_url: &str) {

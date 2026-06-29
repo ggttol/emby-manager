@@ -459,18 +459,16 @@ async fn run_schedule_worker(
 async fn run_scheduled_scan_all(
     state: &AppState,
     task_id: Uuid,
-    _params: &Value,
+    params: &Value,
 ) -> AppResult<Value> {
-    tasks::set_total(&state.pool, task_id, 1).await?;
-    tasks::set_progress(&state.pool, task_id, 0, "触发 Emby 全库刷新").await?;
     check_schedule_cancelled(state, task_id).await?;
     let client = scheduled_emby_client(state).await?;
-    let code = client.refresh_library().await?;
-    tasks::set_progress(&state.pool, task_id, 1, "Emby 全库刷新已触发").await?;
-    Ok(serde_json::json!({
-        "action": "refresh_library",
-        "refresh_code": code,
-    }))
+    match media_fs::run_scheduled_scan_all_libraries(state, task_id, &client, params).await {
+        Err(AppError::Conflict(message)) if message == media_fs::SCAN_TASK_CANCELLED_SENTINEL => {
+            Err(AppError::Conflict(SCHEDULE_CANCELLED_SENTINEL.to_string()))
+        }
+        other => other,
+    }
 }
 
 async fn run_scheduled_zhuigeng_scan_airing(
