@@ -180,6 +180,16 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
         ],
         "TotalRecordCount": 3
     }"#;
+    let low_strm = strm_root.join("Movies").join("Low Old Missing");
+    let low_media = tmp.path().join("cd").join("Movies").join("Low Old Missing");
+    std::fs::create_dir_all(&low_strm).unwrap();
+    std::fs::create_dir_all(&low_media).unwrap();
+    std::fs::write(low_media.join("movie.mkv"), vec![0_u8; 4096]).unwrap();
+    std::fs::write(
+        low_strm.join("movie.strm"),
+        "/media/Movies/Low Old Missing/movie.mkv",
+    )
+    .unwrap();
     let (emby_base, emby_requests) = spawn_fake_emby_sequence(vec![
         libraries, items, libraries, items, libraries, items, libraries, items, "{}",
     ])
@@ -278,17 +288,14 @@ async fn insights_endpoints_return_readonly_coverage_and_todos() {
     assert_eq!(status, StatusCode::OK, "{size_only}");
     assert_eq!(size_only["cleanup_candidates"].as_array().unwrap().len(), 1);
     assert_eq!(
+        size_only["cleanup_candidates"][0]["item_id"],
+        json!("low-old-missing")
+    );
+    assert_eq!(
         size_only["cleanup_candidates"][0]["dimensions"]["size"]["warning"],
-        json!("no_safe_local_size_metadata")
+        json!(null)
     );
-    assert!(
-        size_only["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|warning| warning.as_str().unwrap_or_default().contains("size 维度")),
-        "{size_only}"
-    );
+    assert!(size_only["cleanup_candidates"][0]["size_gb"].is_number());
 
     let (status, _, refresh_no_rating) = send(
         &app,

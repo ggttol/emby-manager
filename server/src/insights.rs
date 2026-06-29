@@ -33,6 +33,7 @@ const EMPTY_DIR_CLEANUP_SAMPLE_LIMIT: usize = 20;
 const CLEANUP_SUGGEST_TOP_DEFAULT: usize = 20;
 const CLEANUP_SUGGEST_TOP_MAX: usize = 200;
 const CLEANUP_SUGGEST_ITEM_LIMIT: usize = 3000;
+const CLEANUP_SIZE_WALK_ENTRY_LIMIT: usize = 2000;
 const REFRESH_NO_RATING_LIMIT_DEFAULT: usize = 500;
 const REFRESH_NO_RATING_LIMIT_MAX: usize = 5000;
 const REFRESH_NO_RATING_SCAN_LIMIT: usize = 30_000;
@@ -433,7 +434,7 @@ pub async fn cleanup_summary(
             vec![
                 "评分建议接口本身只读；删除动作由 manage 接口二次确认后执行",
                 "refresh-no-rating 只触发 Emby 元数据刷新，不访问 115",
-                "size 维度不递归读取 CloudDrive/媒体文件大小，避免挂载被密集 stat 压垮",
+                "size 维度只做有上限的本地 filesystem metadata 统计，超限会标记 warning",
                 "strm 统计只看文件名和元数据，不读取文件内容",
             ],
         ),
@@ -630,12 +631,6 @@ async fn cleanup_candidates(
     let selected = select_cleanup_libraries(&libraries, req.lib.as_deref())?;
     let mut candidates = Vec::new();
 
-    if dimensions.iter().any(|dimension| dimension == "size") {
-        warnings.push(
-            "size 维度未读取 CloudDrive/媒体文件内容；仅当未来有安全本地文件元数据时才参与评分"
-                .to_string(),
-        );
-    }
     for library in selected {
         let Some(parent_id) = library.id.as_deref() else {
             warnings.push(format!("Emby 库「{}」缺少 ItemId，已跳过", library.name));
@@ -655,7 +650,9 @@ async fn cleanup_candidates(
             ));
         }
         for item in page.items {
-            if let Some(candidate) = score_cleanup_item(library, item, &dimensions, min_score) {
+            if let Some(candidate) =
+                score_cleanup_item(state, library, item, &dimensions, min_score)
+            {
                 candidates.push(candidate);
             }
         }
@@ -744,6 +741,7 @@ fn cleanup_item_types(library: &EmbyLibrary) -> &'static str {
 }
 
 fn score_cleanup_item(
+    state: &AppState,
     library: &EmbyLibrary,
     item: EmbyCleanupItem,
     dimensions: &[String],
@@ -752,6 +750,7 @@ fn score_cleanup_item(
     let mut score = 0.0;
     let mut reasons = Vec::new();
     let mut details = BTreeMap::new();
+    let mut size_gb = None;
 
     for dimension in dimensions {
         let detail = match dimension.as_str() {
@@ -759,12 +758,11 @@ fn score_cleanup_item(
             "meta" => score_meta(&item),
             "age" => score_age(&item),
             "idle" => score_idle(&item),
-            "size" => CleanupDimensionScore {
-                score: 0.0,
-                reason: "size 维度已降级，未读取本地媒体文件大小".to_string(),
-                value: item.path.clone(),
-                warning: Some("no_safe_local_size_metadata".to_string()),
-            },
+            "size" => {
+                let (detail, gb) = score_size(state, library, &item);
+                size_gb = gb;
+                detail
+            }
             _ => continue,
         };
         if detail.score > 0.0 {
@@ -799,7 +797,7 @@ fn score_cleanup_item(
         tmdb,
         rating: item.community_rating.map(round_score),
         year: item.production_year,
-        size_gb: None,
+        size_gb,
         score,
         total_score: score,
         scores,
@@ -946,6 +944,176 @@ fn score_idle(item: &EmbyCleanupItem) -> CleanupDimensionScore {
             value: Some(play_count.to_string()),
             warning: Some("last_played_unavailable".to_string()),
         },
+    }
+}
+
+fn score_size(
+    state: &AppState,
+    library: &EmbyLibrary,
+    item: &EmbyCleanupItem,
+) -> (CleanupDimensionScore, Option<f64>) {
+    let Some(path) = item.path.as_deref().and_then(non_empty_string) else {
+        return (
+            CleanupDimensionScore {
+                score: 0.0,
+                reason: "缺少媒体路径，无法统计大小".to_string(),
+                value: None,
+                warning: Some("path_unavailable".to_string()),
+            },
+            None,
+        );
+    };
+    let Some(local_path) = cleanup_size_path(state, library, &path) else {
+        return (
+            CleanupDimensionScore {
+                score: 0.0,
+                reason: "媒体路径无法安全映射到本地 root".to_string(),
+                value: Some(path),
+                warning: Some("local_path_unmapped".to_string()),
+            },
+            None,
+        );
+    };
+    let scan_root = if local_path.is_file() {
+        local_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or(local_path)
+    } else {
+        local_path
+    };
+    let scan = limited_size_scan(&scan_root, CLEANUP_SIZE_WALK_ENTRY_LIMIT);
+    let gb = bytes_to_gb(scan.bytes);
+    let warning = if !scan.exists {
+        Some("local_path_missing".to_string())
+    } else if scan.truncated {
+        Some("size_scan_truncated".to_string())
+    } else {
+        None
+    };
+    let score = size_score(gb);
+    (
+        CleanupDimensionScore {
+            score,
+            reason: if scan.exists {
+                format!(
+                    "本地大小 {:.2} GB{}",
+                    gb,
+                    if scan.truncated {
+                        "，统计已截断"
+                    } else {
+                        ""
+                    }
+                )
+            } else {
+                "本地路径不存在，无法统计大小".to_string()
+            },
+            value: Some(format!("{:.3}", gb)),
+            warning,
+        },
+        scan.exists.then_some(round_gb(gb)),
+    )
+}
+
+#[derive(Debug, Default)]
+struct SizeScan {
+    exists: bool,
+    bytes: u64,
+    truncated: bool,
+}
+
+fn limited_size_scan(path: &Path, entry_limit: usize) -> SizeScan {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return SizeScan::default();
+    };
+    if metadata.is_file() {
+        return SizeScan {
+            exists: true,
+            bytes: metadata.len(),
+            truncated: false,
+        };
+    }
+    if !metadata.is_dir() {
+        return SizeScan {
+            exists: true,
+            bytes: 0,
+            truncated: false,
+        };
+    }
+    let mut scan = SizeScan {
+        exists: true,
+        bytes: 0,
+        truncated: false,
+    };
+    for (index, entry) in WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .enumerate()
+    {
+        if index >= entry_limit {
+            scan.truncated = true;
+            break;
+        }
+        let file_type = entry.file_type();
+        if file_type.is_symlink() || !file_type.is_file() {
+            continue;
+        }
+        if let Ok(metadata) = entry.metadata() {
+            scan.bytes = scan.bytes.saturating_add(metadata.len());
+        }
+    }
+    scan
+}
+
+fn cleanup_size_path(state: &AppState, library: &EmbyLibrary, emby_path: &str) -> Option<PathBuf> {
+    let normalized = normalize_media_path(emby_path);
+    if let Some(strm_path) = map_container_path(&state.settings.strm_root, "/strm/", &normalized) {
+        if strm_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+            && let Ok(content) = std::fs::read_to_string(&strm_path)
+            && let Some(media_path) =
+                map_container_path(&state.settings.cd_root, "/media/", content.trim())
+        {
+            return Some(media_path);
+        }
+        return Some(strm_path);
+    }
+    if let Some(media_path) = map_container_path(&state.settings.cd_root, "/media/", &normalized) {
+        return Some(media_path);
+    }
+    let folder = cleanup_item_folder(library, Some(&normalized), "");
+    folder.and_then(|folder| safe_under(&state.settings.cd_root, folder).ok())
+}
+
+fn map_container_path(root: &Path, prefix: &str, normalized: &str) -> Option<PathBuf> {
+    let rel = normalized.strip_prefix(prefix)?;
+    safe_under(root, rel).ok()
+}
+
+fn bytes_to_gb(bytes: u64) -> f64 {
+    bytes as f64 / 1024.0 / 1024.0 / 1024.0
+}
+
+fn round_gb(gb: f64) -> f64 {
+    (gb * 1000.0).round() / 1000.0
+}
+
+fn size_score(gb: f64) -> f64 {
+    if gb >= 50.0 {
+        35.0
+    } else if gb >= 20.0 {
+        25.0
+    } else if gb >= 10.0 {
+        15.0
+    } else if gb >= 1.0 {
+        5.0
+    } else if gb > 0.0 {
+        1.0
+    } else {
+        0.0
     }
 }
 
