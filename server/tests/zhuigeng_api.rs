@@ -333,7 +333,60 @@ fn scheduler_scan_airing_detail_reports_real_execution_not_dry_run_preview() {
 }
 
 #[tokio::test]
-async fn missing_tmdb_config_reports_clear_bad_request() {
+async fn missing_tmdb_key_falls_back_to_emby_status_and_virtual_episodes() {
+    let libraries = r#"[{"ItemId":"lib-airing","Name":"追更库","CollectionType":"tvshows","Locations":["/strm/追更库"]}]"#;
+    let series = r#"{"Items":[
+        {"Id":"series-a","Name":"在更剧","Status":"Continuing","Path":"/strm/追更库/在更剧 [tmdbid-301]/show.strm","ProviderIds":{"Tmdb":"301"}},
+        {"Id":"series-b","Name":"完结剧","Status":"Ended","Path":"/strm/追更库/完结剧 [tmdbid-302]/show.strm","ProviderIds":{"Tmdb":"302"}}
+    ]}"#;
+    let episodes_a = r#"{"Items":[
+        {"ParentIndexNumber":1,"IndexNumber":1,"LocationType":"FileSystem"},
+        {"ParentIndexNumber":1,"IndexNumber":2,"LocationType":"Virtual"}
+    ]}"#;
+    let episodes_b = r#"{"Items":[
+        {"ParentIndexNumber":1,"IndexNumber":1,"LocationType":"FileSystem"}
+    ]}"#;
+    let (emby_base, emby_requests, emby_handle) =
+        spawn_fake_sequence(vec![libraries, series, episodes_a, episodes_b]).await;
+
+    let response = zhuigeng_status_with_config(
+        ZhuigengConfig::new(&emby_base, "emby-key", "", ""),
+        reqwest::Client::new(),
+    )
+    .await
+    .unwrap();
+
+    assert!(response.ok);
+    assert_eq!(response.total, 2);
+    assert_eq!(response.continuing, 1);
+    assert_eq!(response.ended, 1);
+    assert_eq!(response.copy_text, "求 在更剧 [tmdb:301] — S01 E2");
+    let airing = response
+        .items
+        .iter()
+        .find(|item| item.name == "在更剧")
+        .unwrap();
+    assert!(airing.continuing);
+    assert_eq!(airing.tmdb_status, "Continuing");
+    assert_eq!(airing.behind, 1);
+    assert_eq!(airing.resource_hint.as_deref(), Some("S01 E2"));
+    assert!(
+        airing
+            .behind_hint
+            .as_deref()
+            .is_some_and(|hint| hint.contains("Emby 虚拟集提示缺 1 集")),
+        "{airing:?}"
+    );
+
+    timeout(Duration::from_secs(1), emby_handle)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(emby_requests.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn tmdb_base_url_is_required_when_tmdb_key_is_configured() {
     let err = zhuigeng_status_with_config(
         ZhuigengConfig::new("http://127.0.0.1:1", "emby-key", "", "tmdb-key"),
         reqwest::Client::new(),

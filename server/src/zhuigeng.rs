@@ -179,6 +179,8 @@ struct EmbySeriesLite {
     path: Option<String>,
     #[serde(rename = "ProviderIds", default)]
     provider_ids: BTreeMap<String, Value>,
+    #[serde(rename = "Status")]
+    status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,6 +214,7 @@ struct LocalEpisodeSummary {
     latest_date: Option<String>,
     latest_episode: Option<String>,
     have_by_season: BTreeMap<Option<i32>, Vec<i32>>,
+    virtual_by_season: BTreeMap<Option<i32>, Vec<i32>>,
 }
 
 pub fn router() -> Router<AppState> {
@@ -322,12 +325,14 @@ pub async fn zhuigeng_status_with_config(
         config.request_timeout,
         http.clone(),
     );
-    let tmdb = TmdbClient::new(
-        config.tmdb_base_url.clone(),
-        config.tmdb_api_key.clone(),
-        config.request_timeout,
-        http,
-    );
+    let tmdb = config.has_tmdb_config().then(|| {
+        TmdbClient::new(
+            config.tmdb_base_url.clone(),
+            config.tmdb_api_key.clone(),
+            config.request_timeout,
+            http,
+        )
+    });
 
     let libraries = emby.zhuigeng_libraries().await?;
     let mut items = Vec::new();
@@ -348,11 +353,22 @@ pub async fn zhuigeng_status_with_config(
                 ),
             };
 
-            let mut row = match validate_tmdb_id(&tmdb_id) {
-                Ok(()) => match tmdb.tv(&tmdb_id).await {
-                    Ok(meta) => {
-                        build_item_from_tmdb(&library, &item, &name, folder, tmdb_id, local, meta)
-                    }
+            let mut row = if let Some(tmdb) = tmdb.as_ref() {
+                match validate_tmdb_id(&tmdb_id) {
+                    Ok(()) => match tmdb.tv(&tmdb_id).await {
+                        Ok(meta) => build_item_from_tmdb(
+                            &library, &item, &name, folder, tmdb_id, local, meta,
+                        ),
+                        Err(err) => build_error_item(
+                            &library,
+                            &item,
+                            &name,
+                            folder,
+                            tmdb_id,
+                            local,
+                            err.to_string(),
+                        ),
+                    },
                     Err(err) => build_error_item(
                         &library,
                         &item,
@@ -362,16 +378,9 @@ pub async fn zhuigeng_status_with_config(
                         local,
                         err.to_string(),
                     ),
-                },
-                Err(err) => build_error_item(
-                    &library,
-                    &item,
-                    &name,
-                    folder,
-                    tmdb_id,
-                    local,
-                    err.to_string(),
-                ),
+                }
+            } else {
+                build_item_from_emby_status(&library, &item, &name, folder, tmdb_id, local)
             };
             if let Some(err) = episode_err {
                 row.err = match row.err {
@@ -635,14 +644,9 @@ impl ZhuigengConfig {
                 "api_key 未配置，无法读取 Emby 追更库".to_string(),
             ));
         }
-        if self.tmdb_base_url.trim().is_empty() {
+        if !self.tmdb_api_key.trim().is_empty() && self.tmdb_base_url.trim().is_empty() {
             return Err(AppError::BadRequest(
                 "tmdb_base_url/tmdb_url 未配置，无法请求 TMDb".to_string(),
-            ));
-        }
-        if self.tmdb_api_key.trim().is_empty() {
-            return Err(AppError::BadRequest(
-                "tmdb_api_key/tmdb_key 未配置，无法请求 TMDb".to_string(),
             ));
         }
         if self.request_timeout.is_zero() {
@@ -651,6 +655,10 @@ impl ZhuigengConfig {
             ));
         }
         Ok(())
+    }
+
+    fn has_tmdb_config(&self) -> bool {
+        !self.tmdb_base_url.trim().is_empty() && !self.tmdb_api_key.trim().is_empty()
     }
 }
 
@@ -672,7 +680,6 @@ async fn zhuigeng_config_from_state(state: &AppState) -> AppResult<ZhuigengConfi
         tmdb_api_key,
         request_timeout,
     };
-    config.validate()?;
     Ok(config)
 }
 
@@ -927,6 +934,39 @@ fn build_item_from_tmdb(
     }
 }
 
+fn build_item_from_emby_status(
+    library: &ZhuigengLibrary,
+    item: &EmbySeriesLite,
+    name: &str,
+    folder: String,
+    tmdb: String,
+    local: LocalEpisodeSummary,
+) -> ZhuigengItem {
+    let status = item.status.clone().unwrap_or_else(|| "?".to_string());
+    let (state, continuing, ended) = tmdb_state(&status, None);
+    let behind = compute_virtual_behind(&local);
+    ZhuigengItem {
+        lib: library.name.clone(),
+        name: name.to_string(),
+        id: item.id.clone(),
+        folder,
+        tmdb,
+        tmdb_status: status,
+        state,
+        continuing,
+        ended,
+        local_count: local.count,
+        local_latest: local.latest_date,
+        local_latest_episode: local.latest_episode,
+        last_episode_to_air: None,
+        next_episode_to_air: None,
+        behind: behind.count,
+        behind_hint: behind.hint,
+        resource_hint: behind.resource_hint,
+        err: None,
+    }
+}
+
 fn build_error_item(
     library: &ZhuigengLibrary,
     item: &EmbySeriesLite,
@@ -1040,11 +1080,67 @@ fn compute_behind(
     }
 }
 
+fn compute_virtual_behind(local: &LocalEpisodeSummary) -> BehindSummary {
+    let mut missing = Vec::<(Option<i32>, i32)>::new();
+    for (season, virtuals) in &local.virtual_by_season {
+        let have = local
+            .have_by_season
+            .get(season)
+            .cloned()
+            .unwrap_or_default();
+        for number in virtuals {
+            if !have.contains(number) {
+                missing.push((*season, *number));
+            }
+        }
+    }
+    if missing.is_empty() {
+        return BehindSummary {
+            count: 0,
+            hint: None,
+            resource_hint: None,
+        };
+    }
+    missing.sort_by(|left, right| compare_episode_pair(left, right));
+    let resource_hint = format_episode_segments(&missing);
+    let hint = Some(format!(
+        "Emby 虚拟集提示缺 {} 集 · {}",
+        missing.len(),
+        resource_hint
+    ));
+    BehindSummary {
+        count: missing.len(),
+        hint,
+        resource_hint: Some(resource_hint),
+    }
+}
+
+fn format_episode_segments(missing: &[(Option<i32>, i32)]) -> String {
+    let mut by_season: BTreeMap<Option<i32>, Vec<i32>> = BTreeMap::new();
+    for (season, number) in missing {
+        by_season.entry(*season).or_default().push(*number);
+    }
+    by_season
+        .into_iter()
+        .map(|(season, mut numbers)| {
+            numbers.sort_unstable();
+            numbers.dedup();
+            let compact = compact_ints(&numbers);
+            match season {
+                Some(season) => format!("S{season:02} E{compact}"),
+                None => format!("E{compact}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 fn summarize_local_episodes(episodes: &[EmbyEpisodeLite]) -> LocalEpisodeSummary {
     let mut count = 0usize;
     let mut latest_date = None::<String>;
     let mut latest_pair = None::<(Option<i32>, i32)>;
     let mut have_by_season: BTreeMap<Option<i32>, Vec<i32>> = BTreeMap::new();
+    let mut virtual_by_season: BTreeMap<Option<i32>, Vec<i32>> = BTreeMap::new();
 
     for episode in episodes {
         if episode
@@ -1052,6 +1148,12 @@ fn summarize_local_episodes(episodes: &[EmbyEpisodeLite]) -> LocalEpisodeSummary
             .as_deref()
             .is_some_and(|kind| kind.eq_ignore_ascii_case("Virtual"))
         {
+            if let Some(number) = episode.index_number {
+                virtual_by_season
+                    .entry(episode.parent_index_number)
+                    .or_default()
+                    .push(number);
+            }
             continue;
         }
         count += 1;
@@ -1084,12 +1186,17 @@ fn summarize_local_episodes(episodes: &[EmbyEpisodeLite]) -> LocalEpisodeSummary
         values.sort_unstable();
         values.dedup();
     }
+    for values in virtual_by_season.values_mut() {
+        values.sort_unstable();
+        values.dedup();
+    }
     LocalEpisodeSummary {
         count,
         latest_date,
         latest_episode: latest_pair
             .and_then(|(season, number)| episode_label(season, Some(number))),
         have_by_season,
+        virtual_by_season,
     }
 }
 
