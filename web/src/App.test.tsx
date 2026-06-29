@@ -598,12 +598,15 @@ describe('App shell', () => {
         expect(init?.method || 'GET').toBe('GET');
         return jsonResponse({
           noposter: 2,
+          no_rating: 3,
           dups_auto: 1,
           dups_review: 1,
           airing_count: 1,
           airing_low_count: 1,
           noposter_by_lib: { '剧集': 1, '电影': 1 },
+          no_rating_by_lib: { '剧集': 2, '电影': 1 },
           noposter_err: null,
+          no_rating_err: null,
           dups_err: null,
           airing_err: null
         });
@@ -619,6 +622,7 @@ describe('App shell', () => {
     expect(await screen.findByText('120 / 9')).toBeInTheDocument();
     expect(await screen.findByText('旧版待办计数')).toBeInTheDocument();
     expect(screen.getAllByText('无海报 1').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('无评分 2').length).toBeGreaterThan(0);
     await waitFor(() => {
       expect(cleanupCalled).toBe(true);
       expect(gapsCalled).toBe(true);

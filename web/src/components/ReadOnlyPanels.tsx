@@ -37,19 +37,23 @@ type MemorySummary = components['schemas']['MemorySummary'];
 
 type DashboardTodoParity = {
   noposter: number;
+  no_rating: number;
   dups_auto: number;
   dups_review: number;
   airing_count: number;
   noposter_by_lib: Record<string, number>;
+  no_rating_by_lib: Record<string, number>;
   errors: string[];
 };
 
 const EMPTY_DASHBOARD_TODO: DashboardTodoParity = {
   noposter: 0,
+  no_rating: 0,
   dups_auto: 0,
   dups_review: 0,
   airing_count: 0,
   noposter_by_lib: {},
+  no_rating_by_lib: {},
   errors: []
 };
 
@@ -319,11 +323,13 @@ export function DashboardPanel() {
       setAutostrm(autostrmData);
       setDashboardTodo({
         noposter: todoData.noposter || 0,
+        no_rating: todoData.no_rating || 0,
         dups_auto: todoData.dups_auto || 0,
         dups_review: todoData.dups_review || 0,
         airing_count: todoData.airing_count || 0,
         noposter_by_lib: todoData.noposter_by_lib || {},
-        errors: [todoData.noposter_err, todoData.dups_err, todoData.airing_err].filter(Boolean) as string[]
+        no_rating_by_lib: todoData.no_rating_by_lib || {},
+        errors: [todoData.noposter_err, todoData.no_rating_err, todoData.dups_err, todoData.airing_err].filter(Boolean) as string[]
       });
     } catch (e) {
       const message = errorMessage(e);
@@ -369,6 +375,7 @@ export function DashboardPanel() {
         <StatCard icon={<ListChecks />} label="待办" value={count(todos.length)} tone={todos.length ? 'warn' : 'ok'} hint="只读预检聚合" />
         <StatCard icon={<Activity />} label="异常任务" value={count(taskProblemCount(cleanup?.task_history))} tone={taskProblemCount(cleanup?.task_history) ? 'warn' : 'ok'} hint={`运行中 ${count(cleanup?.task_history?.running)}`} />
         <StatCard icon={<AlertTriangle />} label="无海报" value={count(dashboardTodo.noposter)} tone={dashboardTodo.noposter ? 'warn' : 'ok'} hint="旧版 dash/todo" />
+        <StatCard icon={<Gauge />} label="无评分" value={count(dashboardTodo.no_rating)} tone={dashboardTodo.no_rating ? 'warn' : 'ok'} hint="可刷新元数据" />
         <StatCard icon={<CheckCircle2 />} label="自动去重" value={count(dashboardTodo.dups_auto)} tone={dashboardTodo.dups_auto ? 'warn' : 'ok'} hint="可自动处理组" />
         <StatCard icon={<AlertTriangle />} label="人工重复" value={count(dashboardTodo.dups_review)} tone={dashboardTodo.dups_review ? 'warn' : 'ok'} hint="需人工 review" />
         <StatCard icon={<Webhook />} label="在更剧" value={count(dashboardTodo.airing_count)} tone={dashboardTodo.airing_count ? 'warn' : 'ok'} hint="追更 continuing" />
@@ -388,7 +395,8 @@ export function DashboardPanel() {
 
 function DashboardTodoParityBlock({ todo }: { todo: DashboardTodoParity }) {
   const libs = Object.entries(todo.noposter_by_lib).sort((left, right) => right[1] - left[1]);
-  if (!todo.noposter && !todo.dups_auto && !todo.dups_review && !todo.airing_count && libs.length === 0) {
+  const noRatingLibs = Object.entries(todo.no_rating_by_lib).sort((left, right) => right[1] - left[1]);
+  if (!todo.noposter && !todo.no_rating && !todo.dups_auto && !todo.dups_review && !todo.airing_count && libs.length === 0 && noRatingLibs.length === 0) {
     return null;
   }
   return (
@@ -396,6 +404,7 @@ function DashboardTodoParityBlock({ todo }: { todo: DashboardTodoParity }) {
       <h2>旧版待办计数</h2>
       <div className="miniStats">
         <span><strong>{count(todo.noposter)}</strong>无海报</span>
+        <span><strong>{count(todo.no_rating)}</strong>无评分</span>
         <span><strong>{count(todo.dups_auto)}</strong>自动去重</span>
         <span><strong>{count(todo.dups_review)}</strong>人工重复</span>
         <span><strong>{count(todo.airing_count)}</strong>在更剧</span>
@@ -406,6 +415,16 @@ function DashboardTodoParityBlock({ todo }: { todo: DashboardTodoParity }) {
             <article key={lib}>
               <strong>{lib}</strong>
               <span>无海报 {count(total)}</span>
+            </article>
+          ))}
+        </div>
+      )}
+      {noRatingLibs.length > 0 && (
+        <div className="libraryBars">
+          {noRatingLibs.slice(0, 6).map(([lib, total]) => (
+            <article key={`rating-${lib}`}>
+              <strong>{lib}</strong>
+              <span>无评分 {count(total)}</span>
             </article>
           ))}
         </div>

@@ -1690,6 +1690,11 @@ export interface components {
             dups_auto: number;
             dups_err?: string | null;
             dups_review: number;
+            no_rating: number;
+            no_rating_by_lib: {
+                [key: string]: number;
+            };
+            no_rating_err?: string | null;
             noposter: number;
             noposter_by_lib: {
                 [key: string]: number;

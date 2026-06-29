@@ -5,9 +5,11 @@ use crate::{
 };
 use axum::{
     Json, Router,
+    body::Body,
     extract::{OriginalUri, State},
-    http::StatusCode,
+    http::{HeaderName, HeaderValue, Request, StatusCode, header},
     middleware,
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{any, get},
 };
@@ -67,6 +69,7 @@ pub fn router_with_state(state: AppState) -> Router {
             auth_state,
             auth::require_api_auth,
         ))
+        .layer(middleware::from_fn(security_headers))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
 }
@@ -94,4 +97,29 @@ async fn api_not_found(uri: OriginalUri) -> Response {
         })),
     )
         .into_response()
+}
+
+async fn security_headers(req: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(req).await;
+    let headers = response.headers_mut();
+    headers
+        .entry(header::X_CONTENT_TYPE_OPTIONS)
+        .or_insert(HeaderValue::from_static("nosniff"));
+    headers
+        .entry(HeaderName::from_static("x-frame-options"))
+        .or_insert(HeaderValue::from_static("DENY"));
+    headers
+        .entry(HeaderName::from_static("referrer-policy"))
+        .or_insert(HeaderValue::from_static("same-origin"));
+    headers
+        .entry(HeaderName::from_static("permissions-policy"))
+        .or_insert(HeaderValue::from_static(
+            "camera=(), microphone=(), geolocation=()",
+        ));
+    headers.entry(HeaderName::from_static("content-security-policy")).or_insert(
+        HeaderValue::from_static(
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        ),
+    );
+    response
 }

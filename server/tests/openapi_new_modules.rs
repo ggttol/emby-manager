@@ -36,6 +36,7 @@ fn openapi_registers_dedup_wizard_and_zhuigeng_modules() {
         "ReplaceExecuteResponse",
         "ReplaceBatchRequest",
         "DedupAutoAllResponse",
+        "DashboardTodoResponse",
         "CatalogTransferExecuteRequest",
         "C115TestCandidateRequest",
         "RefreshSeriesRequest",

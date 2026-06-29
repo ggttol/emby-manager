@@ -36,8 +36,28 @@ async fn protected_api_rejects_missing_session_without_database() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["authenticated"], false);
 
-    let (status, _, body) = send(&app, Method::GET, "/api/v2/openapi.json", None, &[]).await;
+    let (status, headers, body) = send(&app, Method::GET, "/api/v2/openapi.json", None, &[]).await;
     assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        headers
+            .get("x-content-type-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
+    assert_eq!(
+        headers
+            .get("x-frame-options")
+            .and_then(|value| value.to_str().ok()),
+        Some("DENY")
+    );
+    assert!(
+        headers
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value.contains("default-src 'self'") && value.contains("frame-ancestors 'none'")
+            })
+    );
 }
 
 #[tokio::test]

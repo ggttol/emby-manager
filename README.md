@@ -412,7 +412,7 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 - **运行用户:** Docker runtime 使用非 root 用户;`/media` 和默认 `/strm` 都按只读挂载,写 STRM/cleanup 或真实删除/移动能力需要显式 opt-in。
 - **NAS 权限:** Docker build/runtime 默认 uid/gid 是 `10001:10001`;Synology bind mount 保留宿主权限,可用 `.env` 的 `EMBY_MANAGER_UID` / `EMBY_MANAGER_GID` 对齐到有权读取媒体目录的 NAS 用户。
 - **Postgres 数据:** Rust 版状态在 compose named volume `postgres-data`;停止灰度用 `docker compose down`,不要 `down -v` 或手工删 volume。
-- **仍在预览:** Rust 版还没有 legacy 的登录限流、trusted proxy/XFF、CSP 全量头和 16 tab 功能齐平,上线前必须通过灰度验收。
+- **仍在预览:** Rust 版已接入 session/CSRF、登录限流、trusted proxy/XFF 和基础 CSP/安全响应头；上线前仍必须完成 16 tab 逐项功能齐平复核和 NAS 灰度验收。
 
 ## 已知未做(诚实清单)
 
