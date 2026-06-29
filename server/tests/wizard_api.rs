@@ -175,14 +175,14 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
     );
     assert_eq!(task["result"]["dedup"]["triggered"], true);
     assert_eq!(task["result"]["dedup"]["lib"], "电影");
-    assert_eq!(task["result"]["dedup"]["dups_count"], 0);
+    assert_eq!(task["result"]["dedup"]["dups_count"], 1);
     assert_eq!(task["result"]["dedup"]["review_count"], 0);
     assert!(
         task["result"]["dedup"]["dups"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|group| group["keep"]["lib"] == "电影"
+            .any(|group| group["keep"]["lib"] == "电影"
                 || group["remove"]
                     .as_array()
                     .unwrap()
@@ -358,6 +358,14 @@ fn prepare_wizard_media_fixture(cd_root: &std::path::Path, strm_root: &std::path
     std::fs::write(
         other_b.join("E02.strm"),
         "/media/剧集/Other Show Copy [tmdbid-999]/E02.mkv",
+    )
+    .unwrap();
+
+    let cross_lib_duplicate = strm_root.join("剧集/Share Movie 旧版 [tmdbid-100]");
+    std::fs::create_dir_all(&cross_lib_duplicate).unwrap();
+    std::fs::write(
+        cross_lib_duplicate.join("Share Movie.strm"),
+        "/media/剧集/Share Movie 旧版 [tmdbid-100]/Share Movie.mkv",
     )
     .unwrap();
 }

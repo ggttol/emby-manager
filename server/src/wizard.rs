@@ -828,7 +828,7 @@ fn filter_dedup_groups(groups: Vec<DedupGroup>, lib: Option<&str>) -> Vec<DedupG
         .into_iter()
         .filter(|group| {
             lib.is_none_or(|lib| {
-                group.keep.lib == lib && group.remove.iter().all(|row| row.lib == lib)
+                group.keep.lib == lib || group.remove.iter().any(|row| row.lib == lib)
             })
         })
         .collect()
@@ -837,7 +837,7 @@ fn filter_dedup_groups(groups: Vec<DedupGroup>, lib: Option<&str>) -> Vec<DedupG
 fn filter_review_groups(groups: Vec<DedupReviewGroup>, lib: Option<&str>) -> Vec<DedupReviewGroup> {
     groups
         .into_iter()
-        .filter(|group| lib.is_none_or(|lib| group.rows.iter().all(|row| row.lib == lib)))
+        .filter(|group| lib.is_none_or(|lib| group.rows.iter().any(|row| row.lib == lib)))
         .collect()
 }
 
