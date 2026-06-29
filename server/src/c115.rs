@@ -53,6 +53,11 @@ pub struct C115TestResponse {
     pub used: String,
 }
 
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct C115TestCandidateRequest {
+    pub cookie: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct C115SnapRequest {
     pub url: String,
@@ -260,6 +265,8 @@ struct C115ShareInfo {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/c115/test", get(test_cookie))
+        .route("/api/v2/c115/test-candidate", post(test_candidate_cookie))
+        .route("/api/v2/c115/test_candidate", post(test_candidate_cookie))
         .route("/api/v2/c115/parse", post(parse_url))
         .route("/api/v2/c115/snap", post(snap))
         .route("/api/v2/c115/save", post(save))
@@ -830,6 +837,16 @@ pub async fn test_cookie(State(state): State<AppState>) -> AppResult<Json<C115Te
     Ok(Json(client.test_cookie().await?))
 }
 
+#[utoipa::path(post, path = "/api/v2/c115/test-candidate", tag = "c115", request_body = C115TestCandidateRequest, responses((status = 200, body = C115TestResponse)))]
+pub async fn test_candidate_cookie(
+    State(state): State<AppState>,
+    Json(req): Json<C115TestCandidateRequest>,
+) -> AppResult<Json<C115TestResponse>> {
+    let cookie = require_c115_cookie(Some(req.cookie))?;
+    let client = C115Client::new_with_site(C115_API, C115_SITE, cookie, state.http.clone());
+    Ok(Json(client.test_cookie().await?))
+}
+
 #[utoipa::path(post, path = "/api/v2/c115/snap", tag = "c115", request_body = C115SnapRequest, responses((status = 200, body = C115SnapResponse)))]
 pub async fn snap(
     State(state): State<AppState>,
@@ -851,7 +868,9 @@ pub async fn save(
     let (cid, lib) =
         resolve_target_cid(&state.pool, req.cid.as_deref(), req.lib.as_deref()).await?;
     let label = c115_task_label("115 转存", &req.url, &cid);
-    let (task, created) = insert_or_reuse_c115_task(&state, "c115_save", &label).await?;
+    let params = c115_save_task_params(&req, &cid, lib.as_deref());
+    let (task, created) =
+        insert_or_reuse_c115_task_with_params(&state, "c115_save", &label, params).await?;
     if created {
         spawn_c115_save(state, task.id, cookie, req, cid, lib);
     }
@@ -902,6 +921,49 @@ pub async fn auto_cid(
         client
             .auto_cid(targets, current, req.max_depth.unwrap_or(2))
             .await?,
+    ))
+}
+
+fn c115_save_task_params(req: &C115SaveRequest, cid: &str, lib: Option<&str>) -> Value {
+    let file_ids = req.file_ids.as_ref().map(|ids| {
+        let mut ids = ids.clone();
+        ids.sort();
+        ids
+    });
+    serde_json::json!({
+        "url": &req.url,
+        "pwd": &req.pwd,
+        "cid": cid,
+        "lib": lib,
+        "label": &req.label,
+        "file_ids": file_ids,
+    })
+}
+
+async fn insert_or_reuse_c115_task_with_params(
+    state: &AppState,
+    kind: &str,
+    label: &str,
+    params: Value,
+) -> AppResult<(TaskRun, bool)> {
+    if let Some(existing) = sqlx::query_as::<_, TaskRun>(
+        "SELECT * FROM task_runs
+         WHERE kind = $1 AND label = $2 AND params = $3 AND status = ANY($4)
+         ORDER BY queued_at DESC
+         LIMIT 1",
+    )
+    .bind(kind)
+    .bind(label)
+    .bind(params.clone())
+    .bind(tasks::ACTIVE_STATUSES)
+    .fetch_optional(&state.pool)
+    .await?
+    {
+        return Ok((existing, false));
+    }
+    Ok((
+        tasks::insert_task_with_meta(&state.pool, kind, label, 1, "manual", params).await?,
+        true,
     ))
 }
 

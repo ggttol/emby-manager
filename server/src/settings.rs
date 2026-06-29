@@ -43,11 +43,7 @@ impl Settings {
             strm_root: env::var("EMBY_MANAGER_STRM_ROOT")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/volume1/strm")),
-            docker_bin: env::var("EMBY_MANAGER_DOCKER_BIN")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    PathBuf::from("/var/packages/ContainerManager/target/usr/bin/docker")
-                }),
+            docker_bin: docker_bin_from_env(),
             task_concurrency: validate_task_concurrency(
                 env::var("EMBY_MANAGER_TASK_CONCURRENCY")
                     .unwrap_or_else(|_| "3".to_string())
@@ -55,6 +51,27 @@ impl Settings {
                     .context("EMBY_MANAGER_TASK_CONCURRENCY must be a number")?,
             )?,
         })
+    }
+}
+
+fn docker_bin_from_env() -> PathBuf {
+    if env_flag("EMBY_MANAGER_DOCKER_DISABLED", false) {
+        return PathBuf::new();
+    }
+    match env::var("EMBY_MANAGER_DOCKER_BIN") {
+        Ok(value) if value.trim().is_empty() => PathBuf::new(),
+        Ok(value) => PathBuf::from(value),
+        Err(_) => PathBuf::from("/var/packages/ContainerManager/target/usr/bin/docker"),
+    }
+}
+
+fn env_flag(key: &str, default: bool) -> bool {
+    match env::var(key) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => default,
     }
 }
 

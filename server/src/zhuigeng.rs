@@ -3,7 +3,7 @@ use crate::{
     error::{AppError, AppResult},
     media_fs,
     state::AppState,
-    tasks,
+    tasks::{self, TaskRun},
 };
 use axum::{
     Json, Router,
@@ -105,6 +105,14 @@ pub struct ZhuigengScanAiringRow {
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct ZhuigengGapsSummaryResponse {
+    pub ok: bool,
+    pub items: Vec<ZhuigengGapRow>,
+    pub total: usize,
+    pub copy_text: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ZhuigengGapsSummaryTaskResult {
     pub ok: bool,
     pub items: Vec<ZhuigengGapRow>,
     pub total: usize,
@@ -223,21 +231,84 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<ZhuigengSta
     ))
 }
 
-#[utoipa::path(post, path = "/api/v2/zhuigeng/scan-airing", tag = "zhuigeng", responses((status = 200, body = ZhuigengScanAiringResponse)))]
-pub async fn scan_airing(
-    State(state): State<AppState>,
-) -> AppResult<Json<ZhuigengScanAiringResponse>> {
-    Ok(Json(zhuigeng_scan_airing_for_state(&state, None).await?))
+#[utoipa::path(post, path = "/api/v2/zhuigeng/scan-airing", tag = "zhuigeng", responses((status = 200, body = TaskRun)))]
+pub async fn scan_airing(State(state): State<AppState>) -> AppResult<Json<tasks::TaskRun>> {
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "zhuigeng_scan_airing",
+        "追更扫描在更剧",
+        1,
+        "api",
+        serde_json::json!({}),
+    )
+    .await?;
+    spawn_scan_airing_task(state, task.id);
+    Ok(Json(task))
 }
 
-#[utoipa::path(post, path = "/api/v2/zhuigeng/gaps-summary", tag = "zhuigeng", responses((status = 200, body = ZhuigengGapsSummaryResponse)))]
-pub async fn gaps_summary(
-    State(state): State<AppState>,
-) -> AppResult<Json<ZhuigengGapsSummaryResponse>> {
-    let config = zhuigeng_config_from_state(&state).await?;
-    Ok(Json(
-        zhuigeng_gaps_summary_with_config(config, state.http.clone()).await?,
-    ))
+#[utoipa::path(post, path = "/api/v2/zhuigeng/gaps-summary", tag = "zhuigeng", responses((status = 200, body = TaskRun)))]
+pub async fn gaps_summary(State(state): State<AppState>) -> AppResult<Json<tasks::TaskRun>> {
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "zhuigeng_gaps_summary",
+        "追更缺集汇总",
+        1,
+        "api",
+        serde_json::json!({}),
+    )
+    .await?;
+    spawn_gaps_summary_task(state, task.id);
+    Ok(Json(task))
+}
+
+fn spawn_scan_airing_task(state: AppState, task_id: Uuid) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, task_id, "任务并发槽不可用", None).await;
+            return;
+        };
+        let _ = tasks::mark_running(&state.pool, task_id, "开始追更扫描").await;
+        match zhuigeng_scan_airing_for_state(&state, Some(task_id)).await {
+            Ok(result) => {
+                let _ = tasks::finish_done_with_message(
+                    &state.pool,
+                    task_id,
+                    &format!("追更扫描完成: {}/{}", result.ok_count, result.total),
+                    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+                )
+                .await;
+            }
+            Err(AppError::Conflict(message)) if message == ZHUIGENG_SCAN_AIRING_CANCELLED => {}
+            Err(err) => {
+                let _ = tasks::finish_error(&state.pool, task_id, &err.to_string(), None).await;
+            }
+        }
+    });
+}
+
+fn spawn_gaps_summary_task(state: AppState, task_id: Uuid) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, task_id, "任务并发槽不可用", None).await;
+            return;
+        };
+        let _ = tasks::mark_running(&state.pool, task_id, "汇总追更缺集").await;
+        match zhuigeng_gaps_summary_for_state(&state, Some(task_id)).await {
+            Ok(result) => {
+                let _ = tasks::finish_done_with_message(
+                    &state.pool,
+                    task_id,
+                    &format!("追更缺集汇总完成: {}", result.total),
+                    serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+                )
+                .await;
+            }
+            Err(AppError::Conflict(message)) if message == ZHUIGENG_SCAN_AIRING_CANCELLED => {}
+            Err(err) => {
+                let _ = tasks::finish_error(&state.pool, task_id, &err.to_string(), None).await;
+            }
+        }
+    });
 }
 
 pub async fn zhuigeng_status_with_config(
@@ -506,6 +577,34 @@ pub async fn zhuigeng_gaps_summary_with_config(
         total: items.len(),
         items,
         copy_text,
+    })
+}
+
+pub async fn zhuigeng_gaps_summary_for_state(
+    state: &AppState,
+    task_id: Option<Uuid>,
+) -> AppResult<ZhuigengGapsSummaryTaskResult> {
+    if let Some(task_id) = task_id {
+        tasks::set_progress(&state.pool, task_id, 0, "读取追更状态").await?;
+    }
+    let config = zhuigeng_config_from_state(state).await?;
+    let response = zhuigeng_gaps_summary_with_config(config, state.http.clone()).await?;
+    if let Some(task_id) = task_id {
+        check_zhuigeng_task_cancelled(state, Some(task_id)).await?;
+        tasks::set_total(&state.pool, task_id, response.total.max(1) as i64).await?;
+        tasks::set_progress(
+            &state.pool,
+            task_id,
+            response.total as i64,
+            &format!("已汇总 {} 条缺集", response.total),
+        )
+        .await?;
+    }
+    Ok(ZhuigengGapsSummaryTaskResult {
+        ok: response.ok,
+        items: response.items,
+        total: response.total,
+        copy_text: response.copy_text,
     })
 }
 

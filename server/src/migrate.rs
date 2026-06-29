@@ -1,5 +1,5 @@
 use crate::catalog::infer_type;
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
@@ -30,6 +30,15 @@ pub async fn run(
     legacy_dir: PathBuf,
     apply: bool,
 ) -> anyhow::Result<MigrationReport> {
+    run_with_options(pool, legacy_dir, apply, false).await
+}
+
+pub async fn run_with_options(
+    pool: &PgPool,
+    legacy_dir: PathBuf,
+    apply: bool,
+    enable_schedules: bool,
+) -> anyhow::Result<MigrationReport> {
     let mut report = MigrationReport {
         legacy_dir: legacy_dir.clone(),
         applied: apply,
@@ -40,7 +49,7 @@ pub async fn run(
         autostrm_seen: 0,
         warnings: vec![],
     };
-    migrate_config(pool, &legacy_dir, apply, &mut report).await?;
+    migrate_config(pool, &legacy_dir, apply, enable_schedules, &mut report).await?;
     migrate_undo(pool, &legacy_dir, apply, &mut report).await?;
     migrate_catalog(pool, &legacy_dir, apply, &mut report).await?;
     migrate_autostrm_seen(pool, &legacy_dir, apply, &mut report).await?;
@@ -51,6 +60,7 @@ async fn migrate_config(
     pool: &PgPool,
     legacy_dir: &Path,
     apply: bool,
+    enable_schedules: bool,
     report: &mut MigrationReport,
 ) -> anyhow::Result<()> {
     let path = legacy_dir.join("config.json");
@@ -68,12 +78,13 @@ async fn migrate_config(
         return Ok(());
     };
     report.config_keys = obj.len();
+    warn_legacy_path_overrides(obj, report);
     if apply {
         for (key, value) in obj {
             if key == "schedules" {
                 if let Some(items) = value.as_array() {
                     for item in items {
-                        import_schedule(pool, item).await?;
+                        import_schedule(pool, item, enable_schedules).await?;
                         report.schedules += 1;
                     }
                 }
@@ -103,13 +114,23 @@ async fn migrate_config(
             .execute(pool)
             .await?;
         }
+        if !enable_schedules && report.schedules > 0 {
+            report.warnings.push(
+                "legacy schedules were imported disabled; rerun with --enable-schedules only after gray validation"
+                    .to_string(),
+            );
+        }
     } else if let Some(items) = obj.get("schedules").and_then(Value::as_array) {
         report.schedules = items.len();
     }
     Ok(())
 }
 
-async fn import_schedule(pool: &PgPool, item: &Value) -> anyhow::Result<()> {
+async fn import_schedule(
+    pool: &PgPool,
+    item: &Value,
+    enable_schedules: bool,
+) -> anyhow::Result<()> {
     let name = item
         .get("name")
         .and_then(Value::as_str)
@@ -126,10 +147,20 @@ async fn import_schedule(pool: &PgPool, item: &Value) -> anyhow::Result<()> {
         .get("schedule")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({"mode":"daily","hour":3,"minute":0}));
-    let enabled = item.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    let enabled = enable_schedules && item.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+    let last_run_at = legacy_datetime(item, &["last_run_at"]);
+    let last_ended_at = legacy_datetime(item, &["last_ended_at"]);
+    let last_task_id = item
+        .get("last_task_id")
+        .or_else(|| item.get("last_tid"))
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok());
     sqlx::query(
-        "INSERT INTO schedule_jobs(id, name, kind, params, schedule, enabled, last_status, last_error)
-         SELECT $1, $2, $3, $4, $5, $6, $7, $8
+        "INSERT INTO schedule_jobs(
+             id, name, kind, params, schedule, enabled,
+             last_run_at, last_ended_at, last_status, last_task_id, last_error
+         )
+         SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
          WHERE NOT EXISTS (
              SELECT 1 FROM schedule_jobs
              WHERE name = $2 AND kind = $3 AND params = $4 AND schedule = $5
@@ -141,11 +172,61 @@ async fn import_schedule(pool: &PgPool, item: &Value) -> anyhow::Result<()> {
     .bind(params)
     .bind(schedule)
     .bind(enabled)
+    .bind(last_run_at)
+    .bind(last_ended_at)
     .bind(item.get("last_status").and_then(Value::as_str))
+    .bind(last_task_id)
     .bind(item.get("last_err").and_then(Value::as_str))
     .execute(pool)
     .await?;
     Ok(())
+}
+
+fn warn_legacy_path_overrides(obj: &serde_json::Map<String, Value>, report: &mut MigrationReport) {
+    let mut snippets = Vec::new();
+    if let Some(cd) = obj
+        .get("cd")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+    {
+        snippets.push(format!("EMBY_MANAGER_MEDIA_ROOT={cd}"));
+    }
+    if let Some(strm) = obj
+        .get("strm")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+    {
+        snippets.push(format!("EMBY_MANAGER_STRM_ROOT={strm}"));
+    }
+    if let Some(docker) = obj
+        .get("docker")
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty())
+    {
+        snippets.push(format!("EMBY_MANAGER_DOCKER_BIN={docker}"));
+    }
+    if !snippets.is_empty() {
+        report.warnings.push(format!(
+            "legacy cd/strm/docker path overrides require Docker bind/env updates: {}",
+            snippets.join(", ")
+        ));
+    }
+}
+
+fn legacy_datetime(item: &Value, keys: &[&str]) -> Option<DateTime<Utc>> {
+    keys.iter()
+        .filter_map(|key| item.get(*key))
+        .find_map(|value| {
+            value
+                .as_str()
+                .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+                .map(|dt| dt.with_timezone(&Utc))
+                .or_else(|| {
+                    value
+                        .as_i64()
+                        .and_then(|ts| Utc.timestamp_opt(ts, 0).single())
+                })
+        })
 }
 
 async fn migrate_undo(

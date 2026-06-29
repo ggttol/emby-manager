@@ -120,6 +120,12 @@ function isCompletedTransition(previous?: TaskRun, next?: TaskRun) {
   return active.has(previous.status) && terminal.has(next.status);
 }
 
+function dateMs(value?: string | null) {
+  if (!value) return 0;
+  const ms = new Date(value).getTime();
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
 export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
   const [open, setOpen] = useState(false);
   const [tasks, setTasks] = useState<TaskRun[]>([]);
@@ -131,25 +137,38 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
   const [query, setQuery] = useState('');
   const knownTasksRef = useRef<Map<string, TaskRun>>(new Map());
   const emittedIdsRef = useRef<Set<string>>(new Set());
+  const initializedRef = useRef(false);
+  const lastSnapshotAtRef = useRef(0);
   const toast = useToast();
 
   const emitCompletedTasks = useCallback((nextTasks: TaskRun[]) => {
     const knownTasks = knownTasksRef.current;
+    const wasInitialized = initializedRef.current;
+    const lastSnapshotAt = lastSnapshotAtRef.current;
     const completed = nextTasks
-      .map((task) => ({ task, previousTask: knownTasks.get(task.id) }))
-      .filter(({ task, previousTask }) => (
-        isCompletedTransition(previousTask, task) && !emittedIdsRef.current.has(task.id)
+      .map((task) => {
+        const previousTask = knownTasks.get(task.id);
+        const firstSeenTerminal = wasInitialized
+          && !previousTask
+          && terminal.has(task.status)
+          && Math.max(dateMs(task.queued_at), dateMs(task.updated_at)) >= lastSnapshotAt;
+        return { task, previousTask, firstSeenTerminal };
+      })
+      .filter(({ task, previousTask, firstSeenTerminal }) => (
+        (isCompletedTransition(previousTask, task) || firstSeenTerminal)
+        && !emittedIdsRef.current.has(task.id)
       ));
 
     knownTasksRef.current = new Map(nextTasks.map((task) => [task.id, task]));
+    initializedRef.current = true;
+    lastSnapshotAtRef.current = Date.now();
 
     for (const { task, previousTask } of completed) {
-      if (!previousTask) continue;
       emittedIdsRef.current.add(task.id);
       const detail: TaskCompleteDetail = {
         task,
-        previousTask,
-        previousStatus: previousTask.status
+        previousTask: previousTask || { ...task, status: 'running' },
+        previousStatus: previousTask?.status || 'running'
       };
       onTaskComplete?.(detail);
       window.dispatchEvent(new CustomEvent<TaskCompleteDetail>(TASK_COMPLETED_EVENT, { detail }));

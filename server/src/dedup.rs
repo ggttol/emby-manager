@@ -4,6 +4,7 @@ use crate::{
     error::{AppError, AppResult},
     media_fs::safe_under,
     state::AppState,
+    tasks::{self, TaskRun},
 };
 use axum::{
     Json, Router,
@@ -83,6 +84,32 @@ pub struct DedupExecuteResponse {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct DedupExecuteBatchGroup {
+    pub tmdb: Option<String>,
+    pub remove: Vec<DedupFolderRef>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct DedupExecuteBatchRequest {
+    pub groups: Vec<DedupExecuteBatchGroup>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct DedupExecuteBatchItemResult {
+    pub tmdb: Option<String>,
+    pub ok: bool,
+    pub removed: usize,
+    pub err: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct DedupExecuteBatchResult {
+    pub results: Vec<DedupExecuteBatchItemResult>,
+    pub ok_count: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ReplaceRequest {
     pub lib: String,
     pub win_folder: String,
@@ -110,6 +137,29 @@ pub struct ReplaceExecuteResponse {
     pub notified: bool,
     pub undo_id: Uuid,
     pub msg: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ReplaceBatchRequest {
+    pub items: Vec<ReplaceRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ReplaceBatchItemResult {
+    pub lib: String,
+    pub win: String,
+    pub lose: String,
+    pub ok: bool,
+    pub kept_as: Option<String>,
+    pub msg: String,
+    pub err: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ReplaceBatchResult {
+    pub results: Vec<ReplaceBatchItemResult>,
+    pub ok_count: usize,
+    pub total: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, utoipa::ToSchema)]
@@ -164,9 +214,14 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/dedup", post(execute_dedup))
         .route("/api/v2/dedup/execute", post(execute_dedup))
+        .route("/api/v2/dedup/execute-batch", post(execute_dedup_batch))
+        .route("/api/v2/dedup/exec-batch", post(execute_dedup_batch))
+        .route("/api/v2/dedup/exec_batch", post(execute_dedup_batch))
         .route("/api/v2/dedup/duplicates", get(duplicates))
         .route("/api/v2/dedup/analyze", get(duplicates))
         .route("/api/v2/dedup/replace", post(replace_execute))
+        .route("/api/v2/dedup/replace-batch", post(replace_batch))
+        .route("/api/v2/dedup/replace_batch", post(replace_batch))
         .route("/api/v2/dedup/auto_all", post(auto_all))
         .route("/api/v2/dedup/auto-all", post(auto_all))
 }
@@ -198,6 +253,37 @@ pub async fn execute_dedup(
     }))
 }
 
+#[utoipa::path(post, path = "/api/v2/dedup/execute-batch", tag = "dedup", request_body = DedupExecuteBatchRequest, responses((status = 200, body = TaskRun)))]
+pub async fn execute_dedup_batch(
+    State(state): State<AppState>,
+    Json(req): Json<DedupExecuteBatchRequest>,
+) -> AppResult<Json<TaskRun>> {
+    if req.groups.is_empty() {
+        return Err(AppError::BadRequest("groups must not be empty".to_string()));
+    }
+    if !req.groups.iter().any(|group| !group.remove.is_empty()) {
+        return Err(AppError::BadRequest(
+            "groups must include at least one folder to remove".to_string(),
+        ));
+    }
+    let groups = req.groups;
+    let params = serde_json::to_value(DedupExecuteBatchRequest {
+        groups: groups.clone(),
+    })
+    .unwrap_or_else(|_| serde_json::json!({}));
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "dedup_exec_batch",
+        &format!("批量去重: {} 组", groups.len()),
+        groups.len() as i64,
+        "api",
+        params,
+    )
+    .await?;
+    spawn_dedup_batch(state, task.id, groups);
+    Ok(Json(task))
+}
+
 #[utoipa::path(post, path = "/api/v2/dedup/replace", tag = "dedup", request_body = ReplaceRequest, responses((status = 200, body = ReplaceExecuteResponse)))]
 pub async fn replace_execute(
     State(state): State<AppState>,
@@ -208,6 +294,32 @@ pub async fn replace_execute(
     Ok(Json(
         run_replace_execute(&state, &req, plan, &emby_client).await?,
     ))
+}
+
+#[utoipa::path(post, path = "/api/v2/dedup/replace-batch", tag = "dedup", request_body = ReplaceBatchRequest, responses((status = 200, body = TaskRun)))]
+pub async fn replace_batch(
+    State(state): State<AppState>,
+    Json(req): Json<ReplaceBatchRequest>,
+) -> AppResult<Json<TaskRun>> {
+    if req.items.is_empty() {
+        return Err(AppError::BadRequest("items must not be empty".to_string()));
+    }
+    let items = req.items;
+    let params = serde_json::to_value(ReplaceBatchRequest {
+        items: items.clone(),
+    })
+    .unwrap_or_else(|_| serde_json::json!({}));
+    let task = tasks::insert_task_with_meta(
+        &state.pool,
+        "replace_batch",
+        &format!("批量替换: {} 项", items.len()),
+        items.len() as i64,
+        "api",
+        params,
+    )
+    .await?;
+    spawn_replace_batch(state, task.id, items);
+    Ok(Json(task))
 }
 
 #[utoipa::path(post, path = "/api/v2/dedup/auto-all", tag = "dedup", request_body = DedupAutoAllRequest, responses((status = 200, body = DedupAutoAllResponse)))]
@@ -269,6 +381,180 @@ pub async fn auto_all(
         review_count,
         async_requested: req.async_requested.unwrap_or(false),
     }))
+}
+
+fn spawn_dedup_batch(state: AppState, task_id: Uuid, groups: Vec<DedupExecuteBatchGroup>) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, task_id, "任务并发槽不可用", None).await;
+            return;
+        };
+        let Ok(_cloud_permit) = state.clouddrive_slot.clone().acquire_owned().await else {
+            let _ =
+                tasks::finish_error(&state.pool, task_id, "CloudDrive 串行锁不可用", None).await;
+            return;
+        };
+        let _ = tasks::mark_running(&state.pool, task_id, "批量去重启动").await;
+        let emby_client = match dedup_emby_client(&state).await {
+            Ok(client) => client,
+            Err(err) => {
+                let _ = tasks::finish_error(&state.pool, task_id, &err.to_string(), None).await;
+                return;
+            }
+        };
+
+        let mut results = Vec::new();
+        for (index, group) in groups.iter().enumerate() {
+            if tasks::cancel_requested(&state.pool, task_id).await {
+                let _ = tasks::finish_cancelled(&state.pool, task_id).await;
+                return;
+            }
+            let label = group.tmdb.as_deref().unwrap_or("(no tmdb)");
+            let _ = tasks::set_progress(
+                &state.pool,
+                task_id,
+                index as i64,
+                &format!("去重 tmdb {label}"),
+            )
+            .await;
+
+            let mut removed = 0usize;
+            let mut err = None;
+            for item in &group.remove {
+                match delete_duplicate_folder(&state, item, &emby_client).await {
+                    Ok(_) => removed += 1,
+                    Err(current) => {
+                        err = Some(current.to_string());
+                        break;
+                    }
+                }
+            }
+            results.push(DedupExecuteBatchItemResult {
+                tmdb: group.tmdb.clone(),
+                ok: err.is_none(),
+                removed,
+                err,
+            });
+            let _ = tasks::set_progress(
+                &state.pool,
+                task_id,
+                (index + 1) as i64,
+                &format!("已处理 {}/{}", index + 1, groups.len()),
+            )
+            .await;
+        }
+
+        let ok_count = results.iter().filter(|item| item.ok).count();
+        let total = results.len();
+        let result = DedupExecuteBatchResult {
+            results,
+            ok_count,
+            total,
+        };
+        let _ = tasks::finish_done_with_message(
+            &state.pool,
+            task_id,
+            &format!("批量去重完成: {ok_count}/{total}"),
+            serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+        )
+        .await;
+    });
+}
+
+fn spawn_replace_batch(state: AppState, task_id: Uuid, items: Vec<ReplaceRequest>) {
+    tokio::spawn(async move {
+        let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
+            let _ = tasks::finish_error(&state.pool, task_id, "任务并发槽不可用", None).await;
+            return;
+        };
+        let Ok(_cloud_permit) = state.clouddrive_slot.clone().acquire_owned().await else {
+            let _ =
+                tasks::finish_error(&state.pool, task_id, "CloudDrive 串行锁不可用", None).await;
+            return;
+        };
+        let _ = tasks::mark_running(&state.pool, task_id, "批量替换启动").await;
+        let emby_client = match dedup_emby_client(&state).await {
+            Ok(client) => client,
+            Err(err) => {
+                let _ = tasks::finish_error(&state.pool, task_id, &err.to_string(), None).await;
+                return;
+            }
+        };
+
+        let mut results = Vec::new();
+        for (index, req) in items.iter().enumerate() {
+            if tasks::cancel_requested(&state.pool, task_id).await {
+                let _ = tasks::finish_cancelled(&state.pool, task_id).await;
+                return;
+            }
+            let _ = tasks::set_progress(
+                &state.pool,
+                task_id,
+                index as i64,
+                &format!("替换 {}", req.lose_folder.trim()),
+            )
+            .await;
+
+            let result = match plan_replace_for_roots(
+                &state.settings.cd_root,
+                &state.settings.strm_root,
+                req,
+            ) {
+                Ok(plan) => match run_replace_execute(&state, req, plan, &emby_client).await {
+                    Ok(response) => ReplaceBatchItemResult {
+                        lib: req.lib.clone(),
+                        win: req.win_folder.clone(),
+                        lose: req.lose_folder.clone(),
+                        ok: true,
+                        kept_as: Some(response.kept_as),
+                        msg: response.msg,
+                        err: None,
+                    },
+                    Err(err) => ReplaceBatchItemResult {
+                        lib: req.lib.clone(),
+                        win: req.win_folder.clone(),
+                        lose: req.lose_folder.clone(),
+                        ok: false,
+                        kept_as: None,
+                        msg: String::new(),
+                        err: Some(err.to_string()),
+                    },
+                },
+                Err(err) => ReplaceBatchItemResult {
+                    lib: req.lib.clone(),
+                    win: req.win_folder.clone(),
+                    lose: req.lose_folder.clone(),
+                    ok: false,
+                    kept_as: None,
+                    msg: String::new(),
+                    err: Some(err.to_string()),
+                },
+            };
+            results.push(result);
+            let _ = tasks::set_progress(
+                &state.pool,
+                task_id,
+                (index + 1) as i64,
+                &format!("已处理 {}/{}", index + 1, items.len()),
+            )
+            .await;
+        }
+
+        let ok_count = results.iter().filter(|item| item.ok).count();
+        let total = results.len();
+        let result = ReplaceBatchResult {
+            results,
+            ok_count,
+            total,
+        };
+        let _ = tasks::finish_done_with_message(
+            &state.pool,
+            task_id,
+            &format!("批量替换完成: {ok_count}/{total}"),
+            serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
+        )
+        .await;
+    });
 }
 
 pub fn analyze_duplicate_groups(strm_root: &Path) -> AppResult<DedupAnalysisResponse> {

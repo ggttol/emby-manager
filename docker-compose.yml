@@ -8,7 +8,7 @@ services:
       args:
         EMBY_MANAGER_UID: ${EMBY_MANAGER_UID:-10001}
         EMBY_MANAGER_GID: ${EMBY_MANAGER_GID:-10001}
-    image: ghcr.io/ggttol/emby-manager:main
+    image: ${EMBY_MANAGER_IMAGE:-ghcr.io/ggttol/emby-manager:main}
     container_name: emby-manager-rs
     user: "${EMBY_MANAGER_UID:-10001}:${EMBY_MANAGER_GID:-10001}"
     depends_on:
@@ -22,6 +22,9 @@ services:
       EMBY_MANAGER_LEGACY_DIR: /legacy
       EMBY_MANAGER_CD_ROOT: /media
       EMBY_MANAGER_STRM_ROOT: /strm
+      EMBY_MANAGER_SCHEDULER_ENABLED: ${EMBY_MANAGER_SCHEDULER_ENABLED:-false}
+      EMBY_MANAGER_DOCKER_DISABLED: ${EMBY_MANAGER_DOCKER_DISABLED:-true}
+      EMBY_MANAGER_DOCKER_BIN: ${EMBY_MANAGER_DOCKER_BIN:-}
       EMBY_MANAGER_BOOTSTRAP_PASSWORD: ${EMBY_MANAGER_BOOTSTRAP_PASSWORD:?set EMBY_MANAGER_BOOTSTRAP_PASSWORD in .env}
       RUST_LOG: ${RUST_LOG:-emby_manager=info,tower_http=info}
     ports:

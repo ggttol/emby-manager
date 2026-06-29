@@ -29,6 +29,8 @@ enum Command {
         dry_run: bool,
         #[arg(long, default_value_t = false)]
         apply: bool,
+        #[arg(long, default_value_t = false)]
+        enable_schedules: bool,
     },
 }
 
@@ -47,6 +49,7 @@ async fn main() -> anyhow::Result<()> {
             database_url,
             dry_run,
             apply,
+            enable_schedules,
         } => {
             if dry_run == apply {
                 anyhow::bail!("choose exactly one of --dry-run or --apply");
@@ -55,7 +58,9 @@ async fn main() -> anyhow::Result<()> {
             if apply {
                 db::migrate(&pool).await?;
             }
-            let report = migrate::run(&pool, legacy_dir.into(), apply).await?;
+            let report =
+                migrate::run_with_options(&pool, legacy_dir.into(), apply, enable_schedules)
+                    .await?;
             println!("{}", serde_json::to_string_pretty(&report)?);
             Ok(())
         }
@@ -71,7 +76,11 @@ async fn serve() -> anyhow::Result<()> {
     emby_manager::scheduler::reconcile_interrupted(&pool).await?;
 
     let state = AppState::new(pool, settings.clone());
-    emby_manager::scheduler::spawn_scheduler_loop(state.clone());
+    if env_flag("EMBY_MANAGER_SCHEDULER_ENABLED", true) {
+        emby_manager::scheduler::spawn_scheduler_loop(state.clone());
+    } else {
+        tracing::info!("scheduler loop disabled by EMBY_MANAGER_SCHEDULER_ENABLED");
+    }
     let app = emby_manager::api::router_with_state(state);
     let addr: SocketAddr = format!("{}:{}", settings.host, settings.port)
         .parse()
@@ -84,6 +93,16 @@ async fn serve() -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+fn env_flag(key: &str, default: bool) -> bool {
+    match std::env::var(key) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => default,
+    }
 }
 
 fn init_tracing() {

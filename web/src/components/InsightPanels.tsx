@@ -26,7 +26,9 @@ type CleanupSummaryResponse = components['schemas']['CleanupSummaryResponse'];
 type DedupAnalysisResponse = components['schemas']['DedupAnalysisResponse'];
 type DedupAutoAllResponse = components['schemas']['DedupAutoAllResponse'];
 type DedupExecuteRequest = components['schemas']['DedupExecuteRequest'];
-type DedupExecuteResponse = components['schemas']['DedupExecuteResponse'];
+type EmptyFolderCandidate = components['schemas']['EmptyFolderCandidate'];
+type EmptyFolderCleanupRequest = components['schemas']['EmptyFolderCleanupRequest'];
+type EmptyFolderCleanupTaskResult = components['schemas']['EmptyFolderCleanupTaskResult'];
 type DedupGroup = components['schemas']['DedupGroup'];
 type DedupReviewGroup = components['schemas']['DedupReviewGroup'];
 type DedupRow = components['schemas']['DedupRow'];
@@ -61,6 +63,28 @@ type EmptyDirCleanupResponse = {
   truncated: boolean;
   warnings: string[];
   task?: TaskRun | null;
+};
+
+type DedupExecuteBatchGroup = {
+  tmdb?: string | null;
+  remove: DedupExecuteRequest['remove'];
+};
+
+type DedupExecuteBatchRequest = {
+  groups: DedupExecuteBatchGroup[];
+};
+
+type DedupExecuteBatchItemResult = {
+  tmdb?: string | null;
+  ok: boolean;
+  removed: number;
+  err?: string | null;
+};
+
+type DedupExecuteBatchResult = {
+  results: DedupExecuteBatchItemResult[];
+  ok_count: number;
+  total: number;
 };
 
 type Tone = 'neutral' | 'ok' | 'warn' | 'error';
@@ -112,8 +136,20 @@ function shouldRefreshCleanup(task: TaskRun) {
   return task.status === 'done' && (task.kind.startsWith('cleanup_') || task.kind === 'manage_delete_batch_execute');
 }
 
+function isEmptyFolderCleanupResult(result: unknown): result is EmptyFolderCleanupTaskResult {
+  return Boolean(result && typeof result === 'object' && Array.isArray((result as Partial<EmptyFolderCleanupTaskResult>).items));
+}
+
+function isDedupExecuteBatchResult(result: unknown): result is DedupExecuteBatchResult {
+  return Boolean(result && typeof result === 'object' && Array.isArray((result as Partial<DedupExecuteBatchResult>).results));
+}
+
 function candidateKey(candidate: CleanupCandidate) {
   return `${candidate.lib}\u0000${candidate.item_id}\u0000${candidate.path || candidate.name}`;
+}
+
+function emptyFolderKey(candidate: EmptyFolderCandidate) {
+  return candidate.folder;
 }
 
 function folderFromCandidate(candidate: CleanupCandidate) {
@@ -139,6 +175,15 @@ function deleteRequestFromCandidate(candidate: CleanupCandidate): ManageDeleteRe
   };
 }
 
+function deleteRequestFromEmptyFolder(lib: string, candidate: EmptyFolderCandidate): ManageDeleteRequest {
+  return {
+    lib,
+    folder: candidate.folder,
+    item_id: null,
+    reason: '115 empty-folders 扫描候选'
+  };
+}
+
 function zhuigengArchiveKey(item: ZhuigengItem) {
   return `${item.lib}\u0000${item.folder || item.name}\u0000${item.id || item.tmdb || ''}`;
 }
@@ -152,6 +197,20 @@ function asGapsScanResult(result: unknown): GapsScanLibResult | null {
   const candidate = result as Partial<GapsScanLibResult>;
   if (!Array.isArray(candidate.items) || typeof candidate.lib !== 'string') return null;
   return candidate as GapsScanLibResult;
+}
+
+function asZhuigengScanAiringResult(result: unknown): ZhuigengScanAiringResponse | null {
+  if (!result || typeof result !== 'object') return null;
+  const candidate = result as Partial<ZhuigengScanAiringResponse>;
+  if (!Array.isArray(candidate.results)) return null;
+  return candidate as ZhuigengScanAiringResponse;
+}
+
+function asZhuigengGapsSummaryResult(result: unknown): ZhuigengGapsSummaryResponse | null {
+  if (!result || typeof result !== 'object') return null;
+  const candidate = result as Partial<ZhuigengGapsSummaryResponse>;
+  if (!Array.isArray(candidate.items)) return null;
+  return candidate as ZhuigengGapsSummaryResponse;
 }
 
 function StatCard({
@@ -390,6 +449,85 @@ function StrmBlock({
   );
 }
 
+function EmptyFolderCleanupBlock({
+  lib,
+  task,
+  result,
+  selectedKeys,
+  loading,
+  onScan,
+  onToggle,
+  onToggleAll,
+  onDeleteSelected
+}: {
+  lib: string;
+  task?: TaskRun | null;
+  result?: EmptyFolderCleanupTaskResult | null;
+  selectedKeys: Set<string>;
+  loading?: boolean;
+  onScan?: () => void;
+  onToggle?: (candidate: EmptyFolderCandidate) => void;
+  onToggleAll?: () => void;
+  onDeleteSelected?: () => void;
+}) {
+  const items = result?.items || [];
+  const selectedCount = items.filter((item) => selectedKeys.has(emptyFolderKey(item))).length;
+  const allSelected = items.length > 0 && selectedCount === items.length;
+  const active = isActiveTask(task);
+  return (
+    <section className="readonlyBlock">
+      <div className="sectionTitleRow">
+        <h2>115 empty-folders</h2>
+        <div className="inlineActions compactActions">
+          <button className="btn ghost compact" onClick={onScan} disabled={!lib || loading || active}>
+            <SearchX size={14} />
+            {loading || active ? '扫描中' : '扫描'}
+          </button>
+          <button className="btn ghost compact" onClick={onToggleAll} disabled={items.length === 0}>
+            <ListChecks size={14} />
+            {allSelected ? '取消全选' : '全选'}
+          </button>
+          <button className="btn danger compact" onClick={onDeleteSelected} disabled={selectedCount === 0}>
+            <Trash2 size={14} />
+            删除选中 {count(selectedCount)}
+          </button>
+        </div>
+      </div>
+      <div className="miniStats">
+        <span>库 <strong>{result?.lib || lib || '未选择'}</strong></span>
+        <span>候选 <strong>{count(items.length)}</strong></span>
+        <span>已扫 <strong>{count(result?.total_scanned)}</strong></span>
+        <span>大小 KB <strong>{count(result?.total_size_kb)}</strong></span>
+      </div>
+      {task && <div className="notice">扫描任务：{task.label} · {task.status}</div>}
+      {result?.truncated && <div className="notice warn">候选已截断，请缩小库或提高后端 limit。</div>}
+      {result?.warnings?.length ? <WarningList warnings={result.warnings} /> : null}
+      <div className="insightList compact cleanupCandidateList">
+        {items.map((item) => {
+          const key = emptyFolderKey(item);
+          const checked = selectedKeys.has(key);
+          return (
+            <article key={`empty-folder-${key}`}>
+              <input
+                type="checkbox"
+                aria-label={`选择 115 空文件夹：${item.folder}`}
+                checked={checked}
+                onChange={() => onToggle?.(item)}
+              />
+              <div className="cleanupCandidateBody">
+                <strong>{item.folder}</strong>
+                <small>{result?.lib || lib} · other_files {count(item.other_files)} · {count(item.size_kb)} KB</small>
+              </div>
+            </article>
+          );
+        })}
+        {result && items.length === 0 && <div className="empty inlineEmpty">本次扫描没有 115 空文件夹候选</div>}
+        {!result && <div className="empty inlineEmpty">选择媒体库后扫描 115 挂载目录，结果会从任务中心回填。</div>}
+      </div>
+    </section>
+  );
+}
+
 function CleanupLayout({
   title,
   subtitle,
@@ -422,8 +560,18 @@ function CleanupLayout({
   emptyCleanupTask,
   emptyCleanupLoading,
   emptyCleanupLib,
+  emptyFolderLib,
+  emptyFolderTask,
+  emptyFolderResult,
+  emptyFolderSelectedKeys,
+  emptyFolderLoading,
   onExecuteEmptyCleanup,
-  onEmptyCleanupLibChange
+  onEmptyCleanupLibChange,
+  onEmptyFolderLibChange,
+  onScanEmptyFolders,
+  onToggleEmptyFolder,
+  onToggleAllEmptyFolders,
+  onRequestDeleteEmptyFolders
 }: {
   title: string;
   subtitle: string;
@@ -442,6 +590,11 @@ function CleanupLayout({
   emptyCleanupTask?: TaskRun | null;
   emptyCleanupLoading?: boolean;
   emptyCleanupLib?: string;
+  emptyFolderLib?: string;
+  emptyFolderTask?: TaskRun | null;
+  emptyFolderResult?: EmptyFolderCleanupTaskResult | null;
+  emptyFolderSelectedKeys?: Set<string>;
+  emptyFolderLoading?: boolean;
   loading: boolean;
   error: string;
   actionLoading?: string | null;
@@ -457,6 +610,11 @@ function CleanupLayout({
   onRefreshNoRating?: () => void;
   onExecuteEmptyCleanup?: () => void;
   onEmptyCleanupLibChange?: (value: string) => void;
+  onEmptyFolderLibChange?: (value: string) => void;
+  onScanEmptyFolders?: () => void;
+  onToggleEmptyFolder?: (candidate: EmptyFolderCandidate) => void;
+  onToggleAllEmptyFolders?: () => void;
+  onRequestDeleteEmptyFolders?: () => void;
   variant: 'cleanup' | 'dedup';
 }) {
   const duplicateTotal = Number(data?.catalog?.duplicate_links || 0) + Number(data?.catalog?.duplicate_names || 0);
@@ -467,6 +625,7 @@ function CleanupLayout({
   const allCandidatesSelected = candidates.length > 0 && selectedCount === candidates.length;
   const deleteActive = isActiveTask(deleteTask);
   const refreshNoRatingActive = isActiveTask(refreshNoRatingTask);
+  const emptyFolderActive = isActiveTask(emptyFolderTask);
   const emptyCleanupAction = variant === 'cleanup' ? (
     <button
       className="btn compact"
@@ -532,6 +691,15 @@ function CleanupLayout({
               ))}
             </select>
           </label>
+          <label>
+            115 空文件夹 lib
+            <select className="input" aria-label="115 empty-folders lib" value={emptyFolderLib || ''} onChange={(event) => onEmptyFolderLibChange?.(event.target.value)}>
+              <option value="">请选择库</option>
+              {(libraries || []).map((library) => (
+                <option key={`empty-folder-${library.id || library.name}-${library.type}`} value={library.name}>{library.name}</option>
+              ))}
+            </select>
+          </label>
           <button className="btn" disabled={loading || actionLoading === 'suggest'}>
             <SearchX size={16} />
             {loading || actionLoading === 'suggest' ? '分析中' : '生成建议'}
@@ -539,6 +707,10 @@ function CleanupLayout({
           <button className="btn ghost" type="button" onClick={onRefreshNoRating} disabled={Boolean(actionLoading) || refreshNoRatingActive}>
             <RefreshCw size={16} />
             {actionLoading === 'refresh-no-rating' ? '提交中' : '刷新无评分'}
+          </button>
+          <button className="btn ghost" type="button" onClick={onScanEmptyFolders} disabled={!emptyFolderLib || Boolean(actionLoading) || emptyFolderActive}>
+            <SearchX size={16} />
+            {actionLoading === 'empty-folders' || emptyFolderActive ? '扫描中' : '扫描 115 空文件夹'}
           </button>
         </form>
       )}
@@ -620,6 +792,19 @@ function CleanupLayout({
           action={emptyCleanupAction}
         />
       </div>
+      {variant === 'cleanup' && (
+        <EmptyFolderCleanupBlock
+          lib={emptyFolderLib || ''}
+          task={emptyFolderTask}
+          result={emptyFolderResult}
+          selectedKeys={emptyFolderSelectedKeys || new Set()}
+          loading={emptyFolderLoading}
+          onScan={onScanEmptyFolders}
+          onToggle={onToggleEmptyFolder}
+          onToggleAll={onToggleAllEmptyFolders}
+          onDeleteSelected={onRequestDeleteEmptyFolders}
+        />
+      )}
       <div className="readonlySplit">
         <section className="readonlyBlock">
           <h2>运行健康</h2>
@@ -642,15 +827,20 @@ export function CleanupPanel() {
   const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
   const [selectedLib, setSelectedLib] = useState('');
   const [emptyCleanupLib, setEmptyCleanupLib] = useState('');
+  const [emptyFolderLib, setEmptyFolderLib] = useState('');
   const [top, setTop] = useState(50);
   const [minScore, setMinScore] = useState(10);
   const [dimensions, setDimensions] = useState<string[]>(CLEANUP_DIMENSIONS.map((dimension) => dimension.value));
   const [selectedCandidateKeys, setSelectedCandidateKeys] = useState<Set<string>>(new Set());
+  const [selectedEmptyFolderKeys, setSelectedEmptyFolderKeys] = useState<Set<string>>(new Set());
   const [pendingDelete, setPendingDelete] = useState<ManageDeleteBatchRequest | null>(null);
+  const [pendingDeleteKind, setPendingDeleteKind] = useState<'cleanup' | 'empty-folders'>('cleanup');
   const [deleteTask, setDeleteTask] = useState<TaskRun | null>(null);
   const [refreshNoRatingTask, setRefreshNoRatingTask] = useState<TaskRun | null>(null);
   const [emptyCleanup, setEmptyCleanup] = useState<EmptyDirCleanupResponse | null>(null);
   const [emptyCleanupTask, setEmptyCleanupTask] = useState<TaskRun | null>(null);
+  const [emptyFolderTask, setEmptyFolderTask] = useState<TaskRun | null>(null);
+  const [emptyFolderResult, setEmptyFolderResult] = useState<EmptyFolderCleanupTaskResult | null>(null);
   const [emptyCleanupLoading, setEmptyCleanupLoading] = useState(false);
   const [confirmEmptyCleanup, setConfirmEmptyCleanup] = useState(false);
   const [confirmDeleteSelected, setConfirmDeleteSelected] = useState(false);
@@ -685,6 +875,9 @@ export function CleanupPanel() {
       if (!selectedLib && nextLibraries[0]?.name) {
         setSelectedLib(nextLibraries[0].name);
       }
+      if (!emptyFolderLib && nextLibraries[0]?.name) {
+        setEmptyFolderLib(nextLibraries[0].name);
+      }
       setData(summary);
       setEmptyCleanup(emptyPreview);
       setSelectedCandidateKeys((previous) => {
@@ -699,7 +892,7 @@ export function CleanupPanel() {
     } finally {
       setLoading(false);
     }
-  }, [emptyCleanupPayload, selectedLib, suggestPayload, toast]);
+  }, [emptyCleanupPayload, emptyFolderLib, selectedLib, suggestPayload, toast]);
 
   useEffect(() => {
     load();
@@ -711,6 +904,16 @@ export function CleanupPanel() {
       if (detail?.task && shouldRefreshCleanup(detail.task)) {
         if (detail.task.kind === 'manage_delete_batch_execute') {
           setDeleteTask(detail.task);
+        } else if (detail.task.kind === 'cleanup_empty_folders') {
+          setEmptyFolderTask(detail.task);
+          const result = detail.task.result;
+          if (isEmptyFolderCleanupResult(result)) {
+            setEmptyFolderResult(result);
+            setSelectedEmptyFolderKeys((previous) => {
+              const available = new Set(result.items.map(emptyFolderKey));
+              return new Set([...previous].filter((key) => available.has(key)));
+            });
+          }
         } else {
           setEmptyCleanupTask(detail.task);
         }
@@ -771,6 +974,73 @@ export function CleanupPanel() {
       reason: `智能清理 min_score ${minScore}`
     };
     setPendingDelete(payload);
+    setPendingDeleteKind('cleanup');
+    setConfirmDeleteSelected(true);
+  };
+
+  const scanEmptyFolders = async () => {
+    const lib = emptyFolderLib.trim();
+    if (!lib) {
+      toast.push('先选择要扫描的 115 媒体库', 'warn');
+      return;
+    }
+    const payload: EmptyFolderCleanupRequest = { lib };
+    setActionLoading('empty-folders');
+    setError('');
+    try {
+      const task = await api<TaskRun>('/api/v2/cleanup/empty-folders', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+      setEmptyFolderTask(task);
+      setEmptyFolderResult(null);
+      setSelectedEmptyFolderKeys(new Set());
+      toast.push(`已创建 115 空文件夹扫描任务：${task.label || task.kind}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`115 空文件夹扫描失败：${message}`, 'error');
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const toggleEmptyFolder = (candidate: EmptyFolderCandidate) => {
+    const key = emptyFolderKey(candidate);
+    setSelectedEmptyFolderKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const toggleAllEmptyFolders = () => {
+    const items = emptyFolderResult?.items || [];
+    const allKeys = items.map(emptyFolderKey);
+    setSelectedEmptyFolderKeys((current) => {
+      if (allKeys.length > 0 && allKeys.every((key) => current.has(key))) return new Set();
+      return new Set(allKeys);
+    });
+  };
+
+  const requestDeleteEmptyFolders = () => {
+    const result = emptyFolderResult;
+    if (!result) {
+      toast.push('先完成一次 115 空文件夹扫描', 'warn');
+      return;
+    }
+    const selected = result.items.filter((candidate) => selectedEmptyFolderKeys.has(emptyFolderKey(candidate)));
+    if (selected.length === 0) {
+      toast.push('先选择要删除的 115 空文件夹候选', 'warn');
+      return;
+    }
+    const payload: ManageDeleteBatchRequest = {
+      items: selected.map((candidate) => deleteRequestFromEmptyFolder(result.lib || emptyFolderLib, candidate)),
+      reason: `115 empty-folders 扫描 ${result.lib || emptyFolderLib}`
+    };
+    setPendingDelete(payload);
+    setPendingDeleteKind('empty-folders');
     setConfirmDeleteSelected(true);
   };
 
@@ -785,7 +1055,7 @@ export function CleanupPanel() {
         body: JSON.stringify(pendingDelete)
       });
       setDeleteTask(task);
-      toast.push(`已创建智能清理删除任务：${task.label || task.kind}`, 'ok');
+      toast.push(`已创建${pendingDeleteKind === 'empty-folders' ? '115 空文件夹' : '智能清理'}删除任务：${task.label || task.kind}`, 'ok');
     } catch (e) {
       const message = errorMessage(e);
       setError(message);
@@ -793,6 +1063,12 @@ export function CleanupPanel() {
     } finally {
       setActionLoading(null);
     }
+  };
+
+  const changeEmptyFolderLib = (value: string) => {
+    setEmptyFolderLib(value);
+    setEmptyFolderResult(null);
+    setSelectedEmptyFolderKeys(new Set());
   };
 
   const refreshNoRating = async () => {
@@ -854,13 +1130,13 @@ export function CleanupPanel() {
       )}
       {confirmDeleteSelected && pendingDelete && (
         <ConfirmDanger
-          title="确认删除智能清理候选"
+          title={pendingDeleteKind === 'empty-folders' ? '确认删除 115 空文件夹候选' : '确认删除智能清理候选'}
           confirmText="确认删除选中"
           onCancel={() => setConfirmDeleteSelected(false)}
           onConfirm={executeDeleteSelected}
           body={(
             <div className="dangerCopy">
-              <p>将创建批量真实删除任务，按 Emby ItemId 和目录逐项处理。</p>
+              <p>{pendingDeleteKind === 'empty-folders' ? '将把选中的 115 空文件夹候选交给批量真实删除任务逐项处理。' : '将创建批量真实删除任务，按 Emby ItemId 和目录逐项处理。'}</p>
               <code>{pendingDelete.items.map((item) => `${item.lib}/${item.folder}${item.item_id ? `/${item.item_id}` : ''}`).join('\n')}</code>
             </div>
           )}
@@ -883,6 +1159,11 @@ export function CleanupPanel() {
         emptyCleanupTask={emptyCleanupTask}
         emptyCleanupLoading={emptyCleanupLoading}
         emptyCleanupLib={emptyCleanupLib}
+        emptyFolderLib={emptyFolderLib}
+        emptyFolderTask={emptyFolderTask}
+        emptyFolderResult={emptyFolderResult}
+        emptyFolderSelectedKeys={selectedEmptyFolderKeys}
+        emptyFolderLoading={actionLoading === 'empty-folders'}
         loading={loading}
         error={error}
         actionLoading={actionLoading}
@@ -898,6 +1179,11 @@ export function CleanupPanel() {
         onRefreshNoRating={refreshNoRating}
         onExecuteEmptyCleanup={() => setConfirmEmptyCleanup(true)}
         onEmptyCleanupLibChange={setEmptyCleanupLib}
+        onEmptyFolderLibChange={changeEmptyFolderLib}
+        onScanEmptyFolders={scanEmptyFolders}
+        onToggleEmptyFolder={toggleEmptyFolder}
+        onToggleAllEmptyFolders={toggleAllEmptyFolders}
+        onRequestDeleteEmptyFolders={requestDeleteEmptyFolders}
         variant="cleanup"
       />
     </>
@@ -999,25 +1285,28 @@ function DedupReviewGroups({
   );
 }
 
-function DedupExecuteResultBlock({ result }: { result: DedupExecuteResponse | null }) {
-  if (!result) return null;
+function DedupExecuteBatchTaskBlock({ task }: { task: TaskRun | null }) {
+  if (!task) return null;
+  const result = isDedupExecuteBatchResult(task.result) ? task.result : null;
   return (
     <section className="readonlyBlock">
-      <h2>人工去重结果</h2>
+      <h2>批量去重任务</h2>
       <div className="miniStats">
-        <span>状态 <strong>{result.ok ? '完成' : '异常'}</strong></span>
-        <span>tmdb <strong>{result.tmdb || 'mixed'}</strong></span>
-        <span>删除 folder <strong>{count(result.removed.length)}</strong></span>
+        <span>状态 <strong>{task.status}</strong></span>
+        <span>进度 <strong>{count(task.progress)} / {count(task.total)}</strong></span>
+        <span>成功组 <strong>{count(result?.ok_count)}</strong></span>
+        <span>总组 <strong>{count(result?.total ?? task.total)}</strong></span>
       </div>
+      {task.status_text && <p className="mutedParagraph">{task.status_text}</p>}
       <div className="insightList compact">
-        {result.removed.map((item) => (
-          <article key={`${item.lib}-${item.folder}-${item.undo_id}`}>
-            <span className="badge warn">removed</span>
-            <strong>{item.lib}/{item.folder}</strong>
-            <small>{item.deleted_from.join('、') || '无路径'} · undo {item.undo_id}</small>
+        {(result?.results || []).map((item, index) => (
+          <article key={`dedup-batch-${item.tmdb || 'unknown'}-${index}`}>
+            <span className={`badge ${item.ok ? 'ok' : 'error'}`}>{item.ok ? 'ok' : 'error'}</span>
+            <strong>tmdb:{item.tmdb || 'unknown'}</strong>
+            <small>removed {count(item.removed)}{item.err ? ` · ${item.err}` : ''}</small>
           </article>
         ))}
-        {result.removed.length === 0 && <div className="empty inlineEmpty">没有删除任何目录</div>}
+        {!result && <div className="empty inlineEmpty">等待任务完成后展示每个 tmdb 分组结果</div>}
       </div>
     </section>
   );
@@ -1084,11 +1373,11 @@ function ReplaceResultBlock({ result }: { result: ReplaceExecuteResponse | null 
 export function DedupPanel() {
   const [data, setData] = useState<DedupAnalysisResponse | null>(null);
   const [autoAllResult, setAutoAllResult] = useState<DedupAutoAllResponse | null>(null);
-  const [executeResult, setExecuteResult] = useState<DedupExecuteResponse | null>(null);
+  const [executeBatchTask, setExecuteBatchTask] = useState<TaskRun | null>(null);
   const [replaceResult, setReplaceResult] = useState<ReplaceExecuteResponse | null>(null);
   const [replaceDraft, setReplaceDraft] = useState({ lib: '', win_folder: '', lose_folder: '', reason: '' });
   const [selectedDedupKeys, setSelectedDedupKeys] = useState<Set<string>>(new Set());
-  const [pendingExecute, setPendingExecute] = useState<DedupExecuteRequest | null>(null);
+  const [pendingExecuteBatch, setPendingExecuteBatch] = useState<DedupExecuteBatchRequest | null>(null);
   const [confirmAction, setConfirmAction] = useState<'auto-all' | 'replace' | 'execute' | null>(null);
   const [acting, setActing] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1121,6 +1410,20 @@ export function DedupPanel() {
     load();
   }, [load]);
 
+  useEffect(() => {
+    const onTaskCompleted = (event: Event) => {
+      const detail = (event as CustomEvent<TaskCompleteDetail>).detail;
+      if (detail?.task?.kind !== 'dedup_exec_batch') return;
+      setExecuteBatchTask(detail.task);
+      if (detail.task.status === 'done') {
+        setSelectedDedupKeys(new Set());
+        load();
+      }
+    };
+    window.addEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
+    return () => window.removeEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
+  }, [load]);
+
   const autoGroups = data?.dups || [];
   const reviewGroups = data?.review || [];
   const manualRows = useMemo(() => [
@@ -1130,6 +1433,8 @@ export function DedupPanel() {
   const selectedManualRows = manualRows.filter((item) => selectedDedupKeys.has(dedupRowKey(item.tmdb, item.row)));
   const removeTotal = autoGroups.reduce((total, group) => total + group.remove.length, 0);
   const reviewRows = reviewGroups.reduce((total, group) => total + group.rows.length, 0);
+  const executeBatchResult = isDedupExecuteBatchResult(executeBatchTask?.result) ? executeBatchTask.result : null;
+  const manualDedupActive = isActiveTask(executeBatchTask);
   const replaceReady = Boolean(
     replaceDraft.lib.trim() &&
     replaceDraft.win_folder.trim() &&
@@ -1159,21 +1464,26 @@ export function DedupPanel() {
       toast.push('先选择要人工删除的重复目录', 'warn');
       return;
     }
+    const groupsByTmdb = new Map<string, DedupExecuteBatchGroup>();
     const seen = new Set<string>();
-    const remove = selectedManualRows
-      .map(({ row }) => ({ lib: row.lib, folder: row.folder }))
-      .filter((item) => {
-        const key = `${item.lib}\u0000${item.folder}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    const tmdbs = [...new Set(selectedManualRows.map((item) => item.tmdb).filter(Boolean))];
-    setPendingExecute({
-      tmdb: tmdbs.length === 1 ? tmdbs[0] : undefined,
-      remove,
-      reason: `人工复核去重 ${remove.length} 项`
-    });
+    for (const { tmdb, row } of selectedManualRows) {
+      const groupKey = tmdb || '';
+      const rowKey = `${groupKey}\u0000${row.lib}\u0000${row.folder}`;
+      if (seen.has(rowKey)) continue;
+      seen.add(rowKey);
+      const group = groupsByTmdb.get(groupKey) || {
+        tmdb: tmdb || null,
+        remove: []
+      };
+      group.remove.push({ lib: row.lib, folder: row.folder });
+      groupsByTmdb.set(groupKey, group);
+    }
+    const groups = [...groupsByTmdb.values()].filter((group) => group.remove.length > 0);
+    if (groups.length === 0) {
+      toast.push('没有可提交的去重分组', 'warn');
+      return;
+    }
+    setPendingExecuteBatch({ groups });
     setConfirmAction('execute');
   };
 
@@ -1205,23 +1515,21 @@ export function DedupPanel() {
   };
 
   const executeManualDedup = async () => {
-    if (!pendingExecute) return;
+    if (!pendingExecuteBatch) return;
     setActing(true);
     setConfirmAction(null);
     try {
-      const result = await api<DedupExecuteResponse>('/api/v2/dedup/execute', {
+      const task = await api<TaskRun>('/api/v2/dedup/execute-batch', {
         method: 'POST',
-        body: JSON.stringify(pendingExecute)
+        body: JSON.stringify(pendingExecuteBatch)
       });
-      setExecuteResult(result);
-      setSelectedDedupKeys(new Set());
-      toast.push(`人工去重完成：删除 ${result.removed.length} 个 folder`, 'ok');
-      await load();
+      setExecuteBatchTask(task);
+      toast.push(`已创建批量去重任务：${task.label || task.kind}`, 'ok');
     } catch (e) {
-      toast.push(`人工去重失败：${errorMessage(e)}`, 'error');
+      toast.push(`创建批量去重任务失败：${errorMessage(e)}`, 'error');
     } finally {
       setActing(false);
-      setPendingExecute(null);
+      setPendingExecuteBatch(null);
     }
   };
 
@@ -1278,7 +1586,7 @@ export function DedupPanel() {
           )}
         />
       )}
-      {confirmAction === 'execute' && pendingExecute && (
+      {confirmAction === 'execute' && pendingExecuteBatch && (
         <ConfirmDanger
           title="确认人工去重删除"
           confirmText="确认删除选中重复目录"
@@ -1286,8 +1594,11 @@ export function DedupPanel() {
           onConfirm={executeManualDedup}
           body={(
             <div className="dangerCopy">
-              <p>将按选中的 lib/folder 调用去重删除，并写入 undo 与 Emby 更新。</p>
-              <code>{pendingExecute.remove.map((item) => `${item.lib}/${item.folder}`).join('\n')}</code>
+              <p>将按 tmdb 分组创建批量去重任务，并写入 undo 与 Emby 更新。</p>
+              <code>{pendingExecuteBatch.groups.map((group) => {
+                const folders = group.remove.map((item) => `${item.lib}/${item.folder}`).join(', ');
+                return `tmdb:${group.tmdb || 'unknown'} -> ${folders}`;
+              }).join('\n')}</code>
             </div>
           )}
         />
@@ -1308,7 +1619,7 @@ export function DedupPanel() {
         <div className="statGrid">
           <StatCard icon={<ListChecks />} label="Auto groups" value={count(autoGroups.length)} tone={autoGroups.length ? 'warn' : 'ok'} hint={`remove ${count(removeTotal)}`} />
           <StatCard icon={<AlertTriangle />} label="Review groups" value={count(reviewGroups.length)} tone={reviewGroups.length ? 'warn' : 'ok'} hint={`rows ${count(reviewRows)}`} />
-          <StatCard icon={<Trash2 />} label="已执行删除" value={count(autoAllResult?.total_removed_folders)} tone={autoAllResult?.total_removed_folders ? 'warn' : 'neutral'} hint={autoAllResult ? `成功 ${count(autoAllResult.ok_count)}` : '等待操作'} />
+          <StatCard icon={<Trash2 />} label="批量去重" value={executeBatchTask?.status || '待命'} tone={executeBatchTask?.status === 'done' ? 'ok' : manualDedupActive ? 'warn' : 'neutral'} hint={executeBatchResult ? `成功 ${count(executeBatchResult.ok_count)} / ${count(executeBatchResult.total)}` : `已选 ${count(selectedManualRows.length)}`} />
           <StatCard icon={<CheckCircle2 />} label="Replace" value={replaceResult?.ok ? '完成' : '待命'} tone={replaceResult?.ok ? 'ok' : 'neutral'} hint={replaceResult?.kept_as || '手动 lib/win/lose'} />
         </div>
         <section className="readonlyBlock">
@@ -1319,9 +1630,9 @@ export function DedupPanel() {
                 <ListChecks size={14} />
                 清空选择
               </button>
-              <button className="btn danger compact" onClick={requestExecuteSelected} disabled={loading || acting || selectedManualRows.length === 0}>
+              <button className="btn danger compact" onClick={requestExecuteSelected} disabled={loading || acting || manualDedupActive || selectedManualRows.length === 0}>
                 <Trash2 size={14} />
-                人工删除 {count(selectedManualRows.length)}
+                {manualDedupActive ? '任务中' : `人工删除 ${count(selectedManualRows.length)}`}
               </button>
               <button className="btn danger compact" onClick={() => setConfirmAction('auto-all')} disabled={loading || acting || autoGroups.length === 0}>
                 <Trash2 size={14} />
@@ -1352,7 +1663,7 @@ export function DedupPanel() {
             <button className="btn danger" type="submit" disabled={acting || !replaceReady}>replace</button>
           </form>
         </section>
-        <DedupExecuteResultBlock result={executeResult} />
+        <DedupExecuteBatchTaskBlock task={executeBatchTask} />
         <DedupAutoAllResultBlock result={autoAllResult} />
         <ReplaceResultBlock result={replaceResult} />
         <div className="readonlySplit">
@@ -1644,6 +1955,8 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
   const [zhuigeng, setZhuigeng] = useState<ZhuigengStatusResponse | null>(null);
   const [airingResult, setAiringResult] = useState<ZhuigengScanAiringResponse | null>(null);
   const [zhuigengGapResult, setZhuigengGapResult] = useState<ZhuigengGapsSummaryResponse | null>(null);
+  const [airingTask, setAiringTask] = useState<TaskRun | null>(null);
+  const [zhuigengGapTask, setZhuigengGapTask] = useState<TaskRun | null>(null);
   const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
   const [selectedLib, setSelectedLib] = useState('');
   const [libraryError, setLibraryError] = useState('');
@@ -1757,6 +2070,32 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     };
   }, [scanTask?.id, scanTask?.status]);
 
+  useEffect(() => {
+    const onTaskCompleted = (event: Event) => {
+      const detail = (event as CustomEvent<TaskCompleteDetail>).detail;
+      const task = detail?.task;
+      if (!task) return;
+      if (task.kind === 'zhuigeng_scan_airing') {
+        setAiringTask(task);
+        const result = asZhuigengScanAiringResult(task.result);
+        if (result) {
+          setAiringResult(result);
+          toast.push(`在更扫描完成：${result.total} 个`, 'ok');
+        }
+        load();
+      } else if (task.kind === 'zhuigeng_gaps_summary') {
+        setZhuigengGapTask(task);
+        const result = asZhuigengGapsSummaryResult(task.result);
+        if (result) {
+          setZhuigengGapResult(result);
+          toast.push(`缺集汇总完成：${result.total} 条`, 'ok');
+        }
+      }
+    };
+    window.addEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
+    return () => window.removeEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
+  }, [load, toast]);
+
   const topLibraries = useMemo(() => (data?.autostrm?.libraries || []).slice(0, 10), [data]);
   const scanPct = scanTask?.total ? Math.min(100, Math.round((scanTask.progress / scanTask.total) * 100)) : 0;
   const canStartScan = !isZhuigeng && selectedLib && !startingScan && !isActiveTask(scanTask);
@@ -1815,11 +2154,12 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
   const runScanAiring = async () => {
     setZhuigengAction('scan-airing');
     try {
-      const result = await api<ZhuigengScanAiringResponse>('/api/v2/zhuigeng/scan-airing', { method: 'POST' });
-      setAiringResult(result);
-      toast.push(`在更扫描完成：${result.total} 个`, 'ok');
+      const task = await api<TaskRun>('/api/v2/zhuigeng/scan-airing', { method: 'POST' });
+      setAiringTask(task);
+      setAiringResult(null);
+      toast.push(`已启动在更扫描：${task.label || task.kind}`, 'ok');
     } catch (e) {
-      toast.push(`在更扫描失败：${errorMessage(e)}`, 'error');
+      toast.push(`启动在更扫描失败：${errorMessage(e)}`, 'error');
     } finally {
       setZhuigengAction('');
     }
@@ -1828,11 +2168,12 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
   const runGapsSummary = async () => {
     setZhuigengAction('gaps-summary');
     try {
-      const result = await api<ZhuigengGapsSummaryResponse>('/api/v2/zhuigeng/gaps-summary', { method: 'POST' });
-      setZhuigengGapResult(result);
-      toast.push(`缺集汇总完成：${result.total} 条`, 'ok');
+      const task = await api<TaskRun>('/api/v2/zhuigeng/gaps-summary', { method: 'POST' });
+      setZhuigengGapTask(task);
+      setZhuigengGapResult(null);
+      toast.push(`已启动缺集汇总：${task.label || task.kind}`, 'ok');
     } catch (e) {
-      toast.push(`缺集汇总失败：${errorMessage(e)}`, 'error');
+      toast.push(`启动缺集汇总失败：${errorMessage(e)}`, 'error');
     } finally {
       setZhuigengAction('');
     }
@@ -1912,7 +2253,7 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     const items = zhuigeng?.items || [];
     const behind = items.reduce((total, item) => total + item.behind, 0);
     const errors = items.filter((item) => item.err).length;
-    const actionRunning = Boolean(zhuigengAction);
+    const actionRunning = Boolean(zhuigengAction) || isActiveTask(airingTask) || isActiveTask(zhuigengGapTask);
     return (
       <section className="insightPanel">
         {confirmArchive && (
@@ -1976,6 +2317,8 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
             </div>
           </div>
           <p className="mutedParagraph">scan-airing 汇总在更剧状态；gaps-summary 输出 continuing 且 behind 的求资源清单；智能归档只处理已完结且有 folder/id 的条目。</p>
+          {airingTask && <div className="notice">在更扫描任务：{airingTask.label} · {airingTask.status}</div>}
+          {zhuigengGapTask && <div className="notice">缺集汇总任务：{zhuigengGapTask.label} · {zhuigengGapTask.status}</div>}
           {archiveTask && <div className="notice">归档任务：{archiveTask.label} · {archiveTask.status}</div>}
         </section>
         <CopyTextBlock

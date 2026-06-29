@@ -4,6 +4,7 @@ pub mod autostrm;
 pub mod c115;
 pub mod catalog;
 pub mod config_store;
+pub mod dashboard;
 pub mod db;
 pub mod dedup;
 pub mod emby;

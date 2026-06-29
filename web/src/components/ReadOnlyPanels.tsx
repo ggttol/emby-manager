@@ -20,11 +20,10 @@ import { useToast } from './Toast';
 
 type AutostrmStatusResponse = components['schemas']['AutostrmStatusResponse'];
 type CleanupSummaryResponse = components['schemas']['CleanupSummaryResponse'];
-type DedupAnalysisResponse = components['schemas']['DedupAnalysisResponse'];
+type DashboardTodoResponse = components['schemas']['DashboardTodoResponse'];
 type GapsSummaryResponse = components['schemas']['GapsSummaryResponse'];
 type InsightMeta = components['schemas']['InsightMeta'];
 type InsightTodo = components['schemas']['InsightTodo'];
-type PosterDetectResponse = components['schemas']['PosterDetectResponse'];
 type PathStatus = components['schemas']['PathStatus'];
 type StrmListResponse = components['schemas']['StrmListResponse'];
 type StrmOverview = components['schemas']['StrmOverview'];
@@ -35,7 +34,6 @@ type EmbyHealthSummary = components['schemas']['EmbyHealthSummary'];
 type HostMetrics = components['schemas']['HostMetrics'];
 type LoadAverage = components['schemas']['LoadAverage'];
 type MemorySummary = components['schemas']['MemorySummary'];
-type ZhuigengStatusResponse = components['schemas']['ZhuigengStatusResponse'];
 
 type DashboardTodoParity = {
   noposter: number;
@@ -135,41 +133,6 @@ function todoTone(severity: string) {
 function taskProblemCount(task?: TaskHistorySummary) {
   if (!task) return 0;
   return task.error + task.cancelled + task.interrupted + task.stale_running;
-}
-
-function settledValue<T>(result: PromiseSettledResult<T>): T | null {
-  return result.status === 'fulfilled' ? result.value : null;
-}
-
-function settledError(label: string, result: PromiseSettledResult<unknown>) {
-  return result.status === 'rejected' ? `${label}: ${errorMessage(result.reason)}` : '';
-}
-
-function buildDashboardTodoParity(
-  poster: PromiseSettledResult<PosterDetectResponse>,
-  dedup: PromiseSettledResult<DedupAnalysisResponse>,
-  zhuigeng: PromiseSettledResult<ZhuigengStatusResponse>
-): DashboardTodoParity {
-  const posterData = settledValue(poster);
-  const dedupData = settledValue(dedup);
-  const zhuigengData = settledValue(zhuigeng);
-  const noposterByLib: Record<string, number> = {};
-  for (const item of posterData?.items || []) {
-    if (item.has_poster) continue;
-    noposterByLib[item.lib || '?'] = (noposterByLib[item.lib || '?'] || 0) + 1;
-  }
-  return {
-    noposter: posterData?.missing_primary_total || 0,
-    dups_auto: dedupData?.dups?.length || 0,
-    dups_review: dedupData?.review?.length || 0,
-    airing_count: zhuigengData?.continuing || 0,
-    noposter_by_lib: noposterByLib,
-    errors: [
-      settledError('无海报', poster),
-      settledError('重复项', dedup),
-      settledError('追更', zhuigeng)
-    ].filter(Boolean)
-  };
 }
 
 function buildSystemReport(system: SystemSummary | null) {
@@ -343,25 +306,25 @@ export function DashboardPanel() {
     setError('');
     setDashboardTodo(EMPTY_DASHBOARD_TODO);
     try {
-      const [systemData, cleanupData, gapsData, autostrmData] = await Promise.all([
+      const [systemData, cleanupData, gapsData, autostrmData, todoData] = await Promise.all([
         api<SystemSummary>('/api/v2/system/summary'),
         api<CleanupSummaryResponse>('/api/v2/cleanup/suggest', { method: 'POST', body: JSON.stringify({}) }),
         api<GapsSummaryResponse>('/api/v2/gaps/scan', { method: 'POST', body: JSON.stringify({}) }),
-        api<AutostrmStatusResponse>('/api/v2/autostrm/status')
+        api<AutostrmStatusResponse>('/api/v2/autostrm/status'),
+        api<DashboardTodoResponse>('/api/v2/dashboard/todo')
       ]);
       setSystem(systemData);
       setCleanup(cleanupData);
       setGaps(gapsData);
       setAutostrm(autostrmData);
-      const [posterData, dedupData, zhuigengData] = await Promise.allSettled([
-        api<PosterDetectResponse>('/api/v2/posters/detect-mismatch', {
-          method: 'POST',
-          body: JSON.stringify({ include_missing_primary: true })
-        }),
-        api<DedupAnalysisResponse>('/api/v2/dedup/duplicates'),
-        api<ZhuigengStatusResponse>('/api/v2/zhuigeng')
-      ]);
-      setDashboardTodo(buildDashboardTodoParity(posterData, dedupData, zhuigengData));
+      setDashboardTodo({
+        noposter: todoData.noposter || 0,
+        dups_auto: todoData.dups_auto || 0,
+        dups_review: todoData.dups_review || 0,
+        airing_count: todoData.airing_count || 0,
+        noposter_by_lib: todoData.noposter_by_lib || {},
+        errors: [todoData.noposter_err, todoData.dups_err, todoData.airing_err].filter(Boolean) as string[]
+      });
     } catch (e) {
       const message = errorMessage(e);
       setError(message);

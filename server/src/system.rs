@@ -141,7 +141,7 @@ pub async fn system_summary(State(state): State<AppState>) -> AppResult<Json<Sys
         warnings.push(format!("数据库检查失败: {warning}"));
     }
 
-    let configured_roots = vec![
+    let mut configured_roots = vec![
         inspect_path(PathSpec::directory(
             "cd_root",
             "CloudDrive 媒体根",
@@ -174,14 +174,18 @@ pub async fn system_summary(State(state): State<AppState>) -> AppResult<Json<Sys
             false,
         ))
         .await,
-        inspect_path(PathSpec::file(
-            "docker_bin",
-            "Docker CLI",
-            &state.settings.docker_bin,
-            true,
-        ))
-        .await,
     ];
+    if !state.settings.docker_bin.as_os_str().is_empty() {
+        configured_roots.push(
+            inspect_path(PathSpec::file(
+                "docker_bin",
+                "Docker CLI",
+                &state.settings.docker_bin,
+                true,
+            ))
+            .await,
+        );
+    }
     warnings.extend(
         configured_roots
             .iter()
@@ -418,7 +422,7 @@ async fn docker_summary(docker_bin: &Path) -> DockerSummary {
     };
 
     if !configured {
-        summary.warning = Some("Docker CLI 未配置，跳过容器列表".to_string());
+        summary.status = "disabled".to_string();
         return summary;
     }
 

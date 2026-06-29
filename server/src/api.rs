@@ -1,15 +1,15 @@
 use crate::{
-    auth, autostrm, c115, catalog, config_store, dedup, error::AppResult, gaps, insights, logs,
-    media_fs, openapi::ApiDoc, posters, scheduler, settings::Settings, state::AppState, system,
-    tasks, undo, users, wizard, zhuigeng,
+    auth, autostrm, c115, catalog, config_store, dashboard, dedup, error::AppResult, gaps,
+    insights, logs, media_fs, openapi::ApiDoc, posters, scheduler, settings::Settings,
+    state::AppState, system, tasks, undo, users, wizard, zhuigeng,
 };
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{OriginalUri, State},
     http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{any, get},
 };
 use serde::Serialize;
 use sqlx::PgPool;
@@ -25,13 +25,6 @@ pub struct HealthResponse {
     pub status: &'static str,
     pub version: &'static str,
     pub database: &'static str,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct PlaceholderResponse {
-    pub ok: bool,
-    pub module: &'static str,
-    pub message: &'static str,
 }
 
 pub fn router(pool: PgPool, settings: Settings) -> Router {
@@ -51,6 +44,7 @@ pub fn router_with_state(state: AppState) -> Router {
         .merge(config_store::router())
         .merge(tasks::router())
         .merge(scheduler::router())
+        .merge(dashboard::router())
         .merge(catalog::router())
         .merge(system::router())
         .merge(autostrm::router())
@@ -65,6 +59,7 @@ pub fn router_with_state(state: AppState) -> Router {
         .merge(users::router())
         .merge(zhuigeng::router())
         .merge(wizard::router())
+        .route("/api/v2/{*path}", any(api_not_found))
         .with_state(state);
 
     api.fallback_service(ServeDir::new(web_dist).not_found_service(ServeFile::new(index)))
@@ -88,4 +83,15 @@ pub async fn health(State(state): State<AppState>) -> AppResult<Json<HealthRespo
 
 async fn openapi_json() -> Response {
     (StatusCode::OK, Json(ApiDoc::openapi())).into_response()
+}
+
+async fn api_not_found(uri: OriginalUri) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({
+            "error": "not_found",
+            "message": format!("API route not found: {}", uri.0.path()),
+        })),
+    )
+        .into_response()
 }

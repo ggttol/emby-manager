@@ -196,6 +196,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/c115/test-candidate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["test_candidate_cookie"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/catalog/duplicates": {
         parameters: {
             query?: never;
@@ -254,6 +270,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["catalog_transfer_plan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/catalog/transfer/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["catalog_transfer_execute"];
         delete?: never;
         options?: never;
         head?: never;
@@ -372,6 +404,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/dashboard/todo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_todo"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/dedup/auto-all": {
         parameters: {
             query?: never;
@@ -420,6 +468,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/dedup/execute-batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["execute_dedup_batch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/dedup/replace": {
         parameters: {
             query?: never;
@@ -430,6 +494,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["replace_execute"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/dedup/replace-batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["replace_batch"];
         delete?: never;
         options?: never;
         head?: never;
@@ -740,7 +820,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v2/posters/search": {
+    "/api/v2/posters/refresh-series": {
         parameters: {
             query?: never;
             header?: never;
@@ -748,6 +828,22 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
+        put?: never;
+        post: operations["refresh_series"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/posters/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["search_query"];
         put?: never;
         post: operations["search"];
         delete?: never;
@@ -1296,6 +1392,9 @@ export interface components {
             share: string;
             share_title?: string | null;
         };
+        C115TestCandidateRequest: {
+            cookie: string;
+        };
         C115TestResponse: {
             ok: boolean;
             uid: string;
@@ -1407,6 +1506,22 @@ export interface components {
         };
         /** @enum {string} */
         CatalogTransferAction: "save_share" | "offline_download" | "unsupported";
+        CatalogTransferExecuteRequest: {
+            cid?: string | null;
+            is_pkg?: boolean | null;
+            item?: null | components["schemas"]["CatalogTransferPlanItem"];
+            items?: components["schemas"]["CatalogTransferPlanItem"][];
+            label?: string | null;
+            lib?: string | null;
+            link?: string | null;
+            link_type?: string | null;
+            name?: string | null;
+            pwd?: string | null;
+            rc?: string | null;
+            share?: string | null;
+            sheet?: string | null;
+            target?: null | components["schemas"]["CatalogTransferTarget"];
+        };
         CatalogTransferPlanItem: {
             is_pkg?: boolean | null;
             link: string;
@@ -1568,6 +1683,19 @@ export interface components {
             ok: boolean;
             user: components["schemas"]["UserSummary"];
         };
+        DashboardTodoResponse: {
+            airing_count: number;
+            airing_err?: string | null;
+            airing_low_count: number;
+            dups_auto: number;
+            dups_err?: string | null;
+            dups_review: number;
+            noposter: number;
+            noposter_by_lib: {
+                [key: string]: number;
+            };
+            noposter_err?: string | null;
+        };
         DatabaseSummary: {
             configured: boolean;
             current_database?: string | null;
@@ -1610,6 +1738,24 @@ export interface components {
             notified: boolean;
             /** Format: uuid */
             undo_id: string;
+        };
+        DedupExecuteBatchGroup: {
+            remove: components["schemas"]["DedupFolderRef"][];
+            tmdb?: string | null;
+        };
+        DedupExecuteBatchItemResult: {
+            err?: string | null;
+            ok: boolean;
+            removed: number;
+            tmdb?: string | null;
+        };
+        DedupExecuteBatchRequest: {
+            groups: components["schemas"]["DedupExecuteBatchGroup"][];
+        };
+        DedupExecuteBatchResult: {
+            ok_count: number;
+            results: components["schemas"]["DedupExecuteBatchItemResult"][];
+            total: number;
         };
         DedupExecuteRequest: {
             reason?: string | null;
@@ -2014,11 +2160,6 @@ export interface components {
             warnings: string[];
             writable_hint?: boolean | null;
         };
-        PlaceholderResponse: {
-            message: string;
-            module: string;
-            ok: boolean;
-        };
         PosterApplyRequest: {
             id: string;
             name?: string | null;
@@ -2129,6 +2270,31 @@ export interface components {
             ok: boolean;
             refresh_triggered: number;
             scanned: number;
+        };
+        RefreshSeriesRequest: {
+            id: string;
+        };
+        RefreshSeriesResponse: {
+            /** Format: int32 */
+            code: number;
+            ok: boolean;
+        };
+        ReplaceBatchItemResult: {
+            err?: string | null;
+            kept_as?: string | null;
+            lib: string;
+            lose: string;
+            msg: string;
+            ok: boolean;
+            win: string;
+        };
+        ReplaceBatchRequest: {
+            items: components["schemas"]["ReplaceRequest"][];
+        };
+        ReplaceBatchResult: {
+            ok_count: number;
+            results: components["schemas"]["ReplaceBatchItemResult"][];
+            total: number;
         };
         ReplaceExecuteResponse: {
             deleted_from: string[];
@@ -2528,6 +2694,12 @@ export interface components {
             ok: boolean;
             total: number;
         };
+        ZhuigengGapsSummaryTaskResult: {
+            copy_text: string;
+            items: components["schemas"]["ZhuigengGapRow"][];
+            ok: boolean;
+            total: number;
+        };
         ZhuigengItem: {
             behind: number;
             behind_hint?: string | null;
@@ -2853,6 +3025,29 @@ export interface operations {
             };
         };
     };
+    test_candidate_cookie: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["C115TestCandidateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["C115TestResponse"];
+                };
+            };
+        };
+    };
     catalog_duplicates: {
         parameters: {
             query?: {
@@ -2935,6 +3130,29 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CatalogTransferPlanResponse"];
+                };
+            };
+        };
+    };
+    catalog_transfer_execute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CatalogTransferExecuteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
                 };
             };
         };
@@ -3115,6 +3333,25 @@ export interface operations {
             };
         };
     };
+    dashboard_todo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardTodoResponse"];
+                };
+            };
+        };
+    };
     auto_all: {
         parameters: {
             query?: never;
@@ -3180,6 +3417,29 @@ export interface operations {
             };
         };
     };
+    execute_dedup_batch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DedupExecuteBatchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
     replace_execute: {
         parameters: {
             query?: never;
@@ -3199,6 +3459,29 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ReplaceExecuteResponse"];
+                };
+            };
+        };
+    };
+    replace_batch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReplaceBatchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
                 };
             };
         };
@@ -3652,6 +3935,53 @@ export interface operations {
             };
         };
     };
+    refresh_series: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RefreshSeriesRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RefreshSeriesResponse"];
+                };
+            };
+        };
+    };
+    search_query: {
+        parameters: {
+            query: {
+                id: string;
+                name: string;
+                type: string;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PosterSearchResponse"];
+                };
+            };
+        };
+    };
     search: {
         parameters: {
             query?: never;
@@ -4032,7 +4362,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ZhuigengGapsSummaryResponse"];
+                    "application/json": components["schemas"]["TaskRun"];
                 };
             };
         };
@@ -4051,7 +4381,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ZhuigengScanAiringResponse"];
+                    "application/json": components["schemas"]["TaskRun"];
                 };
             };
         };

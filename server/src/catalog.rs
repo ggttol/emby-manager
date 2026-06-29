@@ -382,6 +382,7 @@ pub async fn catalog_transfer_plan(
     Ok(Json(build_transfer_plan(req)?))
 }
 
+#[utoipa::path(post, path = "/api/v2/catalog/transfer/execute", tag = "catalog", request_body = CatalogTransferExecuteRequest, responses((status = 200, body = TaskRun)))]
 pub async fn catalog_transfer_execute(
     State(state): State<AppState>,
     Json(req): Json<CatalogTransferExecuteRequest>,

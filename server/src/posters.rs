@@ -5,7 +5,11 @@ use crate::{
     state::AppState,
     tasks::{self, TaskRun},
 };
-use axum::{Json, Router, extract::State, routing::post};
+use axum::{
+    Json, Router,
+    extract::{Query, State},
+    routing::{get, post},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::{Duration, sleep};
@@ -76,6 +80,15 @@ pub struct PosterSearchResponse {
     pub candidates: Vec<PosterSearchCandidate>,
 }
 
+#[derive(Debug, Clone, Deserialize, utoipa::IntoParams)]
+pub struct PosterSearchQuery {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub item_type: String,
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct PosterSearchCandidate {
     pub name: String,
@@ -105,6 +118,17 @@ pub struct PosterApplyResponse {
     pub image_download_status: Option<u16>,
 }
 
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+pub struct RefreshSeriesRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct RefreshSeriesResponse {
+    pub ok: bool,
+    pub code: u16,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct PosterFixBatchRequest {
     pub ids: Vec<String>,
@@ -131,8 +155,9 @@ pub struct PosterFixOneResult {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/posters/detect-mismatch", post(detect_mismatch))
-        .route("/api/v2/posters/search", post(search))
+        .route("/api/v2/posters/search", get(search_query).post(search))
         .route("/api/v2/posters/apply", post(apply))
+        .route("/api/v2/posters/refresh-series", post(refresh_series))
         .route("/api/v2/posters/fix-batch", post(fix_batch))
 }
 
@@ -177,6 +202,32 @@ pub async fn search(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v2/posters/search",
+    tag = "posters",
+    params(PosterSearchQuery),
+    responses((status = 200, body = PosterSearchResponse))
+)]
+pub async fn search_query(
+    State(state): State<AppState>,
+    Query(query): Query<PosterSearchQuery>,
+) -> AppResult<Json<PosterSearchResponse>> {
+    let client = poster_client(&state).await?;
+    Ok(Json(
+        search_posters(
+            &client,
+            PosterSearchRequest {
+                id: query.id,
+                name: query.name,
+                item_type: query.item_type,
+                limit: query.limit,
+            },
+        )
+        .await?,
+    ))
+}
+
+#[utoipa::path(
     post,
     path = "/api/v2/posters/apply",
     tag = "posters",
@@ -190,6 +241,31 @@ pub async fn apply(
     validate_tmdb(&req.tmdb)?;
     let client = poster_client(&state).await?;
     Ok(Json(apply_poster_match(&state.pool, &client, req).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v2/posters/refresh-series",
+    tag = "posters",
+    request_body = RefreshSeriesRequest,
+    responses((status = 200, body = RefreshSeriesResponse))
+)]
+pub async fn refresh_series(
+    State(state): State<AppState>,
+    Json(req): Json<RefreshSeriesRequest>,
+) -> AppResult<Json<RefreshSeriesResponse>> {
+    let id = req.id.trim();
+    if id.is_empty() {
+        return Err(AppError::BadRequest("id must not be empty".to_string()));
+    }
+    let client = poster_client(&state).await?;
+    let code = client
+        .refresh_item_with_options(id, false, false, false)
+        .await?;
+    Ok(Json(RefreshSeriesResponse {
+        ok: matches!(code, 200 | 204),
+        code,
+    }))
 }
 
 #[utoipa::path(
