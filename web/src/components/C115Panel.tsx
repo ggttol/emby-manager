@@ -24,6 +24,7 @@ type AddNewReport = components['schemas']['AddNewReport'];
 type AddNewItem = components['schemas']['AddNewItem'];
 type AddNewRequest = components['schemas']['AddNewRequest'];
 type AddNewAutoResolveItemReport = components['schemas']['AddNewAutoResolveItemReport'];
+type AddNewPosterAutoFixItemReport = components['schemas']['AddNewPosterAutoFixItemReport'];
 type DedupGroup = components['schemas']['DedupGroup'];
 type DedupReviewGroup = components['schemas']['DedupReviewGroup'];
 type DedupRow = components['schemas']['DedupRow'];
@@ -161,6 +162,8 @@ function AddNewReportCard({
   const groups = [...report.dedup.dups, ...report.dedup.review];
   const autoResolve = report.auto_resolve;
   const autoItems = autoResolve?.items || [];
+  const posterAutoFix = report.poster_auto_fix;
+  const posterAutoItems = posterAutoFix?.items || [];
   const candidates = groups.flatMap((group) => {
     const candidate = smartReplaceCandidate(group);
     return candidate
@@ -191,10 +194,35 @@ function AddNewReportCard({
           {autoResolve?.skipped_count ? ` / 跳过 ${autoResolve.skipped_count}` : ''}
           {autoResolve?.error_count ? ` / 失败 ${autoResolve.error_count}` : ''}
         </span>
+        <span className={posterAutoFix?.error_count ? 'badge warn' : posterAutoFix?.fixed_count ? 'badge done' : 'badge'}>
+          海报修复 {posterAutoFix?.fixed_count || 0}
+          {posterAutoFix?.skipped_count ? ` / 跳过 ${posterAutoFix.skipped_count}` : ''}
+          {posterAutoFix?.error_count ? ` / 失败 ${posterAutoFix.error_count}` : ''}
+        </span>
         <span className={report.poster.issue_count ? 'badge warn' : 'badge done'}>
           海报问题 {report.poster.issue_count}
         </span>
       </div>
+      {posterAutoItems.length > 0 && (
+        <div className="c115WizardDupList">
+          {posterAutoItems.slice(0, 6).map((item: AddNewPosterAutoFixItemReport) => (
+            <div className="c115WizardDup" key={`${item.id}-${item.status}-${item.tmdb || ''}`}>
+              <div>
+                <span className={item.status === 'fixed' ? 'badge done' : 'badge warn'}>
+                  {item.status === 'fixed' ? '已修复海报' : item.status === 'skipped' ? '已跳过' : '修复失败'}
+                </span>
+                {item.tmdb && <span>tmdb {item.tmdb}</span>}
+              </div>
+              <p>
+                {item.name}
+                <span> [{item.lib} · {item.type}]</span>
+              </p>
+              <p>{item.error || item.reason}</p>
+            </div>
+          ))}
+          {posterAutoItems.length > 6 && <p className="settingsHint">还有 {posterAutoItems.length - 6} 条海报修复记录未展开。</p>}
+        </div>
+      )}
       {autoItems.length > 0 && (
         <div className="c115WizardDupList">
           {autoItems.slice(0, 6).map((item: AddNewAutoResolveItemReport) => (

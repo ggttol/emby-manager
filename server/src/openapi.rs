@@ -80,8 +80,9 @@ use crate::{
     wizard::{
         AddNewAutoResolveItemReport, AddNewAutoResolveReport, AddNewCheckErrorReport,
         AddNewCheckItemReport, AddNewCheckReport, AddNewCheckSuspiciousReport, AddNewDedupReport,
-        AddNewItem, AddNewPosterIssueReport, AddNewPosterReport, AddNewReport, AddNewRequest,
-        AddNewScanReport, AddNewStrmReport, AddNewTarget, AddNewTargetReport, AddNewTransferAction,
+        AddNewItem, AddNewPosterAutoFixItemReport, AddNewPosterAutoFixReport,
+        AddNewPosterIssueReport, AddNewPosterReport, AddNewReport, AddNewRequest, AddNewScanReport,
+        AddNewStrmReport, AddNewTarget, AddNewTargetReport, AddNewTransferAction,
         AddNewTransferItemReport, AddNewTransferSummary,
     },
     zhuigeng::{
@@ -364,6 +365,8 @@ use utoipa::OpenApi;
         AddNewScanReport,
         AddNewPosterReport,
         AddNewPosterIssueReport,
+        AddNewPosterAutoFixReport,
+        AddNewPosterAutoFixItemReport,
         AddNewCheckReport,
         AddNewCheckItemReport,
         AddNewCheckErrorReport,

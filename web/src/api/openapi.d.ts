@@ -1234,6 +1234,26 @@ export interface components {
             pwd?: string | null;
             url: string;
         };
+        AddNewPosterAutoFixItemReport: {
+            error?: string | null;
+            id: string;
+            lib: string;
+            name: string;
+            poster?: boolean | null;
+            reason: string;
+            status: string;
+            tmdb?: string | null;
+            type: string;
+        };
+        AddNewPosterAutoFixReport: {
+            error_count: number;
+            fixed_count: number;
+            items: components["schemas"]["AddNewPosterAutoFixItemReport"][];
+            ok: boolean;
+            skipped_count: number;
+            triggered: boolean;
+            warnings: string[];
+        };
         AddNewPosterIssueReport: {
             has_poster: boolean;
             id: string;
@@ -1264,6 +1284,7 @@ export interface components {
             dedup: components["schemas"]["AddNewDedupReport"];
             ok: boolean;
             poster: components["schemas"]["AddNewPosterReport"];
+            poster_auto_fix: components["schemas"]["AddNewPosterAutoFixReport"];
             scan: components["schemas"]["AddNewScanReport"];
             strm: components["schemas"]["AddNewStrmReport"];
             target: components["schemas"]["AddNewTargetReport"];

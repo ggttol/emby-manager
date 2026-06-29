@@ -2,10 +2,10 @@ use crate::{
     c115::{self, C115Client, C115OfflineRequest, C115SaveRequest},
     config_store,
     dedup::{self, DedupGroup, DedupReviewGroup, DedupRow},
-    emby::{EmbyClient, EmbyLibrary},
+    emby::{EmbyClient, EmbyItem, EmbyLibrary},
     error::{AppError, AppResult},
     media_fs::{self, ManageDeleteExecuteResult, ManageDeleteRequest, StrmGenerateResult},
-    posters::{self, PosterDetectRequest},
+    posters::{self, PosterApplyRequest, PosterDetectRequest},
     state::AppState,
     tasks::{self, TaskRun},
 };
@@ -83,6 +83,7 @@ pub struct AddNewReport {
     pub auto_resolve: AddNewAutoResolveReport,
     pub scan: AddNewScanReport,
     pub poster: AddNewPosterReport,
+    pub poster_auto_fix: AddNewPosterAutoFixReport,
     pub check: AddNewCheckReport,
 }
 
@@ -229,6 +230,45 @@ pub struct AddNewPosterIssueReport {
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddNewPosterAutoFixReport {
+    pub ok: bool,
+    pub triggered: bool,
+    pub fixed_count: usize,
+    pub skipped_count: usize,
+    pub error_count: usize,
+    pub items: Vec<AddNewPosterAutoFixItemReport>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddNewPosterAutoFixItemReport {
+    pub id: String,
+    pub name: String,
+    pub lib: String,
+    #[serde(rename = "type")]
+    pub item_type: String,
+    pub tmdb: Option<String>,
+    pub status: String,
+    pub reason: String,
+    pub poster: Option<bool>,
+    pub error: Option<String>,
+}
+
+impl AddNewPosterAutoFixReport {
+    fn not_triggered() -> Self {
+        Self {
+            ok: true,
+            triggered: false,
+            fixed_count: 0,
+            skipped_count: 0,
+            error_count: 0,
+            items: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AddNewCheckReport {
     pub ok: bool,
     pub status: String,
@@ -330,6 +370,23 @@ fn spawn_add_new(state: AppState, id: Uuid, plan: AddNewPlan) {
                     "完成，扫描触发失败".to_string()
                 } else if !report.poster.ok {
                     "完成，海报检测失败".to_string()
+                } else if report.poster_auto_fix.error_count > 0 {
+                    format!(
+                        "完成，海报自动修复失败 {} 项",
+                        report.poster_auto_fix.error_count
+                    )
+                } else if report.poster_auto_fix.fixed_count > 0
+                    && report.auto_resolve.resolved_count > 0
+                {
+                    format!(
+                        "完成，自动修复 {} 个海报并处理 {} 个重复旧版本",
+                        report.poster_auto_fix.fixed_count, report.auto_resolve.resolved_count
+                    )
+                } else if report.poster_auto_fix.fixed_count > 0 {
+                    format!(
+                        "完成，自动修复 {} 个海报",
+                        report.poster_auto_fix.fixed_count
+                    )
                 } else if report.auto_resolve.error_count > 0 {
                     format!("完成，自动处理失败 {} 项", report.auto_resolve.error_count)
                 } else if report.auto_resolve.resolved_count > 0 {
@@ -463,6 +520,28 @@ async fn run_add_new_pipeline(
     )
     .await?;
 
+    let poster_before_fix = inspect_posters(&emby_client, plan.target_lib.as_deref()).await;
+    let poster_auto_fix = auto_fix_new_posters(
+        &state.pool,
+        &emby_client,
+        plan.target_lib.as_deref(),
+        &strm,
+        &poster_before_fix,
+    )
+    .await;
+    let poster = if poster_auto_fix.fixed_count > 0 {
+        inspect_posters(&emby_client, plan.target_lib.as_deref()).await
+    } else {
+        poster_before_fix
+    };
+    tasks::set_progress(
+        &state.pool,
+        id,
+        (total_items + 2) as i64,
+        "海报检测/自动修复阶段完成",
+    )
+    .await?;
+
     let emby_groups = collect_emby_tmdb_groups_for_add_new(
         state,
         &emby_client,
@@ -482,16 +561,15 @@ async fn run_add_new_pipeline(
     )
     .await;
 
-    let poster = inspect_posters(&emby_client, plan.target_lib.as_deref()).await;
-    tasks::set_progress(
-        &state.pool,
-        id,
-        (total_items + 2) as i64,
-        "海报检测阶段完成",
-    )
-    .await?;
-
-    let check = build_post_add_check(&transfer, &strm, &dedup, &auto_resolve, &scan, &poster);
+    let check = build_post_add_check(
+        &transfer,
+        &strm,
+        &dedup,
+        &auto_resolve,
+        &scan,
+        &poster,
+        &poster_auto_fix,
+    );
     tasks::set_progress(
         &state.pool,
         id,
@@ -501,7 +579,12 @@ async fn run_add_new_pipeline(
     .await?;
 
     Ok(AddNewReport {
-        ok: transfer.ok && auto_resolve.ok && scan.ok && poster.ok && check.ok,
+        ok: transfer.ok
+            && auto_resolve.ok
+            && poster_auto_fix.ok
+            && scan.ok
+            && poster.ok
+            && check.ok,
         target: AddNewTargetReport {
             cid: plan.target_cid,
             lib: plan.target_lib,
@@ -512,6 +595,7 @@ async fn run_add_new_pipeline(
         auto_resolve,
         scan,
         poster,
+        poster_auto_fix,
         check,
     })
 }
@@ -755,6 +839,376 @@ async fn inspect_posters(client: &EmbyClient, lib: Option<&str>) -> AddNewPoster
             error: Some(err.to_string()),
         },
     }
+}
+
+#[derive(Debug, Clone)]
+struct PosterTmdbAlias {
+    key: String,
+    tmdb: String,
+    folder: String,
+}
+
+async fn auto_fix_new_posters(
+    pool: &sqlx::PgPool,
+    client: &EmbyClient,
+    target_lib: Option<&str>,
+    strm: &AddNewStrmReport,
+    poster: &AddNewPosterReport,
+) -> AddNewPosterAutoFixReport {
+    let Some(target_lib) = target_lib.and_then(non_empty_trimmed) else {
+        return AddNewPosterAutoFixReport::not_triggered();
+    };
+    if poster.items.is_empty() || strm.new_folders.is_empty() {
+        return AddNewPosterAutoFixReport::not_triggered();
+    }
+
+    let new_folders = strm
+        .new_folders
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let libraries = match client.libraries().await {
+        Ok(libraries) => libraries,
+        Err(err) => {
+            return AddNewPosterAutoFixReport {
+                ok: false,
+                triggered: true,
+                fixed_count: 0,
+                skipped_count: 0,
+                error_count: 1,
+                items: Vec::new(),
+                warnings: vec![format!("海报自动修复读取 Emby 库失败: {err}")],
+            };
+        }
+    };
+    let Some(library) = libraries.iter().find(|library| library.name == target_lib) else {
+        return AddNewPosterAutoFixReport {
+            ok: false,
+            triggered: true,
+            fixed_count: 0,
+            skipped_count: 0,
+            error_count: 1,
+            items: Vec::new(),
+            warnings: vec![format!("海报自动修复未找到目标 Emby 库: {target_lib}")],
+        };
+    };
+    let aliases = collect_poster_tmdb_aliases(client, library).await;
+
+    let mut items = Vec::new();
+    for issue in poster
+        .items
+        .iter()
+        .filter(|issue| issue.lib == target_lib && !issue.has_poster)
+    {
+        let current = match client
+            .item(&issue.id, "Path,ProviderIds,Name,ImageTags")
+            .await
+        {
+            Ok(Some(item)) => item,
+            Ok(None) => {
+                items.push(poster_auto_fix_item(
+                    issue,
+                    None,
+                    "skipped",
+                    "Emby 条目已不存在，跳过海报自动修复",
+                    None,
+                    None,
+                ));
+                continue;
+            }
+            Err(err) => {
+                items.push(poster_auto_fix_item(
+                    issue,
+                    None,
+                    "error",
+                    "读取 Emby 条目失败",
+                    None,
+                    Some(err.to_string()),
+                ));
+                continue;
+            }
+        };
+        let folder = current
+            .path
+            .as_deref()
+            .and_then(|path| folder_from_emby_path(path, library))
+            .or_else(|| current.name.clone())
+            .unwrap_or_else(|| issue.name.clone());
+        if !new_folders.contains(folder.as_str()) {
+            continue;
+        }
+        let Some((tmdb, reason)) = infer_poster_tmdb(&current, issue, &folder, &aliases) else {
+            items.push(poster_auto_fix_item(
+                issue,
+                None,
+                "skipped",
+                "新条目缺少 tmdbid，且没有找到同发布名的已绑定条目",
+                None,
+                None,
+            ));
+            continue;
+        };
+
+        match posters::apply_poster_match(
+            pool,
+            client,
+            PosterApplyRequest {
+                id: issue.id.clone(),
+                tmdb: tmdb.clone(),
+                item_type: issue.item_type.clone(),
+                name: Some(issue.name.clone()),
+            },
+        )
+        .await
+        {
+            Ok(result) => items.push(poster_auto_fix_item(
+                issue,
+                Some(tmdb),
+                "fixed",
+                &reason,
+                Some(result.poster),
+                None,
+            )),
+            Err(err) => items.push(poster_auto_fix_item(
+                issue,
+                Some(tmdb),
+                "error",
+                &reason,
+                None,
+                Some(err.to_string()),
+            )),
+        }
+    }
+
+    if items.is_empty() {
+        return AddNewPosterAutoFixReport::not_triggered();
+    }
+    let fixed_count = items.iter().filter(|item| item.status == "fixed").count();
+    let skipped_count = items.iter().filter(|item| item.status == "skipped").count();
+    let error_count = items.iter().filter(|item| item.status == "error").count();
+    AddNewPosterAutoFixReport {
+        ok: error_count == 0,
+        triggered: true,
+        fixed_count,
+        skipped_count,
+        error_count,
+        items,
+        warnings: Vec::new(),
+    }
+}
+
+async fn collect_poster_tmdb_aliases(
+    client: &EmbyClient,
+    library: &EmbyLibrary,
+) -> Vec<PosterTmdbAlias> {
+    let Some(parent_id) = library.id.as_deref().and_then(non_empty_trimmed) else {
+        return Vec::new();
+    };
+    let Ok(result) = client
+        .library_items(parent_id, emby_item_types(library), 30_000)
+        .await
+    else {
+        return Vec::new();
+    };
+    let mut aliases = Vec::new();
+    for item in result.items {
+        let Some(tmdb) = item.provider_id("Tmdb") else {
+            continue;
+        };
+        let folder = item
+            .path
+            .as_deref()
+            .and_then(|path| folder_from_emby_path(path, library))
+            .or(item.name.clone())
+            .unwrap_or_else(|| tmdb.clone());
+        for key in poster_match_keys([Some(folder.as_str()), item.name.as_deref()]) {
+            aliases.push(PosterTmdbAlias {
+                key,
+                tmdb: tmdb.clone(),
+                folder: folder.clone(),
+            });
+        }
+    }
+    aliases
+}
+
+fn infer_poster_tmdb(
+    item: &EmbyItem,
+    issue: &AddNewPosterIssueReport,
+    folder: &str,
+    aliases: &[PosterTmdbAlias],
+) -> Option<(String, String)> {
+    if let Some(tmdb) = item.provider_id("Tmdb") {
+        return Some((tmdb, "条目已有 TMDb，自动刷新海报".to_string()));
+    }
+    if let Some(tmdb) = declared_tmdb_id(folder).or_else(|| declared_tmdb_id(&issue.name)) {
+        return Some((tmdb, "新目录声明 tmdbid，自动绑定并刷新海报".to_string()));
+    }
+
+    let keys = poster_match_keys([Some(folder), Some(issue.name.as_str())]);
+    let mut matched = BTreeMap::<String, BTreeSet<String>>::new();
+    for alias in aliases {
+        if keys.contains(&alias.key) {
+            matched
+                .entry(alias.tmdb.clone())
+                .or_default()
+                .insert(alias.folder.clone());
+        }
+    }
+    if matched.len() != 1 {
+        return None;
+    }
+    let (tmdb, folders) = matched.into_iter().next()?;
+    let source = folders.into_iter().next().unwrap_or_else(|| tmdb.clone());
+    Some((
+        tmdb,
+        format!("匹配到同库已绑定条目「{source}」，复用其 TMDb 自动刷新海报"),
+    ))
+}
+
+fn poster_auto_fix_item(
+    issue: &AddNewPosterIssueReport,
+    tmdb: Option<String>,
+    status: &str,
+    reason: &str,
+    poster: Option<bool>,
+    error: Option<String>,
+) -> AddNewPosterAutoFixItemReport {
+    AddNewPosterAutoFixItemReport {
+        id: issue.id.clone(),
+        name: issue.name.clone(),
+        lib: issue.lib.clone(),
+        item_type: issue.item_type.clone(),
+        tmdb,
+        status: status.to_string(),
+        reason: reason.to_string(),
+        poster,
+        error,
+    }
+}
+
+fn poster_match_keys<const N: usize>(values: [Option<&str>; N]) -> BTreeSet<String> {
+    values
+        .into_iter()
+        .flatten()
+        .filter_map(poster_match_key)
+        .collect()
+}
+
+fn poster_match_key(value: &str) -> Option<String> {
+    let mut value = trim_media_extension(value);
+    if let Some(base) = duplicate_suffix_base(&value) {
+        value = base.to_string();
+    }
+    let lower = value.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut last_space = false;
+    for token in lower.split(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '.' | '_' | '-' | '[' | ']' | '(' | ')' | '{' | '}')
+    }) {
+        if token.is_empty() {
+            continue;
+        }
+        if is_season_release_token(token) || is_quality_release_token(token) {
+            break;
+        }
+        if token.starts_with("tmdbid") {
+            continue;
+        }
+        if !last_space && !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(token);
+        last_space = false;
+    }
+    let compact = out
+        .chars()
+        .filter(|ch| ch.is_alphanumeric() || is_cjk(*ch))
+        .collect::<String>();
+    (compact.chars().count() >= 4).then_some(compact)
+}
+
+fn is_season_release_token(token: &str) -> bool {
+    let Some(rest) = token.strip_prefix('s') else {
+        return token.starts_with("season");
+    };
+    if !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()) {
+        return true;
+    }
+    rest.split_once('e').is_some_and(|(season, episode)| {
+        !season.is_empty()
+            && !episode.is_empty()
+            && season.chars().all(|ch| ch.is_ascii_digit())
+            && episode.chars().all(|ch| ch.is_ascii_digit())
+    })
+}
+
+fn is_quality_release_token(token: &str) -> bool {
+    matches!(
+        token,
+        "2160p"
+            | "1080p"
+            | "720p"
+            | "480p"
+            | "web"
+            | "webdl"
+            | "web-dl"
+            | "webrip"
+            | "bluray"
+            | "hdtv"
+            | "remux"
+            | "h264"
+            | "h265"
+            | "x264"
+            | "x265"
+            | "hevc"
+            | "dv"
+            | "hdr"
+            | "ddp"
+            | "ddp5"
+            | "ddp5.1"
+    )
+}
+
+fn is_cjk(ch: char) -> bool {
+    ('\u{4e00}'..='\u{9fff}').contains(&ch)
+}
+
+fn duplicate_suffix_base(folder: &str) -> Option<&str> {
+    let folder = folder.trim_end();
+    let (close_idx, close) = folder.char_indices().last()?;
+    if close != ')' && close != '）' {
+        return None;
+    }
+    for (open_idx, open) in folder[..close_idx].char_indices().rev() {
+        if open != '(' && open != '（' {
+            continue;
+        }
+        let digits = &folder[open_idx + open.len_utf8()..close_idx];
+        if !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit()) && open_idx > 0 {
+            return Some(folder[..open_idx].trim_end());
+        }
+        return None;
+    }
+    None
+}
+
+fn declared_tmdb_id(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    for marker in ["tmdbid-", "tmdbid_"] {
+        let Some(start) = lower.find(marker) else {
+            continue;
+        };
+        let digit_start = start + marker.len();
+        let digits = lower[digit_start..]
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        if !digits.is_empty() {
+            return Some(digits);
+        }
+    }
+    None
 }
 
 fn poster_issue_from_signal(item: posters::PosterSignalItem) -> AddNewPosterIssueReport {
@@ -1367,6 +1821,7 @@ fn build_post_add_check(
     auto_resolve: &AddNewAutoResolveReport,
     scan: &AddNewScanReport,
     poster: &AddNewPosterReport,
+    poster_auto_fix: &AddNewPosterAutoFixReport,
 ) -> AddNewCheckReport {
     let mut items = Vec::with_capacity(transfer.items.len());
     let mut errors = Vec::new();
@@ -1422,6 +1877,19 @@ fn build_post_add_check(
                 .error
                 .clone()
                 .unwrap_or_else(|| "海报检测失败".to_string()),
+        });
+    }
+    if !poster_auto_fix.ok && poster_auto_fix.items.is_empty() {
+        stage_error_count += 1;
+        errors.push(AddNewCheckErrorReport {
+            stage: "poster_auto_fix".to_string(),
+            index: None,
+            label: None,
+            message: poster_auto_fix
+                .warnings
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "海报自动修复失败".to_string()),
         });
     }
 
@@ -1561,6 +2029,44 @@ fn build_post_add_check(
             label: "poster-detect".to_string(),
             message: warning.clone(),
         });
+    }
+    for item in &poster_auto_fix.items {
+        match item.status.as_str() {
+            "fixed" => {
+                items.push(AddNewCheckItemReport {
+                    index: items.len(),
+                    ok: true,
+                    action: AddNewTransferAction::Unsupported,
+                    label: Some(format!("自动修复海报 {}", item.name)),
+                    url: item
+                        .tmdb
+                        .as_deref()
+                        .map(|tmdb| format!("tmdb:{tmdb}"))
+                        .unwrap_or_else(|| item.id.clone()),
+                    status: "ok".to_string(),
+                    message: item.reason.clone(),
+                });
+            }
+            "skipped" => {
+                suspicious.push(AddNewCheckSuspiciousReport {
+                    stage: "poster_auto_fix".to_string(),
+                    severity: "warn".to_string(),
+                    id: Some(item.id.clone()),
+                    label: item.name.clone(),
+                    message: item.reason.clone(),
+                });
+            }
+            "error" => {
+                errors.push(AddNewCheckErrorReport {
+                    stage: "poster_auto_fix".to_string(),
+                    index: None,
+                    label: Some(item.name.clone()),
+                    message: item.error.clone().unwrap_or_else(|| item.reason.clone()),
+                });
+                stage_error_count += 1;
+            }
+            _ => {}
+        }
     }
     for item in &poster.items {
         suspicious.push(AddNewCheckSuspiciousReport {
@@ -1758,12 +2264,65 @@ fn truncate(value: &str, limit: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_already_received_message;
+    use super::{
+        AddNewPosterIssueReport, PosterTmdbAlias, infer_poster_tmdb, is_already_received_message,
+        poster_match_key,
+    };
+    use crate::emby::EmbyItem;
+    use std::collections::BTreeMap;
 
     #[test]
     fn treats_115_already_received_as_idempotent_success() {
         assert!(is_already_received_message("文件已接收，无需重复接收！"));
         assert!(is_already_received_message("无需重复接收"));
         assert!(!is_already_received_message("转存失败"));
+    }
+
+    #[test]
+    fn poster_match_key_groups_release_variants() {
+        assert_eq!(
+            poster_match_key("The.First.Jasmine.2026.S01.2160p.WEB-DL.DV.H.265.DDP5.1-HiveWeb"),
+            Some("thefirstjasmine2026".to_string())
+        );
+        assert_eq!(
+            poster_match_key("The.First.Jasmine.2026.S01.2160p.WEB-DL.H.265.DDP-Pure@HiveWeb(1)"),
+            Some("thefirstjasmine2026".to_string())
+        );
+    }
+
+    #[test]
+    fn infers_poster_tmdb_from_same_library_alias() {
+        let issue = AddNewPosterIssueReport {
+            id: "new-series".to_string(),
+            name: "The.First.Jasmine.2026".to_string(),
+            lib: "2026完结剧集".to_string(),
+            item_type: "Series".to_string(),
+            has_poster: false,
+            score: 40,
+            reasons: vec!["没有 Primary poster".to_string()],
+        };
+        let item = EmbyItem {
+            id: Some("new-series".to_string()),
+            name: Some("The.First.Jasmine.2026".to_string()),
+            item_type: Some("Series".to_string()),
+            path: Some("/strm/2026完结剧集/The.First.Jasmine.2026.S01.2160p.WEB-DL.DV.H.265.DDP5.1-HiveWeb".to_string()),
+            production_year: Some(2026),
+            image_tags: BTreeMap::new(),
+            provider_ids: BTreeMap::new(),
+        };
+        let aliases = vec![PosterTmdbAlias {
+            key: "thefirstjasmine2026".to_string(),
+            tmdb: "292696".to_string(),
+            folder: "The.First.Jasmine.2026.S01.2160p.WEB-DL.H.265.DDP-Pure@HiveWeb".to_string(),
+        }];
+
+        let inferred = infer_poster_tmdb(
+            &item,
+            &issue,
+            "The.First.Jasmine.2026.S01.2160p.WEB-DL.DV.H.265.DDP5.1-HiveWeb",
+            &aliases,
+        );
+
+        assert_eq!(inferred.map(|(tmdb, _)| tmdb), Some("292696".to_string()));
     }
 }
