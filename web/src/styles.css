@@ -2580,6 +2580,36 @@ main {
   justify-content: flex-end;
 }
 
+.dedupBulkBar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 26px rgba(21, 29, 20, 0.08);
+}
+
+.dedupBulkSummary {
+  display: grid;
+  gap: 2px;
+  min-width: 150px;
+}
+
+.dedupBulkSummary strong {
+  font-size: 17px;
+}
+
+.dedupBulkSummary span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .cleanupCandidateList article {
   grid-template-columns: auto minmax(0, 1fr);
 }
@@ -2628,6 +2658,31 @@ main {
   margin-top: 4px;
 }
 
+.dedupGroupList article.dedupGroupCard {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+
+.dedupGroupHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dedupGroupTitle {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.dedupGroupTitle strong,
+.dedupGroupTitle small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .dedupPickRow {
   align-items: flex-start;
   min-width: 0;
@@ -2635,10 +2690,36 @@ main {
   border: 1px solid var(--line);
   border-radius: 7px;
   background: var(--surface-soft);
+  white-space: normal;
 }
 
-.dedupPickRow span {
+.dedupPickRow.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.dedupRowText {
+  display: grid;
+  gap: 3px;
   min-width: 0;
+}
+
+.dedupRowTitle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  min-width: 0;
+}
+
+.dedupRowTitle strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.dedupRowText small {
+  color: var(--muted);
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
@@ -2655,6 +2736,15 @@ main {
   color: var(--muted);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.insightList .dedupGroupTitle small,
+.insightList .dedupRowText small {
+  grid-column: auto;
+}
+
+.dedupRowTitle .badge {
+  font-style: normal;
 }
 
 .undoMiniList code {
@@ -2992,6 +3082,17 @@ main {
   .topbar {
     top: 106px;
     min-height: 76px;
+  }
+
+  .dedupBulkBar,
+  .dedupGroupHead {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dedupBulkBar .inlineActions,
+  .dedupGroupHead .inlineActions {
+    justify-content: flex-start;
   }
 }
 

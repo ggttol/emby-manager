@@ -191,6 +191,73 @@ function dedupRowKey(tmdb: string | null | undefined, row: DedupRow) {
   return `${tmdb || 'unknown'}\u0000${row.lib}\u0000${row.folder}\u0000${row.item_id || ''}`;
 }
 
+function dedupDuplicateSuffixBase(folder: string) {
+  const match = folder.trim().match(/^(.*?)[(（]\d+[)）]$/);
+  return match?.[1]?.trim() || '';
+}
+
+function dedupLibraryWeight(lib: string) {
+  const lower = lib.toLowerCase();
+  if (/追更|在更|最新|临时|暂存|下载|待整理|zhuigeng|airing|latest|temp/.test(lower)) return 0;
+  if (/完结|归档|电影|剧集|电视剧|综艺|动漫|纪录/.test(lower)) return 4;
+  return 3;
+}
+
+function hasDeclaredTmdb(folder: string) {
+  return /tmdb/i.test(folder);
+}
+
+function dedupSmartScore(row: DedupRow) {
+  const duplicateSuffixPenalty = dedupDuplicateSuffixBase(row.folder) ? -300 : 0;
+  return (
+    dedupLibraryWeight(row.lib) * 1000 +
+    (row.n || 0) * 20 +
+    (row.score || 0) * 2 +
+    (hasDeclaredTmdb(row.folder) ? 12 : 0) +
+    duplicateSuffixPenalty
+  );
+}
+
+function compareDedupSmartKeep(a: DedupRow, b: DedupRow) {
+  return dedupSmartScore(b) - dedupSmartScore(a)
+    || (b.n || 0) - (a.n || 0)
+    || (b.score || 0) - (a.score || 0)
+    || a.folder.length - b.folder.length
+    || a.lib.localeCompare(b.lib, 'zh-Hans-CN')
+    || a.folder.localeCompare(b.folder, 'zh-Hans-CN');
+}
+
+function smartKeepRow(rows: DedupRow[]) {
+  return [...rows].sort(compareDedupSmartKeep)[0] || null;
+}
+
+function isSmartReviewRemoval(row: DedupRow, keep: DedupRow) {
+  if (row === keep) return false;
+  if (dedupDuplicateSuffixBase(row.folder)) return true;
+  if (dedupLibraryWeight(row.lib) < dedupLibraryWeight(keep.lib)) return true;
+  if ((row.n || 0) < (keep.n || 0)) return true;
+  if ((row.score || 0) < (keep.score || 0)) return true;
+  return false;
+}
+
+function smartReviewRemoveRows(group: DedupReviewGroup) {
+  const keep = smartKeepRow(group.rows);
+  if (!keep) return [];
+  return group.rows.filter((row) => isSmartReviewRemoval(row, keep));
+}
+
+function dedupRowSummary(row: DedupRow) {
+  return `${row.lib} · score ${count(row.score)} · n ${count(row.n)}${row.item_id ? ` · item ${row.item_id}` : ''}`;
+}
+
+function dedupFolderLabel(row: DedupRow) {
+  return `${row.lib}/${row.folder}`;
+}
+
+function dedupKeysForRows(tmdb: string | null | undefined, rows: DedupRow[]) {
+  return rows.map((row) => dedupRowKey(tmdb, row));
+}
+
 function asGapsScanResult(result: unknown): GapsScanLibResult | null {
   if (!result || typeof result !== 'object') return null;
   const candidate = result as Partial<GapsScanLibResult>;
@@ -1189,14 +1256,51 @@ export function CleanupPanel() {
   );
 }
 
+function DedupRowOption({
+  tmdb,
+  row,
+  selected,
+  marker,
+  onToggle
+}: {
+  tmdb: string;
+  row: DedupRow;
+  selected: boolean;
+  marker?: 'keep' | 'remove';
+  onToggle: (tmdb: string, row: DedupRow) => void;
+}) {
+  const markerClass = marker === 'keep' ? 'ok' : marker === 'remove' ? 'warn' : '';
+  return (
+    <label className={`switchRow dedupPickRow ${selected ? 'selected' : ''}`}>
+      <input
+        type="checkbox"
+        aria-label={`选择去重删除：${dedupFolderLabel(row)}`}
+        checked={selected}
+        onChange={() => onToggle(tmdb, row)}
+      />
+      <span className="dedupRowText">
+        <span className="dedupRowTitle">
+          {marker && <em className={`badge ${markerClass}`}>{marker === 'keep' ? 'keep' : 'drop'}</em>}
+          <strong>{row.folder}</strong>
+        </span>
+        <small>{dedupRowSummary(row)}</small>
+      </span>
+    </label>
+  );
+}
+
 function DedupAutoGroups({
   groups,
   selectedKeys,
-  onToggle
+  onToggle,
+  onSelectGroup,
+  onClearGroup
 }: {
   groups: DedupGroup[];
   selectedKeys: Set<string>;
   onToggle: (tmdb: string, row: DedupRow) => void;
+  onSelectGroup: (tmdb: string, rows: DedupRow[]) => void;
+  onClearGroup: (tmdb: string, rows: DedupRow[]) => void;
 }) {
   return (
     <section className="readonlyBlock">
@@ -1204,28 +1308,37 @@ function DedupAutoGroups({
         <h2>Auto groups</h2>
         <span className="badge warn">{count(groups.length)}</span>
       </div>
-      <div className="insightList compact">
+      <div className="insightList compact dedupGroupList">
         {groups.map((group) => (
-          <article key={`auto-${group.tmdb}-${group.keep.folder}`}>
-            <span className="badge warn">tmdb:{group.tmdb || 'unknown'}</span>
-            <strong>保留 {group.keep.folder}</strong>
-            <small>
-              {group.keep.lib} · score {count(group.keep.score)} · 删除 {count(group.remove.length)} 个：
-              {group.remove.map((row) => row.folder).join('、') || '无'}
-            </small>
+          <article className="dedupGroupCard" key={`auto-${group.tmdb}-${group.keep.folder}`}>
+            <div className="dedupGroupHead">
+              <div className="dedupGroupTitle">
+                <span className="badge warn">TMDB:{group.tmdb || 'unknown'}</span>
+                <strong>保留 {group.keep.folder}</strong>
+                <small>{dedupRowSummary(group.keep)} · 删除 {count(group.remove.length)} 个</small>
+              </div>
+              <div className="inlineActions compactActions">
+                <button className="btn ghost compact" type="button" onClick={() => onSelectGroup(group.tmdb, group.remove)}>
+                  <ListChecks size={14} />
+                  选本组
+                </button>
+                <button className="btn ghost compact" type="button" onClick={() => onClearGroup(group.tmdb, group.remove)}>
+                  清本组
+                </button>
+              </div>
+            </div>
             <div className="dedupRemoveList">
               {group.remove.map((row) => {
                 const key = dedupRowKey(group.tmdb, row);
                 return (
-                  <label className="switchRow dedupPickRow" key={key}>
-                    <input
-                      type="checkbox"
-                      aria-label={`选择去重删除：${row.lib}/${row.folder}`}
-                      checked={selectedKeys.has(key)}
-                      onChange={() => onToggle(group.tmdb, row)}
-                    />
-                    <span>{row.lib}/{row.folder} · score {count(row.score)} · n {count(row.n)}{row.item_id ? ` · item ${row.item_id}` : ''}</span>
-                  </label>
+                  <DedupRowOption
+                    key={key}
+                    tmdb={group.tmdb}
+                    row={row}
+                    marker="remove"
+                    selected={selectedKeys.has(key)}
+                    onToggle={onToggle}
+                  />
                 );
               })}
             </div>
@@ -1240,11 +1353,15 @@ function DedupAutoGroups({
 function DedupReviewGroups({
   groups,
   selectedKeys,
-  onToggle
+  onToggle,
+  onSmartGroup,
+  onClearGroup
 }: {
   groups: DedupReviewGroup[];
   selectedKeys: Set<string>;
   onToggle: (tmdb: string, row: DedupRow) => void;
+  onSmartGroup: (group: DedupReviewGroup) => void;
+  onClearGroup: (tmdb: string, rows: DedupRow[]) => void;
 }) {
   return (
     <section className="readonlyBlock">
@@ -1252,32 +1369,47 @@ function DedupReviewGroups({
         <h2>Review groups</h2>
         <span className="badge">{count(groups.length)}</span>
       </div>
-      <div className="insightList compact">
-        {groups.map((group) => (
-          <article key={`review-${group.tmdb}-${group.why}`}>
-            <span className="badge">tmdb:{group.tmdb || 'unknown'}</span>
-            <strong>{group.why}</strong>
-            <small>
-              {group.rows.map((row) => `${row.lib}/${row.folder} · score ${row.score} · n ${row.n}${row.item_id ? ` · item ${row.item_id}` : ''}`).join('；')}
-            </small>
-            <div className="dedupRemoveList">
-              {group.rows.map((row) => {
-                const key = dedupRowKey(group.tmdb, row);
-                return (
-                  <label className="switchRow dedupPickRow" key={key}>
-                    <input
-                      type="checkbox"
-                      aria-label={`选择去重删除：${row.lib}/${row.folder}`}
-                      checked={selectedKeys.has(key)}
-                      onChange={() => onToggle(group.tmdb, row)}
+      <div className="insightList compact dedupGroupList">
+        {groups.map((group) => {
+          const keep = smartKeepRow(group.rows);
+          const suggested = new Set(smartReviewRemoveRows(group).map((row) => dedupRowKey(group.tmdb, row)));
+          return (
+            <article className="dedupGroupCard" key={`review-${group.tmdb}-${group.why}`}>
+              <div className="dedupGroupHead">
+                <div className="dedupGroupTitle">
+                  <span className="badge">TMDB:{group.tmdb || 'unknown'}</span>
+                  <strong>{group.why}</strong>
+                  <small>{keep ? `推荐保留 ${dedupFolderLabel(keep)}` : `${count(group.rows.length)} 个候选`}</small>
+                </div>
+                <div className="inlineActions compactActions">
+                  <button className="btn ghost compact" type="button" onClick={() => onSmartGroup(group)} disabled={suggested.size === 0}>
+                    <ListChecks size={14} />
+                    智能选本组
+                  </button>
+                  <button className="btn ghost compact" type="button" onClick={() => onClearGroup(group.tmdb, group.rows)}>
+                    清本组
+                  </button>
+                </div>
+              </div>
+              <div className="dedupRemoveList">
+                {group.rows.map((row) => {
+                  const key = dedupRowKey(group.tmdb, row);
+                  const marker = keep === row ? 'keep' : suggested.has(key) ? 'remove' : undefined;
+                  return (
+                    <DedupRowOption
+                      key={key}
+                      tmdb={group.tmdb}
+                      row={row}
+                      marker={marker}
+                      selected={selectedKeys.has(key)}
+                      onToggle={onToggle}
                     />
-                    <span>{row.lib}/{row.folder} · score {count(row.score)} · n {count(row.n)}{row.item_id ? ` · item ${row.item_id}` : ''}</span>
-                  </label>
-                );
-              })}
-            </div>
-          </article>
-        ))}
+                  );
+                })}
+              </div>
+            </article>
+          );
+        })}
         {groups.length === 0 && <div className="empty inlineEmpty">没有需要人工复核的重复组</div>}
       </div>
     </section>
@@ -1429,6 +1561,16 @@ export function DedupPanel() {
     ...autoGroups.flatMap((group) => group.remove.map((row) => ({ tmdb: group.tmdb, row }))),
     ...reviewGroups.flatMap((group) => group.rows.map((row) => ({ tmdb: group.tmdb, row })))
   ], [autoGroups, reviewGroups]);
+  const autoSelectionKeys = useMemo(() => new Set(
+    autoGroups.flatMap((group) => dedupKeysForRows(group.tmdb, group.remove))
+  ), [autoGroups]);
+  const reviewSmartSelectionKeys = useMemo(() => new Set(
+    reviewGroups.flatMap((group) => dedupKeysForRows(group.tmdb, smartReviewRemoveRows(group)))
+  ), [reviewGroups]);
+  const smartSelectionKeys = useMemo(() => new Set([
+    ...autoSelectionKeys,
+    ...reviewSmartSelectionKeys
+  ]), [autoSelectionKeys, reviewSmartSelectionKeys]);
   const selectedManualRows = manualRows.filter((item) => selectedDedupKeys.has(dedupRowKey(item.tmdb, item.row)));
   const removeTotal = autoGroups.reduce((total, group) => total + group.remove.length, 0);
   const reviewRows = reviewGroups.reduce((total, group) => total + group.rows.length, 0);
@@ -1456,6 +1598,35 @@ export function DedupPanel() {
 
   const clearDedupSelection = () => {
     setSelectedDedupKeys(new Set());
+  };
+
+  const selectDedupKeySet = (keys: Set<string>, label: string) => {
+    if (keys.size === 0) {
+      toast.push(`${label} 没有可选项`, 'warn');
+      return;
+    }
+    setSelectedDedupKeys(new Set(keys));
+    toast.push(`${label}：已选 ${keys.size} 项`, 'ok');
+  };
+
+  const setDedupRowsSelected = (tmdb: string, rows: DedupRow[], selected: boolean) => {
+    setSelectedDedupKeys((current) => {
+      const next = new Set(current);
+      for (const key of dedupKeysForRows(tmdb, rows)) {
+        if (selected) next.add(key);
+        else next.delete(key);
+      }
+      return next;
+    });
+  };
+
+  const smartSelectReviewGroup = (group: DedupReviewGroup) => {
+    const rows = smartReviewRemoveRows(group);
+    if (rows.length === 0) {
+      toast.push('本组没有明显可智能选择的删除项', 'warn');
+      return;
+    }
+    setDedupRowsSelected(group.tmdb, rows, true);
   };
 
   const requestExecuteSelected = () => {
@@ -1621,23 +1792,38 @@ export function DedupPanel() {
           <StatCard icon={<Trash2 />} label="批量去重" value={executeBatchTask?.status || '待命'} tone={executeBatchTask?.status === 'done' ? 'ok' : manualDedupActive ? 'warn' : 'neutral'} hint={executeBatchResult ? `成功 ${count(executeBatchResult.ok_count)} / ${count(executeBatchResult.total)}` : `已选 ${count(selectedManualRows.length)}`} />
           <StatCard icon={<CheckCircle2 />} label="Replace" value={replaceResult?.ok ? '完成' : '待命'} tone={replaceResult?.ok ? 'ok' : 'neutral'} hint={replaceResult?.kept_as || '手动 lib/win/lose'} />
         </div>
+        <div className="dedupBulkBar">
+          <div className="dedupBulkSummary">
+            <strong>已选 {count(selectedManualRows.length)}</strong>
+            <span>智能 {count(smartSelectionKeys.size)} · Auto {count(autoSelectionKeys.size)} · Review {count(reviewSmartSelectionKeys.size)}</span>
+          </div>
+          <div className="inlineActions compactActions">
+            <button className="btn ghost compact" type="button" onClick={() => selectDedupKeySet(smartSelectionKeys, '智能选择')} disabled={loading || acting || smartSelectionKeys.size === 0}>
+              <ListChecks size={14} />
+              智能选择
+            </button>
+            <button className="btn ghost compact" type="button" onClick={() => selectDedupKeySet(autoSelectionKeys, 'Auto 选择')} disabled={loading || acting || autoSelectionKeys.size === 0}>
+              Auto
+            </button>
+            <button className="btn ghost compact" type="button" onClick={() => selectDedupKeySet(reviewSmartSelectionKeys, 'Review 选择')} disabled={loading || acting || reviewSmartSelectionKeys.size === 0}>
+              Review
+            </button>
+            <button className="btn ghost compact" type="button" onClick={clearDedupSelection} disabled={selectedManualRows.length === 0 || acting}>
+              清空
+            </button>
+            <button className="btn danger compact" type="button" onClick={requestExecuteSelected} disabled={loading || acting || manualDedupActive || selectedManualRows.length === 0}>
+              <Trash2 size={14} />
+              {manualDedupActive ? '任务中' : `删除 ${count(selectedManualRows.length)}`}
+            </button>
+          </div>
+        </div>
         <section className="readonlyBlock">
           <div className="sectionTitleRow">
             <h2>执行入口</h2>
-            <div className="inlineActions compactActions">
-              <button className="btn ghost compact" onClick={clearDedupSelection} disabled={selectedManualRows.length === 0 || acting}>
-                <ListChecks size={14} />
-                清空选择
-              </button>
-              <button className="btn danger compact" onClick={requestExecuteSelected} disabled={loading || acting || manualDedupActive || selectedManualRows.length === 0}>
-                <Trash2 size={14} />
-                {manualDedupActive ? '任务中' : `人工删除 ${count(selectedManualRows.length)}`}
-              </button>
-              <button className="btn danger compact" onClick={() => setConfirmAction('auto-all')} disabled={loading || acting || autoGroups.length === 0}>
-                <Trash2 size={14} />
-                {acting ? '执行中' : 'auto-all'}
-              </button>
-            </div>
+            <button className="btn danger compact" type="button" onClick={() => setConfirmAction('auto-all')} disabled={loading || acting || autoGroups.length === 0}>
+              <Trash2 size={14} />
+              {acting ? '执行中' : 'auto-all'}
+            </button>
           </div>
           <form className="manageForm" onSubmit={submitReplace}>
             <div className="manageFormHead">
@@ -1666,8 +1852,20 @@ export function DedupPanel() {
         <DedupAutoAllResultBlock result={autoAllResult} />
         <ReplaceResultBlock result={replaceResult} />
         <div className="readonlySplit">
-          <DedupAutoGroups groups={autoGroups} selectedKeys={selectedDedupKeys} onToggle={toggleDedupRow} />
-          <DedupReviewGroups groups={reviewGroups} selectedKeys={selectedDedupKeys} onToggle={toggleDedupRow} />
+          <DedupAutoGroups
+            groups={autoGroups}
+            selectedKeys={selectedDedupKeys}
+            onToggle={toggleDedupRow}
+            onSelectGroup={(tmdb, rows) => setDedupRowsSelected(tmdb, rows, true)}
+            onClearGroup={(tmdb, rows) => setDedupRowsSelected(tmdb, rows, false)}
+          />
+          <DedupReviewGroups
+            groups={reviewGroups}
+            selectedKeys={selectedDedupKeys}
+            onToggle={toggleDedupRow}
+            onSmartGroup={smartSelectReviewGroup}
+            onClearGroup={(tmdb, rows) => setDedupRowsSelected(tmdb, rows, false)}
+          />
         </div>
       </section>
     </>

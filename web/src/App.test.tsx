@@ -1716,8 +1716,11 @@ describe('App shell', () => {
     expect(await screen.findByText('去重闭环')).toBeInTheDocument();
     expect(screen.getAllByText(/示例剧 重复 \[tmdb-100\]/).length).toBeGreaterThan(0);
     expect(screen.getByText('分数接近，需要人工确认')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '智能选择' }));
+    expect(screen.getByRole('button', { name: /删除 2/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '清空' }));
     fireEvent.click(screen.getByLabelText('选择去重删除：剧集/复核剧 B [tmdb-200]'));
-    fireEvent.click(screen.getByRole('button', { name: /人工删除 1/ }));
+    fireEvent.click(screen.getByRole('button', { name: /删除 1/ }));
     expect(await screen.findByText('确认人工去重删除')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '确认删除选中重复目录' }));
     await waitFor(() => expect(dedupExecuteBatchPayload).toEqual({
