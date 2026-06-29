@@ -1,8 +1,8 @@
 use crate::{
     config_store,
-    emby::EmbyClient,
+    emby::{EmbyClient, EmbyLibrary},
     error::{AppError, AppResult},
-    media_fs::safe_under,
+    media_fs::{library_folder_name, safe_under},
     state::AppState,
     tasks::{self, TaskRun},
 };
@@ -31,6 +31,8 @@ pub struct DedupRow {
     pub folder: String,
     pub score: i64,
     pub n: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -57,6 +59,8 @@ pub struct DedupAnalysisResponse {
 pub struct DedupFolderRef {
     pub lib: String,
     pub folder: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
@@ -228,7 +232,7 @@ pub fn router() -> Router<AppState> {
 
 #[utoipa::path(get, path = "/api/v2/dedup/duplicates", tag = "dedup", responses((status = 200, body = DedupAnalysisResponse)))]
 pub async fn duplicates(State(state): State<AppState>) -> AppResult<Json<DedupAnalysisResponse>> {
-    Ok(Json(analyze_duplicate_groups(&state.settings.strm_root)?))
+    Ok(Json(analyze_duplicate_groups_for_state(&state).await?))
 }
 
 #[utoipa::path(post, path = "/api/v2/dedup/execute", tag = "dedup", request_body = DedupExecuteRequest, responses((status = 200, body = DedupExecuteResponse)))]
@@ -328,7 +332,7 @@ pub async fn auto_all(
     body: Option<Json<DedupAutoAllRequest>>,
 ) -> AppResult<Json<DedupAutoAllResponse>> {
     let req = body.map(|Json(req)| req).unwrap_or_default();
-    let analysis = analyze_duplicate_groups(&state.settings.strm_root)?;
+    let analysis = analyze_duplicate_groups_for_state(&state).await?;
     let review_count = analysis.review.len();
     let limit = req
         .limit
@@ -350,6 +354,7 @@ pub async fn auto_all(
             let item = DedupFolderRef {
                 lib: row.lib.clone(),
                 folder: row.folder.clone(),
+                item_id: row.item_id.clone(),
             };
             let client = emby_client
                 .as_ref()
@@ -595,6 +600,7 @@ pub fn analyze_duplicate_groups(strm_root: &Path) -> AppResult<DedupAnalysisResp
                     folder,
                     score,
                     n: medias.len(),
+                    item_id: None,
                 },
                 medias,
             });
@@ -639,6 +645,171 @@ pub fn analyze_duplicate_groups(strm_root: &Path) -> AppResult<DedupAnalysisResp
     }
 
     Ok(DedupAnalysisResponse { dups, review })
+}
+
+async fn analyze_duplicate_groups_for_state(state: &AppState) -> AppResult<DedupAnalysisResponse> {
+    let mut analysis = analyze_duplicate_groups(&state.settings.strm_root)?;
+    let Ok(client) = optional_dedup_emby_client(state).await else {
+        return Ok(analysis);
+    };
+    let Ok(emby_groups) = collect_emby_duplicate_groups(state, &client).await else {
+        return Ok(analysis);
+    };
+    append_emby_review_groups(&mut analysis, emby_groups);
+    Ok(analysis)
+}
+
+async fn optional_dedup_emby_client(state: &AppState) -> AppResult<EmbyClient> {
+    let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
+    if api_key.trim().is_empty() {
+        return Err(AppError::BadRequest(
+            "api_key is not configured".to_string(),
+        ));
+    }
+    let emby_url = config_store::get_string_or(&state.pool, "emby_url", DEFAULT_EMBY_URL).await?;
+    Ok(EmbyClient::new(emby_url, api_key, state.http.clone()))
+}
+
+async fn collect_emby_duplicate_groups(
+    state: &AppState,
+    client: &EmbyClient,
+) -> anyhow::Result<BTreeMap<String, Vec<DedupRow>>> {
+    let mut by_tmdb: BTreeMap<String, Vec<DedupRow>> = BTreeMap::new();
+    for library in client.libraries().await? {
+        let Some(parent_id) = library.id.as_deref().filter(|id| !id.trim().is_empty()) else {
+            continue;
+        };
+        let item_types = emby_item_types(&library);
+        let lib_folder = library_folder_name(&library);
+        let items = client.library_items(parent_id, item_types, 100_000).await?;
+        for item in items.items {
+            let Some(tmdb) = item.provider_id("Tmdb") else {
+                continue;
+            };
+            let Some(folder) = item
+                .path
+                .as_deref()
+                .and_then(|path| folder_from_emby_path(path, &library))
+                .or(item.name)
+                .filter(|folder| !folder.trim().is_empty())
+            else {
+                continue;
+            };
+            let strm_folder = state.settings.strm_root.join(&lib_folder).join(&folder);
+            by_tmdb.entry(tmdb).or_default().push(DedupRow {
+                lib: lib_folder.clone(),
+                folder,
+                score: 0,
+                n: count_strm_files(&strm_folder),
+                item_id: item.id,
+            });
+        }
+    }
+    Ok(by_tmdb)
+}
+
+fn append_emby_review_groups(
+    analysis: &mut DedupAnalysisResponse,
+    emby_groups: BTreeMap<String, Vec<DedupRow>>,
+) {
+    for (tmdb, mut rows) in emby_groups {
+        dedup_rows_by_lib_folder(&mut rows);
+        if rows.len() < 2 || analysis_has_tmdb(analysis, &tmdb) {
+            continue;
+        }
+        rows.sort_by(compare_dedup_row);
+        analysis.review.push(DedupReviewGroup {
+            tmdb,
+            why: "Emby ProviderIds.Tmdb 相同，媒体库内仍有重复 Item；可勾选旧目录/副本删除"
+                .to_string(),
+            rows,
+        });
+    }
+}
+
+fn dedup_rows_by_lib_folder(rows: &mut Vec<DedupRow>) {
+    let mut seen = BTreeSet::new();
+    rows.retain(|row| seen.insert((row.lib.clone(), row.folder.clone())));
+}
+
+fn analysis_has_tmdb(analysis: &DedupAnalysisResponse, tmdb: &str) -> bool {
+    analysis.dups.iter().any(|group| group.tmdb == tmdb)
+        || analysis.review.iter().any(|group| group.tmdb == tmdb)
+}
+
+fn compare_dedup_row(a: &DedupRow, b: &DedupRow) -> Ordering {
+    b.score
+        .cmp(&a.score)
+        .then_with(|| b.n.cmp(&a.n))
+        .then_with(|| {
+            duplicate_suffix_base(&a.folder)
+                .is_some()
+                .cmp(&duplicate_suffix_base(&b.folder).is_some())
+        })
+        .then_with(|| a.lib.cmp(&b.lib))
+        .then_with(|| a.folder.cmp(&b.folder))
+}
+
+fn emby_item_types(library: &EmbyLibrary) -> &'static str {
+    match library.library_type.to_ascii_lowercase().as_str() {
+        "movies" | "movie" => "Movie",
+        "tvshows" | "series" | "shows" => "Series",
+        _ => "Movie,Series",
+    }
+}
+
+fn folder_from_emby_path(path: &str, library: &EmbyLibrary) -> Option<String> {
+    let path = normalize_slashes(path);
+    for root in &library.paths {
+        let root = normalize_slashes(root);
+        if root.is_empty() {
+            continue;
+        }
+        let rest = if path == root {
+            ""
+        } else if let Some(rest) = path.strip_prefix(&(root + "/")) {
+            rest
+        } else {
+            continue;
+        };
+        return rest
+            .split('/')
+            .find(|part| !part.trim().is_empty())
+            .map(trim_media_extension);
+    }
+    path.rsplit('/').next().map(trim_media_extension)
+}
+
+fn normalize_slashes(value: &str) -> String {
+    value.replace('\\', "/").trim_end_matches('/').to_string()
+}
+
+fn trim_media_extension(value: &str) -> String {
+    for ext in [".strm", ".mkv", ".mp4", ".avi", ".mov", ".ts"] {
+        if value.len() > ext.len() && value.to_ascii_lowercase().ends_with(ext) {
+            return value[..value.len() - ext.len()].to_string();
+        }
+    }
+    value.to_string()
+}
+
+fn count_strm_files(folder: &Path) -> usize {
+    if !folder.is_dir() {
+        return 0;
+    }
+    WalkDir::new(folder)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+        })
+        .count()
 }
 
 pub fn plan_replace_for_roots(
@@ -798,9 +969,27 @@ async fn delete_duplicate_folder(
     let cd_target = safe_under(&cd_lib, folder)?;
     let strm_target = safe_under(&strm_lib, folder)?;
 
+    if let Some(item_id) = item.item_id.as_deref().and_then(non_empty_trimmed) {
+        if let Err(err) = emby_client.delete_item(item_id).await {
+            tracing::warn!(
+                item_id,
+                error = %err,
+                "Emby item delete failed during dedup; continuing STRM cleanup"
+            );
+        }
+    }
+
     let mut deleted_from = Vec::new();
-    if remove_path_if_exists(&cd_target).await? {
-        deleted_from.push("115".to_string());
+    match remove_path_if_exists(&cd_target).await {
+        Ok(true) => deleted_from.push("115".to_string()),
+        Ok(false) => {}
+        Err(err) => {
+            tracing::warn!(
+                path = %cd_target.display(),
+                error = %err,
+                "115 duplicate folder delete failed; continuing STRM cleanup"
+            );
+        }
     }
     if remove_path_if_exists(&strm_target).await? {
         deleted_from.push("strm".to_string());
@@ -971,6 +1160,11 @@ fn required_value<'a>(value: &'a str, field: &str) -> AppResult<&'a str> {
         return Err(AppError::BadRequest(format!("{field} 不能为空")));
     }
     Ok(value)
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 fn ensure_real_dir(path: &Path, msg: &str) -> AppResult<()> {

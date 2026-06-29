@@ -1723,7 +1723,7 @@ describe('App shell', () => {
     await waitFor(() => expect(dedupExecuteBatchPayload).toEqual({
       groups: [{
         tmdb: '200',
-        remove: [{ lib: '剧集', folder: '复核剧 B [tmdb-200]' }]
+        remove: [{ lib: '剧集', folder: '复核剧 B [tmdb-200]', item_id: null }]
       }]
     }));
     expect(await screen.findByText('批量去重任务')).toBeInTheDocument();

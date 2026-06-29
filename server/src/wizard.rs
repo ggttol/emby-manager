@@ -1234,12 +1234,14 @@ async fn collect_emby_tmdb_groups(
                 .and_then(|path| folder_from_emby_path(path, &library))
                 .or(item.name.clone())
                 .unwrap_or_else(|| item.id.clone().unwrap_or_else(|| tmdb.clone()));
+            let item_id = item.id.clone();
             let episode_count = count_strm_files(state, &library.name, &folder);
             let public_row = DedupRow {
                 lib: library.name.clone(),
                 folder: folder.clone(),
                 score: 0,
                 n: episode_count,
+                item_id: item_id.clone(),
             };
             by_tmdb
                 .entry(tmdb.clone())
@@ -1247,7 +1249,7 @@ async fn collect_emby_tmdb_groups(
                 .push(EmbyDuplicateRow {
                     lib: library.name.clone(),
                     folder,
-                    item_id: item.id,
+                    item_id,
                     episode_count,
                     public_row,
                 });

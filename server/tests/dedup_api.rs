@@ -157,6 +157,71 @@ async fn replace_execute_renames_strm_and_writes_replace_undo() {
     assert_eq!(payload["now_folder"], "Show [tmdbid-123]");
 }
 
+#[tokio::test]
+async fn duplicates_include_emby_provider_id_groups_without_folder_tmdb() {
+    let Some((_tmp, state)) = test_state().await else {
+        eprintln!("skipping dedup API DB test; set EMBY_MANAGER_DEDUP_TEST_DATABASE_URL");
+        return;
+    };
+    let libraries = r#"[{
+        "ItemId": "lib-tv",
+        "Name": "TV",
+        "CollectionType": "tvshows",
+        "Locations": ["/strm/TV"]
+    }]"#;
+    let items = r#"{
+        "Items": [
+            {
+                "Id": "item-old",
+                "Name": "Show",
+                "Type": "Series",
+                "Path": "/strm/TV/Show",
+                "ProviderIds": {"Tmdb": "123"}
+            },
+            {
+                "Id": "item-copy",
+                "Name": "Show Copy",
+                "Type": "Series",
+                "Path": "/strm/TV/Show(1)",
+                "ProviderIds": {"Tmdb": "123"}
+            }
+        ],
+        "TotalRecordCount": 2
+    }"#;
+    let (base_url, _requests) = spawn_fake_emby(vec![
+        FakeResponse::json(libraries),
+        FakeResponse::json(items),
+    ])
+    .await;
+    configure_emby(&state, &base_url).await;
+    std::fs::create_dir_all(state.settings.strm_root.join("TV/Show")).unwrap();
+    std::fs::create_dir_all(state.settings.strm_root.join("TV/Show(1)")).unwrap();
+    std::fs::write(state.settings.strm_root.join("TV/Show/S01E01.strm"), "strm").unwrap();
+    std::fs::write(
+        state.settings.strm_root.join("TV/Show(1)/S01E01.strm"),
+        "strm",
+    )
+    .unwrap();
+
+    let response = dedup::duplicates(State(state.clone()))
+        .await
+        .expect("duplicates should include Emby provider id groups")
+        .0;
+
+    assert_eq!(response.dups.len(), 0);
+    assert_eq!(response.review.len(), 1);
+    assert_eq!(response.review[0].tmdb, "123");
+    assert_eq!(response.review[0].rows.len(), 2);
+    assert!(
+        response.review[0]
+            .rows
+            .iter()
+            .any(|row| row.folder == "Show(1)" && row.item_id.as_deref() == Some("item-copy")),
+        "{:?}",
+        response.review[0].rows
+    );
+}
+
 async fn configure_emby(state: &AppState, base_url: &str) {
     for (key, value) in [
         ("emby_url", json!(base_url)),
@@ -185,6 +250,13 @@ impl FakeResponse {
         Self {
             status: "204 No Content",
             body: "",
+        }
+    }
+
+    fn json(body: &'static str) -> Self {
+        Self {
+            status: "200 OK",
+            body,
         }
     }
 }

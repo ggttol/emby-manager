@@ -2789,6 +2789,10 @@ pub fn generate_missing_strm_for_library(
             continue;
         }
         matched += 1;
+        if is_duplicate_suffix_shadow(&top, &src_base, &strm_base) {
+            attention.push(format!("{top} (检测到同名原目录，跳过重复副本 STRM 生成)"));
+            continue;
+        }
         let missing = missing_strm_in_top(&src_base, &strm_base, &entry.path());
         if missing.is_empty() {
             continue;
@@ -2956,6 +2960,23 @@ fn missing_strm_in_top(
 
 fn should_generate_missing_top(top: &str, strm_base: &Path, fullauto: bool) -> bool {
     has_declared_tmdb(top) || strm_base.join(top).is_dir() || fullauto
+}
+
+fn is_duplicate_suffix_shadow(top: &str, src_base: &Path, strm_base: &Path) -> bool {
+    let Some(base) = duplicate_suffix_base(top) else {
+        return false;
+    };
+    src_base.join(base).is_dir() || strm_base.join(base).is_dir()
+}
+
+fn duplicate_suffix_base(folder: &str) -> Option<&str> {
+    let close = folder.strip_suffix(')')?;
+    let open = close.rfind('(')?;
+    let suffix = &close[open + 1..];
+    if suffix.is_empty() || !suffix.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    Some(close[..open].trim_end())
 }
 
 fn has_declared_tmdb(value: &str) -> bool {
@@ -3465,6 +3486,7 @@ mod tests {
         let cd_root = tmp.path().join("cd");
         let strm_root = tmp.path().join("strm");
         std::fs::create_dir_all(cd_root.join("电影/Movie [tmdbid-123]/Season 1")).unwrap();
+        std::fs::create_dir_all(cd_root.join("电影/Movie [tmdbid-123](1)/Season 1")).unwrap();
         std::fs::create_dir_all(cd_root.join("电影/No Match")).unwrap();
         std::fs::create_dir_all(strm_root.join("电影/Movie [tmdbid-123]/Season 1")).unwrap();
         std::fs::write(
@@ -3480,6 +3502,11 @@ mod tests {
         .unwrap();
         std::fs::write(
             cd_root.join("电影/Movie [tmdbid-123]/Season 1/E02.mp4"),
+            "video",
+        )
+        .unwrap();
+        std::fs::write(
+            cd_root.join("电影/Movie [tmdbid-123](1)/Season 1/E03.mp4"),
             "video",
         )
         .unwrap();
@@ -3503,11 +3530,22 @@ mod tests {
         );
 
         let result = generate_missing_strm_for_library(&state, "电影", None, false).unwrap();
-        assert_eq!(result.matched, 2);
+        assert_eq!(result.matched, 3);
         assert_eq!(result.new_count, 1);
         assert_eq!(result.new_folders["Movie [tmdbid-123]"], 1);
-        assert_eq!(result.attention.len(), 1);
-        assert!(result.attention[0].contains("No Match"));
+        assert_eq!(result.attention.len(), 2);
+        assert!(
+            result
+                .attention
+                .iter()
+                .any(|item| item.contains("No Match"))
+        );
+        assert!(
+            result
+                .attention
+                .iter()
+                .any(|item| item.contains("Movie [tmdbid-123](1)"))
+        );
         assert_eq!(
             std::fs::read_to_string(strm_root.join("电影/Movie [tmdbid-123]/Season 1/E01.strm"))
                 .unwrap(),
@@ -3517,6 +3555,11 @@ mod tests {
             std::fs::read_to_string(strm_root.join("电影/Movie [tmdbid-123]/Season 1/E02.strm"))
                 .unwrap(),
             "/media/电影/Movie [tmdbid-123]/Season 1/E02.mp4"
+        );
+        assert!(
+            !strm_root
+                .join("电影/Movie [tmdbid-123](1)/Season 1/E03.strm")
+                .exists()
         );
         assert!(!strm_root.join("电影/No Match/Loose.strm").exists());
 

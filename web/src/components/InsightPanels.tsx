@@ -188,7 +188,7 @@ function zhuigengArchiveKey(item: ZhuigengItem) {
 }
 
 function dedupRowKey(tmdb: string | null | undefined, row: DedupRow) {
-  return `${tmdb || 'unknown'}\u0000${row.lib}\u0000${row.folder}`;
+  return `${tmdb || 'unknown'}\u0000${row.lib}\u0000${row.folder}\u0000${row.item_id || ''}`;
 }
 
 function asGapsScanResult(result: unknown): GapsScanLibResult | null {
@@ -1224,7 +1224,7 @@ function DedupAutoGroups({
                       checked={selectedKeys.has(key)}
                       onChange={() => onToggle(group.tmdb, row)}
                     />
-                    <span>{row.lib}/{row.folder} · score {count(row.score)} · n {count(row.n)}</span>
+                    <span>{row.lib}/{row.folder} · score {count(row.score)} · n {count(row.n)}{row.item_id ? ` · item ${row.item_id}` : ''}</span>
                   </label>
                 );
               })}
@@ -1258,7 +1258,7 @@ function DedupReviewGroups({
             <span className="badge">tmdb:{group.tmdb || 'unknown'}</span>
             <strong>{group.why}</strong>
             <small>
-              {group.rows.map((row) => `${row.lib}/${row.folder} · score ${row.score} · n ${row.n}`).join('；')}
+              {group.rows.map((row) => `${row.lib}/${row.folder} · score ${row.score} · n ${row.n}${row.item_id ? ` · item ${row.item_id}` : ''}`).join('；')}
             </small>
             <div className="dedupRemoveList">
               {group.rows.map((row) => {
@@ -1271,7 +1271,7 @@ function DedupReviewGroups({
                       checked={selectedKeys.has(key)}
                       onChange={() => onToggle(group.tmdb, row)}
                     />
-                    <span>{row.lib}/{row.folder} · score {count(row.score)} · n {count(row.n)}</span>
+                    <span>{row.lib}/{row.folder} · score {count(row.score)} · n {count(row.n)}{row.item_id ? ` · item ${row.item_id}` : ''}</span>
                   </label>
                 );
               })}
@@ -1467,14 +1467,14 @@ export function DedupPanel() {
     const seen = new Set<string>();
     for (const { tmdb, row } of selectedManualRows) {
       const groupKey = tmdb || '';
-      const rowKey = `${groupKey}\u0000${row.lib}\u0000${row.folder}`;
+      const rowKey = `${groupKey}\u0000${row.lib}\u0000${row.folder}\u0000${row.item_id || ''}`;
       if (seen.has(rowKey)) continue;
       seen.add(rowKey);
       const group = groupsByTmdb.get(groupKey) || {
         tmdb: tmdb || null,
         remove: []
       };
-      group.remove.push({ lib: row.lib, folder: row.folder });
+      group.remove.push({ lib: row.lib, folder: row.folder, item_id: row.item_id || null });
       groupsByTmdb.set(groupKey, group);
     }
     const groups = [...groupsByTmdb.values()].filter((group) => group.remove.length > 0);

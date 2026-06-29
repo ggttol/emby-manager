@@ -1873,6 +1873,7 @@ export interface components {
         };
         DedupFolderRef: {
             folder: string;
+            item_id?: string | null;
             lib: string;
         };
         DedupGroup: {
@@ -1887,6 +1888,7 @@ export interface components {
         };
         DedupRow: {
             folder: string;
+            item_id?: string | null;
             lib: string;
             n: number;
             /** Format: int64 */
