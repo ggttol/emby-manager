@@ -4,7 +4,7 @@ use crate::{
     dedup::{self, DedupGroup, DedupReviewGroup, DedupRow},
     emby::{EmbyClient, EmbyLibrary},
     error::{AppError, AppResult},
-    media_fs::{self, StrmGenerateResult},
+    media_fs::{self, ManageDeleteExecuteResult, ManageDeleteRequest, StrmGenerateResult},
     posters::{self, PosterDetectRequest},
     state::AppState,
     tasks::{self, TaskRun},
@@ -12,7 +12,10 @@ use crate::{
 use axum::{Json, Router, extract::State, routing::post};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    time::Duration,
+};
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -24,6 +27,8 @@ const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
 const DEFAULT_STAGE_DELAY_MS: u64 = 500;
 const MAX_STAGE_DELAY_MS: u64 = 30_000;
 const DEFAULT_POSTER_SCAN_LIMIT: usize = 200;
+const EMBY_DEDUP_SETTLE_TIMEOUT_MS: u64 = 15_000;
+const EMBY_DEDUP_SETTLE_INTERVAL_MS: u64 = 1_500;
 
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AddNewRequest {
@@ -75,6 +80,7 @@ pub struct AddNewReport {
     pub transfer: AddNewTransferSummary,
     pub strm: AddNewStrmReport,
     pub dedup: AddNewDedupReport,
+    pub auto_resolve: AddNewAutoResolveReport,
     pub scan: AddNewScanReport,
     pub poster: AddNewPosterReport,
     pub check: AddNewCheckReport,
@@ -152,6 +158,46 @@ pub struct AddNewDedupReport {
     pub review: Vec<DedupReviewGroup>,
     pub warnings: Vec<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddNewAutoResolveReport {
+    pub ok: bool,
+    pub triggered: bool,
+    pub resolved_count: usize,
+    pub skipped_count: usize,
+    pub error_count: usize,
+    pub items: Vec<AddNewAutoResolveItemReport>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct AddNewAutoResolveItemReport {
+    pub tmdb: String,
+    pub action: String,
+    pub status: String,
+    pub kept_lib: String,
+    pub kept_folder: String,
+    pub removed_lib: Option<String>,
+    pub removed_folder: Option<String>,
+    pub removed_item_id: Option<String>,
+    pub reason: String,
+    pub result: Option<ManageDeleteExecuteResult>,
+    pub error: Option<String>,
+}
+
+impl AddNewAutoResolveReport {
+    fn not_triggered() -> Self {
+        Self {
+            ok: true,
+            triggered: false,
+            resolved_count: 0,
+            skipped_count: 0,
+            error_count: 0,
+            items: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -284,6 +330,13 @@ fn spawn_add_new(state: AppState, id: Uuid, plan: AddNewPlan) {
                     "完成，扫描触发失败".to_string()
                 } else if !report.poster.ok {
                     "完成，海报检测失败".to_string()
+                } else if report.auto_resolve.error_count > 0 {
+                    format!("完成，自动处理失败 {} 项", report.auto_resolve.error_count)
+                } else if report.auto_resolve.resolved_count > 0 {
+                    format!(
+                        "完成，自动处理 {} 个重复旧版本",
+                        report.auto_resolve.resolved_count
+                    )
                 } else if report.check.suspicious_count > 0 {
                     format!("完成，发现 {} 个可疑项", report.check.suspicious_count)
                 } else {
@@ -410,7 +463,24 @@ async fn run_add_new_pipeline(
     )
     .await?;
 
-    append_emby_duplicate_review(&emby_client, &mut dedup, plan.target_lib.as_deref()).await;
+    let emby_groups = collect_emby_tmdb_groups_for_add_new(
+        state,
+        &emby_client,
+        &mut dedup,
+        plan.target_lib.as_deref(),
+        &strm,
+        transfer.ok,
+    )
+    .await;
+    append_emby_duplicate_review(&mut dedup, plan.target_lib.as_deref(), &emby_groups);
+    let auto_resolve = auto_resolve_emby_duplicates(
+        state,
+        &emby_client,
+        &mut dedup,
+        plan.target_lib.as_deref(),
+        &emby_groups,
+    )
+    .await;
 
     let poster = inspect_posters(&emby_client, plan.target_lib.as_deref()).await;
     tasks::set_progress(
@@ -421,7 +491,7 @@ async fn run_add_new_pipeline(
     )
     .await?;
 
-    let check = build_post_add_check(&transfer, &strm, &dedup, &scan, &poster);
+    let check = build_post_add_check(&transfer, &strm, &dedup, &auto_resolve, &scan, &poster);
     tasks::set_progress(
         &state.pool,
         id,
@@ -431,7 +501,7 @@ async fn run_add_new_pipeline(
     .await?;
 
     Ok(AddNewReport {
-        ok: transfer.ok && scan.ok && poster.ok && check.ok,
+        ok: transfer.ok && auto_resolve.ok && scan.ok && poster.ok && check.ok,
         target: AddNewTargetReport {
             cid: plan.target_cid,
             lib: plan.target_lib,
@@ -439,6 +509,7 @@ async fn run_add_new_pipeline(
         transfer,
         strm,
         dedup,
+        auto_resolve,
         scan,
         poster,
         check,
@@ -852,24 +923,286 @@ fn filter_review_groups(groups: Vec<DedupReviewGroup>, lib: Option<&str>) -> Vec
         .collect()
 }
 
-async fn append_emby_duplicate_review(
+async fn collect_emby_tmdb_groups_for_add_new(
+    state: &AppState,
     client: &EmbyClient,
     dedup: &mut AddNewDedupReport,
     target_lib: Option<&str>,
+    strm: &AddNewStrmReport,
+    transfer_ok: bool,
+) -> BTreeMap<String, Vec<EmbyDuplicateRow>> {
+    let mut groups = collect_emby_tmdb_groups(state, client, dedup).await;
+    let Some(target_lib) = target_lib.and_then(non_empty_trimmed) else {
+        return groups;
+    };
+    if !should_wait_for_emby_dedup(target_lib, strm, transfer_ok)
+        || emby_groups_have_target_new_folder(target_lib, &strm.new_folders, &groups)
+        || emby_groups_have_auto_resolve_candidate(target_lib, &groups)
+    {
+        return groups;
+    }
+
+    let mut waited = 0u64;
+    while waited < EMBY_DEDUP_SETTLE_TIMEOUT_MS {
+        sleep(Duration::from_millis(EMBY_DEDUP_SETTLE_INTERVAL_MS)).await;
+        waited += EMBY_DEDUP_SETTLE_INTERVAL_MS;
+        groups = collect_emby_tmdb_groups(state, client, dedup).await;
+        if emby_groups_have_target_new_folder(target_lib, &strm.new_folders, &groups)
+            || emby_groups_have_auto_resolve_candidate(target_lib, &groups)
+        {
+            break;
+        }
+    }
+    groups
+}
+
+fn append_emby_duplicate_review(
+    dedup: &mut AddNewDedupReport,
+    target_lib: Option<&str>,
+    by_tmdb: &BTreeMap<String, Vec<EmbyDuplicateRow>>,
 ) {
     let Some(target_lib) = target_lib.and_then(non_empty_trimmed) else {
         return;
     };
+
+    for (tmdb, rows) in by_tmdb {
+        if rows.len() < 2 || !rows.iter().any(|row| row.lib == target_lib) {
+            continue;
+        }
+        if dedup.dups.iter().any(|group| group.tmdb == *tmdb)
+            || dedup.review.iter().any(|group| group.tmdb == *tmdb)
+        {
+            continue;
+        }
+        dedup.review.push(DedupReviewGroup {
+            tmdb: tmdb.clone(),
+            why: "Emby ProviderIds.Tmdb 相同，跨库疑似重复；请人工确认后处理".to_string(),
+            rows: rows.iter().map(|row| row.public_row.clone()).collect(),
+        });
+    }
+    dedup.review_count = dedup.review.len();
+}
+
+async fn auto_resolve_emby_duplicates(
+    state: &AppState,
+    client: &EmbyClient,
+    dedup: &mut AddNewDedupReport,
+    target_lib: Option<&str>,
+    groups: &BTreeMap<String, Vec<EmbyDuplicateRow>>,
+) -> AddNewAutoResolveReport {
+    let Some(target_lib) = target_lib.and_then(non_empty_trimmed) else {
+        return AddNewAutoResolveReport::not_triggered();
+    };
+    if is_followup_library(target_lib) {
+        return AddNewAutoResolveReport::not_triggered();
+    }
+
+    let mut items = Vec::new();
+    let mut resolved_tmdb = Vec::<String>::new();
+    let mut triggered = false;
+
+    for (tmdb, rows) in groups {
+        if rows.len() < 2 {
+            continue;
+        }
+        let mut target_rows = rows
+            .iter()
+            .filter(|row| row.lib == target_lib)
+            .collect::<Vec<_>>();
+        if target_rows.is_empty() {
+            continue;
+        }
+        target_rows.sort_by(|left, right| {
+            right
+                .episode_count
+                .cmp(&left.episode_count)
+                .then_with(|| left.folder.cmp(&right.folder))
+        });
+        let kept = target_rows[0];
+        let old_rows = rows
+            .iter()
+            .filter(|row| row.lib != target_lib && is_followup_library(&row.lib))
+            .collect::<Vec<_>>();
+        if old_rows.is_empty() {
+            continue;
+        }
+        triggered = true;
+        let mut unresolved = false;
+
+        for old in old_rows {
+            let reason = format!(
+                "同 TMDb {tmdb} 已入库到「{}」，且目标库集数 {} >= 旧追更库集数 {}，自动清理旧追更版本",
+                kept.lib, kept.episode_count, old.episode_count
+            );
+            if kept.episode_count == 0 {
+                unresolved = true;
+                items.push(auto_resolve_skipped(
+                    &tmdb,
+                    kept,
+                    old,
+                    "目标库本地 STRM 数量为 0，跳过自动删除".to_string(),
+                ));
+                continue;
+            }
+            if kept.episode_count < old.episode_count {
+                unresolved = true;
+                items.push(auto_resolve_skipped(
+                    &tmdb,
+                    kept,
+                    old,
+                    format!(
+                        "目标库集数 {} 少于旧追更库集数 {}，跳过自动删除",
+                        kept.episode_count, old.episode_count
+                    ),
+                ));
+                continue;
+            }
+            let Some(item_id) = old.item_id.as_deref().and_then(non_empty_trimmed) else {
+                unresolved = true;
+                items.push(auto_resolve_skipped(
+                    &tmdb,
+                    kept,
+                    old,
+                    "旧追更条目缺少 Emby item id，跳过自动删除".to_string(),
+                ));
+                continue;
+            };
+            let req = ManageDeleteRequest {
+                lib: old.lib.clone(),
+                folder: old.folder.clone(),
+                item_id: Some(item_id.to_string()),
+                reason: Some(reason.clone()),
+            };
+            match media_fs::execute_delete_direct(state, client, req).await {
+                Ok(result) => items.push(AddNewAutoResolveItemReport {
+                    tmdb: tmdb.clone(),
+                    action: "delete_old_followup".to_string(),
+                    status: "resolved".to_string(),
+                    kept_lib: kept.lib.clone(),
+                    kept_folder: kept.folder.clone(),
+                    removed_lib: Some(old.lib.clone()),
+                    removed_folder: Some(old.folder.clone()),
+                    removed_item_id: old.item_id.clone(),
+                    reason,
+                    result: Some(result),
+                    error: None,
+                }),
+                Err(err) => {
+                    unresolved = true;
+                    items.push(AddNewAutoResolveItemReport {
+                        tmdb: tmdb.clone(),
+                        action: "delete_old_followup".to_string(),
+                        status: "error".to_string(),
+                        kept_lib: kept.lib.clone(),
+                        kept_folder: kept.folder.clone(),
+                        removed_lib: Some(old.lib.clone()),
+                        removed_folder: Some(old.folder.clone()),
+                        removed_item_id: old.item_id.clone(),
+                        reason,
+                        result: None,
+                        error: Some(err.to_string()),
+                    });
+                }
+            }
+        }
+
+        if !unresolved
+            && items
+                .iter()
+                .any(|item| item.tmdb == *tmdb && item.status == "resolved")
+        {
+            resolved_tmdb.push(tmdb.clone());
+        }
+    }
+
+    if !resolved_tmdb.is_empty() {
+        dedup
+            .review
+            .retain(|group| !resolved_tmdb.iter().any(|tmdb| tmdb == &group.tmdb));
+        dedup.review_count = dedup.review.len();
+    }
+
+    let resolved_count = items
+        .iter()
+        .filter(|item| item.status == "resolved")
+        .count();
+    let skipped_count = items.iter().filter(|item| item.status == "skipped").count();
+    let error_count = items.iter().filter(|item| item.status == "error").count();
+    AddNewAutoResolveReport {
+        ok: error_count == 0,
+        triggered,
+        resolved_count,
+        skipped_count,
+        error_count,
+        items,
+        warnings: Vec::new(),
+    }
+}
+
+fn should_wait_for_emby_dedup(
+    target_lib: &str,
+    strm: &AddNewStrmReport,
+    transfer_ok: bool,
+) -> bool {
+    transfer_ok
+        && !is_followup_library(target_lib)
+        && strm.ok
+        && strm.new_count > 0
+        && !strm.new_folders.is_empty()
+}
+
+fn emby_groups_have_target_new_folder(
+    target_lib: &str,
+    new_folders: &BTreeMap<String, usize>,
+    groups: &BTreeMap<String, Vec<EmbyDuplicateRow>>,
+) -> bool {
+    let folders = new_folders
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    !folders.is_empty()
+        && groups.values().any(|rows| {
+            rows.iter()
+                .any(|row| row.lib == target_lib && folders.contains(row.folder.as_str()))
+        })
+}
+
+fn emby_groups_have_auto_resolve_candidate(
+    target_lib: &str,
+    groups: &BTreeMap<String, Vec<EmbyDuplicateRow>>,
+) -> bool {
+    groups.values().any(|rows| {
+        rows.iter().any(|row| row.lib == target_lib)
+            && rows
+                .iter()
+                .any(|row| row.lib != target_lib && is_followup_library(&row.lib))
+    })
+}
+
+#[derive(Debug, Clone)]
+struct EmbyDuplicateRow {
+    lib: String,
+    folder: String,
+    item_id: Option<String>,
+    episode_count: usize,
+    public_row: DedupRow,
+}
+
+async fn collect_emby_tmdb_groups(
+    state: &AppState,
+    client: &EmbyClient,
+    dedup: &mut AddNewDedupReport,
+) -> BTreeMap<String, Vec<EmbyDuplicateRow>> {
     let libraries = match client.libraries().await {
         Ok(libraries) => libraries,
         Err(err) => {
             dedup
                 .warnings
                 .push(format!("Emby ProviderIds 去重扫描失败: {err}"));
-            return;
+            return BTreeMap::new();
         }
     };
-    let mut by_tmdb: BTreeMap<String, Vec<DedupRow>> = BTreeMap::new();
+    let mut by_tmdb: BTreeMap<String, Vec<EmbyDuplicateRow>> = BTreeMap::new();
     for library in libraries {
         let Some(parent_id) = library.id.as_deref() else {
             continue;
@@ -901,31 +1234,85 @@ async fn append_emby_duplicate_review(
                 .and_then(|path| folder_from_emby_path(path, &library))
                 .or(item.name.clone())
                 .unwrap_or_else(|| item.id.clone().unwrap_or_else(|| tmdb.clone()));
-            by_tmdb.entry(tmdb).or_default().push(DedupRow {
+            let episode_count = count_strm_files(state, &library.name, &folder);
+            let public_row = DedupRow {
                 lib: library.name.clone(),
-                folder,
+                folder: folder.clone(),
                 score: 0,
-                n: 0,
-            });
+                n: episode_count,
+            };
+            by_tmdb
+                .entry(tmdb.clone())
+                .or_default()
+                .push(EmbyDuplicateRow {
+                    lib: library.name.clone(),
+                    folder,
+                    item_id: item.id,
+                    episode_count,
+                    public_row,
+                });
         }
     }
+    by_tmdb
+}
 
-    for (tmdb, rows) in by_tmdb {
-        if rows.len() < 2 || !rows.iter().any(|row| row.lib == target_lib) {
-            continue;
-        }
-        if dedup.dups.iter().any(|group| group.tmdb == tmdb)
-            || dedup.review.iter().any(|group| group.tmdb == tmdb)
-        {
-            continue;
-        }
-        dedup.review.push(DedupReviewGroup {
-            tmdb,
-            why: "Emby ProviderIds.Tmdb 相同，跨库疑似重复；请人工确认后处理".to_string(),
-            rows,
-        });
+fn auto_resolve_skipped(
+    tmdb: &str,
+    kept: &EmbyDuplicateRow,
+    old: &EmbyDuplicateRow,
+    reason: String,
+) -> AddNewAutoResolveItemReport {
+    AddNewAutoResolveItemReport {
+        tmdb: tmdb.to_string(),
+        action: "delete_old_followup".to_string(),
+        status: "skipped".to_string(),
+        kept_lib: kept.lib.clone(),
+        kept_folder: kept.folder.clone(),
+        removed_lib: Some(old.lib.clone()),
+        removed_folder: Some(old.folder.clone()),
+        removed_item_id: old.item_id.clone(),
+        reason,
+        result: None,
+        error: None,
     }
-    dedup.review_count = dedup.review.len();
+}
+
+fn is_followup_library(lib: &str) -> bool {
+    lib.contains("追更")
+}
+
+fn count_strm_files(state: &AppState, lib: &str, folder: &str) -> usize {
+    let Some(path) = safe_count_path(&state.settings.strm_root, lib, folder) else {
+        return 0;
+    };
+    if !path.exists() {
+        return 0;
+    }
+    walkdir::WalkDir::new(path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+        })
+        .count()
+}
+
+fn safe_count_path(root: &std::path::Path, lib: &str, folder: &str) -> Option<std::path::PathBuf> {
+    let lib = non_empty_trimmed(lib)?;
+    let folder = non_empty_trimmed(folder)?;
+    if lib.contains('/') || lib.contains('\\') || folder.contains('/') || folder.contains('\\') {
+        return None;
+    }
+    if lib.contains("..") || folder.contains("..") {
+        return None;
+    }
+    Some(root.join(lib).join(folder))
 }
 
 fn emby_item_types(library: &EmbyLibrary) -> &'static str {
@@ -975,6 +1362,7 @@ fn build_post_add_check(
     transfer: &AddNewTransferSummary,
     strm: &AddNewStrmReport,
     dedup: &AddNewDedupReport,
+    auto_resolve: &AddNewAutoResolveReport,
     scan: &AddNewScanReport,
     poster: &AddNewPosterReport,
 ) -> AddNewCheckReport {
@@ -1097,6 +1485,60 @@ fn build_post_add_check(
                 .map(|row| row.folder.clone())
                 .unwrap_or_else(|| group.tmdb.clone()),
             message: group.why.clone(),
+        });
+    }
+    for item in &auto_resolve.items {
+        match item.status.as_str() {
+            "resolved" => {
+                items.push(AddNewCheckItemReport {
+                    index: items.len(),
+                    ok: true,
+                    action: AddNewTransferAction::Unsupported,
+                    label: Some(format!(
+                        "自动清理 {} / {}",
+                        item.removed_lib
+                            .clone()
+                            .unwrap_or_else(|| "旧库".to_string()),
+                        item.removed_folder
+                            .clone()
+                            .unwrap_or_else(|| item.tmdb.clone())
+                    )),
+                    url: format!("tmdb:{}", item.tmdb),
+                    status: "ok".to_string(),
+                    message: item.reason.clone(),
+                });
+            }
+            "skipped" => {
+                suspicious.push(AddNewCheckSuspiciousReport {
+                    stage: "auto_resolve".to_string(),
+                    severity: "warn".to_string(),
+                    id: Some(item.tmdb.clone()),
+                    label: item
+                        .removed_folder
+                        .clone()
+                        .unwrap_or_else(|| item.kept_folder.clone()),
+                    message: item.reason.clone(),
+                });
+            }
+            "error" => {
+                stage_error_count += 1;
+                errors.push(AddNewCheckErrorReport {
+                    stage: "auto_resolve".to_string(),
+                    index: None,
+                    label: item.removed_folder.clone(),
+                    message: item.error.clone().unwrap_or_else(|| item.reason.clone()),
+                });
+            }
+            _ => {}
+        }
+    }
+    for warning in &auto_resolve.warnings {
+        suspicious.push(AddNewCheckSuspiciousReport {
+            stage: "auto_resolve".to_string(),
+            severity: "warn".to_string(),
+            id: None,
+            label: "auto-resolve".to_string(),
+            message: warning.clone(),
         });
     }
 

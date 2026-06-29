@@ -23,6 +23,7 @@ type ConfigResponse = components['schemas']['ConfigResponse'];
 type AddNewReport = components['schemas']['AddNewReport'];
 type AddNewItem = components['schemas']['AddNewItem'];
 type AddNewRequest = components['schemas']['AddNewRequest'];
+type AddNewAutoResolveItemReport = components['schemas']['AddNewAutoResolveItemReport'];
 type DedupGroup = components['schemas']['DedupGroup'];
 type DedupReviewGroup = components['schemas']['DedupReviewGroup'];
 type DedupRow = components['schemas']['DedupRow'];
@@ -158,6 +159,8 @@ function AddNewReportCard({
   onSmartReplace: (items: ReplaceBatchRequest['items']) => void;
 }) {
   const groups = [...report.dedup.dups, ...report.dedup.review];
+  const autoResolve = report.auto_resolve;
+  const autoItems = autoResolve?.items || [];
   const candidates = groups.flatMap((group) => {
     const candidate = smartReplaceCandidate(group);
     return candidate
@@ -183,10 +186,41 @@ function AddNewReportCard({
         <span className={groups.length ? 'badge warn' : 'badge done'}>
           重复 {groups.length}
         </span>
+        <span className={autoResolve?.error_count ? 'badge warn' : autoResolve?.resolved_count ? 'badge done' : 'badge'}>
+          自动处理 {autoResolve?.resolved_count || 0}
+          {autoResolve?.skipped_count ? ` / 跳过 ${autoResolve.skipped_count}` : ''}
+          {autoResolve?.error_count ? ` / 失败 ${autoResolve.error_count}` : ''}
+        </span>
         <span className={report.poster.issue_count ? 'badge warn' : 'badge done'}>
           海报问题 {report.poster.issue_count}
         </span>
       </div>
+      {autoItems.length > 0 && (
+        <div className="c115WizardDupList">
+          {autoItems.slice(0, 6).map((item: AddNewAutoResolveItemReport) => (
+            <div className="c115WizardDup" key={`${item.tmdb}-${item.status}-${item.removed_lib || ''}-${item.removed_folder || ''}`}>
+              <div>
+                <span className={item.status === 'resolved' ? 'badge done' : 'badge warn'}>
+                  {item.status === 'resolved' ? '已自动清理' : item.status === 'skipped' ? '已跳过' : '处理失败'}
+                </span>
+                <span>tmdb {item.tmdb}</span>
+              </div>
+              <p>
+                保留 {item.kept_folder}
+                <span> [{item.kept_lib}]</span>
+              </p>
+              {item.removed_folder && (
+                <p>
+                  清理 {item.removed_folder}
+                  <span> [{item.removed_lib || '旧库'}]</span>
+                </p>
+              )}
+              <p>{item.error || item.reason}</p>
+            </div>
+          ))}
+          {autoItems.length > 6 && <p className="settingsHint">还有 {autoItems.length - 6} 条自动处理记录未展开。</p>}
+        </div>
+      )}
       {groups.length > 0 && (
         <div className="c115WizardDupList">
           {groups.slice(0, 8).map((group) => {

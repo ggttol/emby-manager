@@ -1344,12 +1344,34 @@ async fn run_delete_execute_core(
     req: ManageDeleteRequest,
     plan: DeleteExecutePlan,
 ) -> AppResult<ManageDeleteExecuteResult> {
+    run_delete_execute_core_with_options(state, client, req, plan, true).await
+}
+
+async fn run_delete_execute_core_with_options(
+    state: &AppState,
+    client: &EmbyClient,
+    req: ManageDeleteRequest,
+    plan: DeleteExecutePlan,
+    strict_emby_delete: bool,
+) -> AppResult<ManageDeleteExecuteResult> {
     let mut emby_gone = true;
     if let Some(item_id) = req.item_id.as_deref().and_then(non_empty_trimmed) {
-        client.delete_item(item_id).await?;
-        emby_gone = verify_emby_delete(client, item_id).await;
+        match client.delete_item(item_id).await {
+            Ok(_) => {
+                emby_gone = verify_emby_delete(client, item_id).await;
+            }
+            Err(err) if strict_emby_delete => return Err(err.into()),
+            Err(err) => {
+                tracing::warn!(
+                    item_id,
+                    error = %err,
+                    "Emby item delete failed; continuing direct disk cleanup"
+                );
+                emby_gone = verify_emby_delete(client, item_id).await;
+            }
+        }
     }
-    let deleted_from = delete_planned_paths(&plan).await?;
+    let deleted_from = delete_planned_paths_with_options(&plan, !strict_emby_delete).await?;
     let notified = if deleted_from.is_empty() {
         false
     } else {
@@ -1380,6 +1402,21 @@ async fn run_delete_execute_core(
         notified,
         undo_id,
     })
+}
+
+pub async fn execute_delete_direct(
+    state: &AppState,
+    client: &EmbyClient,
+    req: ManageDeleteRequest,
+) -> AppResult<ManageDeleteExecuteResult> {
+    let lib_folder = resolve_library_folder_for_roots(
+        state,
+        &req.lib,
+        &[&state.settings.strm_root, &state.settings.cd_root],
+    )
+    .await?;
+    let plan = plan_delete_execute(state, &req, &lib_folder)?;
+    run_delete_execute_core_with_options(state, client, req, plan, false).await
 }
 
 fn spawn_move_execute(
@@ -1753,24 +1790,38 @@ async fn handle_smart_move_conflict(
 }
 
 async fn delete_planned_paths(plan: &DeleteExecutePlan) -> AppResult<Vec<String>> {
+    delete_planned_paths_with_options(plan, false).await
+}
+
+async fn delete_planned_paths_with_options(
+    plan: &DeleteExecutePlan,
+    ignore_media_errors: bool,
+) -> AppResult<Vec<String>> {
     let mut deleted_from = Vec::new();
     for (path, label) in [(&plan.cd_target, "115"), (&plan.strm_target, "strm")] {
         if !path.exists() {
             continue;
         }
-        let metadata = tokio::fs::symlink_metadata(path)
-            .await
-            .map_err(anyhow::Error::from)?;
-        if metadata.is_dir() {
-            tokio::fs::remove_dir_all(path)
-                .await
-                .map_err(anyhow::Error::from)?;
-        } else {
-            tokio::fs::remove_file(path)
-                .await
-                .map_err(anyhow::Error::from)?;
+        let removed = async {
+            let metadata = tokio::fs::symlink_metadata(path).await?;
+            if metadata.is_dir() {
+                tokio::fs::remove_dir_all(path).await
+            } else {
+                tokio::fs::remove_file(path).await
+            }
         }
-        deleted_from.push(label.to_string());
+        .await;
+        match removed {
+            Ok(()) => deleted_from.push(label.to_string()),
+            Err(err) if ignore_media_errors && label == "115" => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "media delete failed; continuing STRM cleanup"
+                );
+            }
+            Err(err) => return Err(anyhow::Error::from(err).into()),
+        }
     }
     Ok(deleted_from)
 }

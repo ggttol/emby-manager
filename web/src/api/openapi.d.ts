@@ -1160,6 +1160,28 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AddNewAutoResolveItemReport: {
+            action: string;
+            error?: string | null;
+            kept_folder: string;
+            kept_lib: string;
+            reason: string;
+            removed_folder?: string | null;
+            removed_item_id?: string | null;
+            removed_lib?: string | null;
+            result?: null | components["schemas"]["ManageDeleteExecuteResult"];
+            status: string;
+            tmdb: string;
+        };
+        AddNewAutoResolveReport: {
+            error_count: number;
+            items: components["schemas"]["AddNewAutoResolveItemReport"][];
+            ok: boolean;
+            resolved_count: number;
+            skipped_count: number;
+            triggered: boolean;
+            warnings: string[];
+        };
         AddNewCheckErrorReport: {
             index?: number | null;
             label?: string | null;
@@ -1237,6 +1259,7 @@ export interface components {
             warnings: string[];
         };
         AddNewReport: {
+            auto_resolve: components["schemas"]["AddNewAutoResolveReport"];
             check: components["schemas"]["AddNewCheckReport"];
             dedup: components["schemas"]["AddNewDedupReport"];
             ok: boolean;
