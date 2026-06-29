@@ -316,12 +316,15 @@ async fn normalize_import_value(pool: &PgPool, key: &str, value: Value) -> AppRe
     }
 
     let normalized = match key {
-        "emby_url" => normalize_url(key, value),
-        "api_key" | "c115_cookie" | "cd2_webhook_secret" => normalize_string(key, value),
+        "emby_url" | "tmdb_base_url" | "tmdb_url" => normalize_url(key, value),
+        "api_key" | "c115_cookie" | "cd2_webhook_secret" | "tmdb_api_key" | "tmdb_key" => {
+            normalize_string(key, value)
+        }
         "c115_cid_map" => normalize_cid_map(value),
         "trusted_proxies" => normalize_string_list(key, value),
         "auto_strm_enabled" | "auto_strm_fullauto" | "bind_token_ip" => normalize_bool(key, value),
         "auto_strm_debounce_sec" => normalize_int_range(key, value, 1, 120),
+        "tmdb_timeout_secs" => normalize_int_range(key, value, 1, 60),
         "cd2_mount_prefix" => normalize_absolute_prefix(key, value),
         _ => Err(format!("不支持导入配置字段: {key}")),
     };
@@ -486,6 +489,11 @@ const IMPORTABLE_CONFIG_KEYS: &[&str] = &[
     "auto_strm_debounce_sec",
     "cd2_mount_prefix",
     "cd2_webhook_secret",
+    "tmdb_base_url",
+    "tmdb_url",
+    "tmdb_api_key",
+    "tmdb_key",
+    "tmdb_timeout_secs",
     "bind_token_ip",
 ];
 

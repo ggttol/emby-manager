@@ -80,10 +80,20 @@ pub async fn dashboard_todo(
             response.airing_count = status.continuing;
             response.airing_low_count = status.continuing;
         }
-        Err(err) => response.airing_err = Some(redact_sensitive_text(&err.to_string())),
+        Err(err) => {
+            let message = err.to_string();
+            if !is_optional_tmdb_config_error(&message) {
+                response.airing_err = Some(redact_sensitive_text(&message));
+            }
+        }
     }
 
     Ok(Json(response))
+}
+
+fn is_optional_tmdb_config_error(message: &str) -> bool {
+    message.contains("tmdb_api_key/tmdb_key 未配置")
+        || message.contains("tmdb_base_url/tmdb_url 未配置")
 }
 
 async fn no_poster_todo(state: &AppState) -> AppResult<(usize, BTreeMap<String, usize>)> {

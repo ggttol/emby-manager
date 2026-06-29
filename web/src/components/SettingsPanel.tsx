@@ -23,9 +23,15 @@ type CidRow = {
 };
 
 const defaultEmbyUrl = 'http://127.0.0.1:8096/emby';
+const defaultTmdbBaseUrl = 'https://api.themoviedb.org';
 const knownKeys = new Set([
   'emby_url',
   'api_key',
+  'tmdb_base_url',
+  'tmdb_url',
+  'tmdb_api_key',
+  'tmdb_key',
+  'tmdb_timeout_secs',
   'c115_cookie',
   'c115_cid_map',
   'trusted_proxies',
@@ -199,6 +205,9 @@ export function SettingsPanel() {
   const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
   const [embyUrl, setEmbyUrl] = useState(defaultEmbyUrl);
   const [apiKey, setApiKey] = useState('');
+  const [tmdbBaseUrl, setTmdbBaseUrl] = useState(defaultTmdbBaseUrl);
+  const [tmdbApiKey, setTmdbApiKey] = useState('');
+  const [tmdbTimeout, setTmdbTimeout] = useState('8');
   const [c115Cookie, setC115Cookie] = useState('');
   const [c115CookieSet, setC115CookieSet] = useState(false);
   const [cidRows, setCidRows] = useState<CidRow[]>([]);
@@ -229,6 +238,7 @@ export function SettingsPanel() {
   const toast = useToast();
 
   const maskedApiKey = config.settings.api_key === '***';
+  const maskedTmdbApiKey = config.settings.tmdb_api_key === '***' || config.settings.tmdb_key === '***';
   const webhookSecretSet = Boolean(stringValue(config.settings.cd2_webhook_secret));
   const maskedWebhookSecret = config.settings.cd2_webhook_secret === '***';
   const copyableWebhookUrl = webhookUrl(cd2Secret);
@@ -246,6 +256,9 @@ export function SettingsPanel() {
     setLibraries(nextLibraries);
     setEmbyUrl(stringValue(nextConfig.settings.emby_url, defaultEmbyUrl));
     setApiKey(stringValue(nextConfig.settings.api_key));
+    setTmdbBaseUrl(stringValue(nextConfig.settings.tmdb_base_url ?? nextConfig.settings.tmdb_url, defaultTmdbBaseUrl));
+    setTmdbApiKey(stringValue(nextConfig.settings.tmdb_api_key ?? nextConfig.settings.tmdb_key));
+    setTmdbTimeout(numberString(nextConfig.settings.tmdb_timeout_secs, 8));
     setC115Cookie('');
     setC115CookieSet(Boolean(stringValue(nextConfig.settings.c115_cookie)));
     setCidRows(rowsFromConfig(nextConfig, nextLibraries));
@@ -297,10 +310,17 @@ export function SettingsPanel() {
     if (!Number.isInteger(debounce) || debounce < 1 || debounce > 120) {
       throw new Error('防抖窗口必须是 1 到 120 的整数秒');
     }
+    const timeout = Number(tmdbTimeout);
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 60) {
+      throw new Error('TMDb 超时必须是 1 到 60 的整数秒');
+    }
     const settings: Record<string, unknown> = {
       ...safeExtraJson(extraJson),
       emby_url: embyUrl.trim() || defaultEmbyUrl,
       api_key: apiKey.trim() || (maskedApiKey ? '***' : ''),
+      tmdb_base_url: tmdbBaseUrl.trim() || defaultTmdbBaseUrl,
+      tmdb_api_key: tmdbApiKey.trim() || (maskedTmdbApiKey ? '***' : ''),
+      tmdb_timeout_secs: timeout,
       c115_cid_map: sanitizeCidRows(cidRows),
       trusted_proxies: splitTrustedProxies(trustedProxies),
       auto_strm_enabled: autoEnabled,
@@ -597,6 +617,39 @@ export function SettingsPanel() {
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value)}
               placeholder={maskedApiKey ? '已设置，留空保留；输入新值会替换' : 'Emby 控制台生成的 API Key'}
+            />
+          </label>
+        </section>
+
+        <section className="settingsBlock">
+          <h2>TMDb</h2>
+          <label>
+            <span>地址</span>
+            <input
+              className="input"
+              aria-label="TMDb 地址"
+              value={tmdbBaseUrl}
+              onChange={(event) => setTmdbBaseUrl(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>API Key</span>
+            <input
+              className="input"
+              aria-label="TMDb API Key"
+              value={tmdbApiKey}
+              onChange={(event) => setTmdbApiKey(event.target.value)}
+              placeholder={maskedTmdbApiKey ? '已设置，留空保留；输入新值会替换' : '用于追更检查和缺集对照'}
+            />
+          </label>
+          <label>
+            <span>超时 秒</span>
+            <input
+              className="input"
+              aria-label="TMDb 超时秒数"
+              inputMode="numeric"
+              value={tmdbTimeout}
+              onChange={(event) => setTmdbTimeout(event.target.value)}
             />
           </label>
         </section>

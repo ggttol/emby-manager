@@ -235,7 +235,7 @@ const autostrmStatus = {
   },
   libraries: [{ lib: '电影', seen: 12, unmatched: 3 }],
   todos: [{ severity: 'high', area: 'autostrm', message: '需要处理 unmatched', count: 3, source: 'autostrm_unmatched' }],
-  warnings: ['autostrm 状态表暂无数据，可能尚未导入旧数据或尚未收到 webhook']
+  warnings: []
 };
 
 const cleanupSummary = {
@@ -2614,6 +2614,9 @@ describe('App shell', () => {
           settings: {
             emby_url: 'http://emby.local:8096/emby',
             api_key: '***',
+            tmdb_base_url: 'https://api.themoviedb.org',
+            tmdb_api_key: '***',
+            tmdb_timeout_secs: 8,
             c115_cookie: '***',
             cd2_webhook_secret: '***',
             c115_cid_map: { 电影: '12345' },
@@ -2689,6 +2692,9 @@ describe('App shell', () => {
           settings: {
             emby_url: 'http://emby.new:8096/emby',
             api_key: '***',
+            tmdb_base_url: 'https://api.themoviedb.org',
+            tmdb_api_key: '***',
+            tmdb_timeout_secs: 12,
             c115_cookie: '***',
             c115_cid_map: { 电影: '12345', 电视剧: '67890' },
             trusted_proxies: ['192.168.2.1', '10.0.0.1'],
@@ -2710,6 +2716,7 @@ describe('App shell', () => {
     expect(await screen.findByDisplayValue('http://emby.local:8096/emby')).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('Emby 地址'), { target: { value: 'http://emby.new:8096/emby' } });
+    fireEvent.change(screen.getByLabelText('TMDb 超时秒数'), { target: { value: '12' } });
     fireEvent.change(screen.getByLabelText('115 Cookie'), { target: { value: 'UID=1; CID=2; SEID=3' } });
     fireEvent.change(screen.getByLabelText('反代信任 IP'), { target: { value: '192.168.2.1, 10.0.0.1' } });
     fireEvent.click(screen.getByLabelText('启用自动 strm'));
@@ -2733,6 +2740,9 @@ describe('App shell', () => {
         custom_flag: true,
         emby_url: 'http://emby.new:8096/emby',
         api_key: '***',
+        tmdb_base_url: 'https://api.themoviedb.org',
+        tmdb_api_key: '***',
+        tmdb_timeout_secs: 12,
         c115_cookie: 'UID=1; CID=2; SEID=3',
         c115_cid_map: { 电影: '12345', 电视剧: '67890' },
         trusted_proxies: ['192.168.2.1', '10.0.0.1'],

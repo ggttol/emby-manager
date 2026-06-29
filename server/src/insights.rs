@@ -565,10 +565,6 @@ pub async fn autostrm_status(
     State(state): State<AppState>,
 ) -> AppResult<Json<AutostrmStatusResponse>> {
     let snapshot = autostrm_snapshot(&state.pool).await?;
-    let mut warnings = Vec::new();
-    if snapshot.seen.total == 0 && snapshot.unmatched.total == 0 {
-        warnings.push("autostrm 状态表暂无数据，可能尚未导入旧数据或尚未收到 webhook".to_string());
-    }
     let todos = autostrm_todos(&snapshot);
 
     Ok(Json(AutostrmStatusResponse {
@@ -586,7 +582,7 @@ pub async fn autostrm_status(
         unmatched: snapshot.unmatched,
         libraries: snapshot.libraries,
         todos,
-        warnings,
+        warnings: Vec::new(),
     }))
 }
 
