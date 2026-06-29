@@ -14,9 +14,9 @@ FROM rust:1-bookworm AS server-build
 WORKDIR /app
 
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
     cargo build --release --bin emby-manager && \
     mkdir -p /out && \
     cp /app/target/release/emby-manager /out/emby-manager
