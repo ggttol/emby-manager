@@ -34,7 +34,6 @@ type DedupReviewGroup = components['schemas']['DedupReviewGroup'];
 type DedupRow = components['schemas']['DedupRow'];
 type EmbyLibrary = components['schemas']['EmbyLibrary'];
 type GapsScanLibResult = components['schemas']['GapsScanLibResult'];
-type GapsSummaryResponse = components['schemas']['GapsSummaryResponse'];
 type InsightMeta = components['schemas']['InsightMeta'];
 type InsightTodo = components['schemas']['InsightTodo'];
 type LibrariesResponse = components['schemas']['LibrariesResponse'];
@@ -1951,7 +1950,6 @@ function GapsScanResultBlock({
 }
 
 export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
-  const [data, setData] = useState<GapsSummaryResponse | null>(null);
   const [zhuigeng, setZhuigeng] = useState<ZhuigengStatusResponse | null>(null);
   const [airingResult, setAiringResult] = useState<ZhuigengScanAiringResponse | null>(null);
   const [zhuigengGapResult, setZhuigengGapResult] = useState<ZhuigengGapsSummaryResponse | null>(null);
@@ -2023,7 +2021,6 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
           return new Set([...previous].filter((key) => available.has(key)));
         });
       } else {
-        setData(await api<GapsSummaryResponse>('/api/v2/gaps/scan', { method: 'POST', body: JSON.stringify({}) }));
         await loadLibraries();
       }
     } catch (e) {
@@ -2096,7 +2093,6 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     return () => window.removeEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
   }, [load, toast]);
 
-  const topLibraries = useMemo(() => (data?.autostrm?.libraries || []).slice(0, 10), [data]);
   const scanPct = scanTask?.total ? Math.min(100, Math.round((scanTask.progress / scanTask.total) * 100)) : 0;
   const canStartScan = !isZhuigeng && selectedLib && !startingScan && !isActiveTask(scanTask);
 
@@ -2414,44 +2410,11 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
       )}
       {scanResult && <GapsScanResultBlock result={scanResult} onCopy={copyText} />}
       <div className="statGrid">
-        <StatCard icon={<CheckCircle2 />} label="业务状态" value={isZhuigeng ? (data?.complete_business_port ? '完整' : '只读') : '扫描可用'} tone={isZhuigeng && !data?.complete_business_port ? 'warn' : 'ok'} hint="v2 preview" />
-        <StatCard icon={<ListChecks />} label="待处理" value={count(data?.todos.length)} tone={data?.todos.length ? 'warn' : 'ok'} hint={isZhuigeng ? '只读预检' : '预检信号'} />
-        <StatCard icon={isZhuigeng ? <Webhook /> : <SearchX />} label={isZhuigeng ? 'unmatched' : 'strm 文件'} value={isZhuigeng ? count(data?.autostrm?.unmatched?.total) : count(data?.strm?.strm_files)} tone={(isZhuigeng ? data?.autostrm?.unmatched?.total : data?.strm?.strm_files) ? 'warn' : 'neutral'} hint={isZhuigeng ? `${count(data?.autostrm?.seen?.total)} seen` : data?.strm?.root} />
-        <StatCard icon={<AlertTriangle />} label="异常任务" value={count(taskProblemCount(data?.task_history))} tone={taskProblemCount(data?.task_history) ? 'warn' : 'ok'} hint={dateText(data?.task_history?.last_updated_at)} />
+        <StatCard icon={<CheckCircle2 />} label="业务状态" value="真实扫描" tone="ok" hint="/api/v2/gaps/scan-lib" />
+        <StatCard icon={<ListChecks />} label="剧集库" value={count(libraries.length)} tone={libraries.length ? 'ok' : 'warn'} hint={selectedLib || '未选择'} />
+        <StatCard icon={<SearchX />} label="有缺/落后" value={count(scanResult?.total)} tone={scanResult?.total ? 'warn' : 'ok'} hint={`已扫 ${count(scanResult?.analyzed)}`} />
+        <StatCard icon={<AlertTriangle />} label="任务状态" value={scanTask?.status || '未运行'} tone={scanTask?.status === 'error' ? 'warn' : 'neutral'} hint={scanTask?.status_text || '等待全库扫描'} />
       </div>
-      <WarningList warnings={data?.warnings || []} />
-      <section className="readonlyBlock">
-        <h2>待处理信号</h2>
-        <TodoList items={data?.todos || []} empty={isZhuigeng ? '当前没有追更预检信号' : '当前没有缺集预检信号'} />
-      </section>
-      <div className="readonlySplit">
-        <StrmBlock strm={data?.strm} />
-        <section className="readonlyBlock">
-          <h2>Autostrm 库分布</h2>
-          <div className="insightList compact">
-            {topLibraries.map((item) => (
-              <article key={item.lib}>
-                <span className="badge">{item.lib}</span>
-                <strong>seen {count(item.seen)}</strong>
-                <small>unmatched {count(item.unmatched)}</small>
-              </article>
-            ))}
-            {data && topLibraries.length === 0 && <div className="empty inlineEmpty">暂无 autostrm 库数据</div>}
-            {!data && <div className="empty inlineEmpty">等待 autostrm 数据</div>}
-          </div>
-        </section>
-      </div>
-      <div className="readonlySplit">
-        <CatalogBlock catalog={data?.catalog} />
-        <TaskHistory task={data?.task_history} />
-      </div>
-      <MetaBlock meta={data?.meta} />
-      {isZhuigeng && (
-        <section className="readonlyBlock">
-          <h2>定时入口</h2>
-          <p className="mutedParagraph">`zhuigeng_scan_airing` 已能在定时页创建和立即运行，但当前 worker 仍返回 preview dry-run。</p>
-        </section>
-      )}
     </section>
   );
 }
