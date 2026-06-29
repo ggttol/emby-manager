@@ -1,8 +1,8 @@
 use crate::{
     c115::{self, C115Client, C115OfflineRequest, C115SaveRequest},
     config_store,
-    dedup::{self, DedupGroup, DedupReviewGroup},
-    emby::EmbyClient,
+    dedup::{self, DedupGroup, DedupReviewGroup, DedupRow},
+    emby::{EmbyClient, EmbyLibrary},
     error::{AppError, AppResult},
     media_fs::{self, StrmGenerateResult},
     posters::{self, PosterDetectRequest},
@@ -384,7 +384,7 @@ async fn run_add_new_pipeline(
     tasks::set_progress(&state.pool, id, total_items as i64, "生成目标库缺失 STRM").await?;
     let strm = generate_target_strm(state, &transfer, plan.target_lib.as_deref()).await;
 
-    let dedup = inspect_target_dedup(state, &transfer, plan.target_lib.as_deref());
+    let mut dedup = inspect_target_dedup(state, &transfer, plan.target_lib.as_deref());
 
     if plan.delay_ms > 0 {
         tasks::set_progress(
@@ -409,6 +409,8 @@ async fn run_add_new_pipeline(
         "Emby 刷新阶段完成",
     )
     .await?;
+
+    append_emby_duplicate_review(&emby_client, &mut dedup, plan.target_lib.as_deref()).await;
 
     let poster = inspect_posters(&emby_client, plan.target_lib.as_deref()).await;
     tasks::set_progress(
@@ -848,6 +850,125 @@ fn filter_review_groups(groups: Vec<DedupReviewGroup>, lib: Option<&str>) -> Vec
         .into_iter()
         .filter(|group| lib.is_none_or(|lib| group.rows.iter().any(|row| row.lib == lib)))
         .collect()
+}
+
+async fn append_emby_duplicate_review(
+    client: &EmbyClient,
+    dedup: &mut AddNewDedupReport,
+    target_lib: Option<&str>,
+) {
+    let Some(target_lib) = target_lib.and_then(non_empty_trimmed) else {
+        return;
+    };
+    let libraries = match client.libraries().await {
+        Ok(libraries) => libraries,
+        Err(err) => {
+            dedup
+                .warnings
+                .push(format!("Emby ProviderIds 去重扫描失败: {err}"));
+            return;
+        }
+    };
+    let mut by_tmdb: BTreeMap<String, Vec<DedupRow>> = BTreeMap::new();
+    for library in libraries {
+        let Some(parent_id) = library.id.as_deref() else {
+            continue;
+        };
+        let item_types = emby_item_types(&library);
+        let result = match client.library_items(parent_id, item_types, 30_000).await {
+            Ok(result) => result,
+            Err(err) => {
+                dedup.warnings.push(format!(
+                    "Emby ProviderIds 去重扫描库 {} 失败: {err}",
+                    library.name
+                ));
+                continue;
+            }
+        };
+        if result.truncated {
+            dedup.warnings.push(format!(
+                "Emby ProviderIds 去重扫描库 {} 超过 30000 项，结果可能截断",
+                library.name
+            ));
+        }
+        for item in result.items {
+            let Some(tmdb) = item.provider_id("Tmdb") else {
+                continue;
+            };
+            let folder = item
+                .path
+                .as_deref()
+                .and_then(|path| folder_from_emby_path(path, &library))
+                .or(item.name.clone())
+                .unwrap_or_else(|| item.id.clone().unwrap_or_else(|| tmdb.clone()));
+            by_tmdb.entry(tmdb).or_default().push(DedupRow {
+                lib: library.name.clone(),
+                folder,
+                score: 0,
+                n: 0,
+            });
+        }
+    }
+
+    for (tmdb, rows) in by_tmdb {
+        if rows.len() < 2 || !rows.iter().any(|row| row.lib == target_lib) {
+            continue;
+        }
+        if dedup.dups.iter().any(|group| group.tmdb == tmdb)
+            || dedup.review.iter().any(|group| group.tmdb == tmdb)
+        {
+            continue;
+        }
+        dedup.review.push(DedupReviewGroup {
+            tmdb,
+            why: "Emby ProviderIds.Tmdb 相同，跨库疑似重复；请人工确认后处理".to_string(),
+            rows,
+        });
+    }
+    dedup.review_count = dedup.review.len();
+}
+
+fn emby_item_types(library: &EmbyLibrary) -> &'static str {
+    match library.library_type.to_ascii_lowercase().as_str() {
+        "movies" | "movie" => "Movie",
+        "tvshows" | "series" | "shows" => "Series",
+        _ => "Movie,Series",
+    }
+}
+
+fn folder_from_emby_path(path: &str, library: &EmbyLibrary) -> Option<String> {
+    let path = normalize_slashes(path);
+    for root in &library.paths {
+        let root = normalize_slashes(root);
+        if root.is_empty() {
+            continue;
+        }
+        let rest = if path == root {
+            ""
+        } else if let Some(rest) = path.strip_prefix(&(root + "/")) {
+            rest
+        } else {
+            continue;
+        };
+        return rest
+            .split('/')
+            .find(|part| !part.trim().is_empty())
+            .map(trim_media_extension);
+    }
+    path.rsplit('/').next().map(trim_media_extension)
+}
+
+fn normalize_slashes(value: &str) -> String {
+    value.replace('\\', "/").trim_end_matches('/').to_string()
+}
+
+fn trim_media_extension(value: &str) -> String {
+    for ext in [".strm", ".mkv", ".mp4", ".avi", ".mov", ".ts"] {
+        if value.len() > ext.len() && value.to_ascii_lowercase().ends_with(ext) {
+            return value[..value.len() - ext.len()].to_string();
+        }
+    }
+    value.to_string()
 }
 
 fn build_post_add_check(
