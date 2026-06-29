@@ -1979,7 +1979,7 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     ? '读取 Emby/TMDb 在更状态，生成落后提示和可复制求资源文本。'
     : '按剧集库读取 Emby Series/Episodes，输出缺集和落后 TMDb 的求资源清单。';
   const notice = isZhuigeng
-    ? '追更检查只汇总状态和求资源文本，不写 STRM、不调用 115 转存。'
+    ? '追更检查的扫描/汇总只读；智能归档会通过移动任务改动媒体和 STRM，执行前会再次确认。'
     : '全库扫描只读 Emby 元数据，不修改媒体文件、不写 STRM、不调用 115。';
 
   const loadLibraries = async () => {
@@ -2312,7 +2312,7 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
               </button>
             </div>
           </div>
-          <p className="mutedParagraph">scan-airing 汇总在更剧状态；gaps-summary 输出 continuing 且 behind 的求资源清单；智能归档只处理已完结且有 folder/id 的条目。</p>
+          <p className="mutedParagraph">scan-airing 和 gaps-summary 只读；智能归档只处理已完结且有 folder/id 的条目，并会创建真实移动任务。</p>
           {airingTask && <div className="notice">在更扫描任务：{airingTask.label} · {airingTask.status}</div>}
           {zhuigengGapTask && <div className="notice">缺集汇总任务：{zhuigengGapTask.label} · {zhuigengGapTask.status}</div>}
           {archiveTask && <div className="notice">归档任务：{archiveTask.label} · {archiveTask.status}</div>}

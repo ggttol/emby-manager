@@ -69,7 +69,7 @@ emby-manager  单进程 Python HTTP 服务
 - **管理工具和 Emby 放在同一台 NAS 上**：管理工具默认只监听 `127.0.0.1:8097`，通过 NAS 反代或内网访问；Emby API 默认是 `http://127.0.0.1:8096/emby`。
 - **媒体路径分两层**：Emby 看到的是容器/服务内路径（例如 `/strm/...`、`/media/...`），NAS 主机上实际路径通常是 `/volume1/strm/...` 和 CloudDrive2 挂载目录。代码里的 `cd` / `strm` / `docker` 都能在 `config.json` 里覆盖，换 NAS 或换挂载点不用改代码，改完重启生效。
 - **115 cookie 只用于转存和离线下载**：工具不会内置任何账号；`115 转存` tab 通过用户自己填写的 cookie 调 115 Web API，把分享链接转存到 `c115_cid_map` 指定的目标 cid。
-- **资源目录数据库是本地数据**：`catalog_115.db` 用于关键词搜索/一键转存。公开仓库只保留空表结构，真实数据请在自己的 NAS 上导入，不要提交到公开仓库。
+- **资源目录数据库是本地数据**：Python 旧版直接读 `catalog_115.db` 做关键词搜索/一键转存；Rust 版只把它当迁移源，导入到 Postgres `catalog_items` 后运行。公开仓库只保留空表结构，真实数据请在自己的 NAS 上导入，不要提交到公开仓库。
 - **长任务都在本进程后台线程里跑**：扫库、转存、去重、海报修复、定时任务都会进入任务中心；重启后不会恢复线程本身，但定时任务状态会在启动时做残留修正。
 - **HTTPS 交给反向代理**：应用本身是标准库 HTTP 服务，不直接做 TLS。外网访问建议用 NAS/nginx/Caddy 反代加 HTTPS，并配置 `trusted_proxies` 后再读取 `X-Forwarded-For`。
 
@@ -242,7 +242,7 @@ UI 僻瓜式下拉:每日 / 每周X / 每月N日 + HH:MM。改 / 启停 / 立即
 
 ### 资源目录数据库
 
-仓库内的 `catalog_115.db` 只是一个**空模板数据库**，只包含 `catalog` 表结构，不包含任何 115 分享链接或个人资源数据。`115 转存` tab 里的关键词搜索 / 一键转存需要你自己向这个数据库写入数据；不需要资源目录功能时可以保持为空，不影响其他功能。
+仓库内的 `catalog_115.db` 只是一个**空模板数据库**，只包含 `catalog` 表结构，不包含任何 115 分享链接或个人资源数据。Python 旧版的关键词搜索 / 一键转存直接读取这个 sqlite 文件；Rust + Docker 版不会在启动时隐式读取或修改它，只在 `emby-manager migrate --legacy-dir /legacy --database-url ... --dry-run|--apply` 中把旧数据导入 Postgres `catalog_items`。不需要资源目录功能时可以保持为空，不影响其他功能。
 
 表结构如下：
 
@@ -251,7 +251,7 @@ CREATE TABLE catalog(name TEXT, sheet TEXT, link TEXT, is_pkg INT, link_type TEX
 CREATE INDEX idx_catalog_link_type on catalog(link_type);
 ```
 
-部署到 NAS 后，如果你有自己的资源目录数据，请写入同目录下的 `catalog_115.db`。该数据库属于本地运行数据，不建议把真实数据提交到公开仓库。
+部署 Python 旧版到 NAS 后，如果你有自己的资源目录数据，请写入同目录下的 `catalog_115.db`。部署 Rust 版时，把旧目录只读挂到 `/legacy`，先跑 `migrate --dry-run` 看导入报告，再跑 `migrate --apply` 写入 Postgres。该数据库属于本地运行数据，不建议把真实数据提交到公开仓库。
 
 ### 最小步骤
 
@@ -412,6 +412,7 @@ DSM 会在开机时自动跑 `/usr/local/etc/rc.d/*.sh start`。`manager.sh` 用
 - **运行用户:** Docker runtime 使用非 root 用户;`/media` 和默认 `/strm` 都按只读挂载,写 STRM/cleanup 或真实删除/移动能力需要显式 opt-in。
 - **NAS 权限:** Docker build/runtime 默认 uid/gid 是 `10001:10001`;Synology bind mount 保留宿主权限,可用 `.env` 的 `EMBY_MANAGER_UID` / `EMBY_MANAGER_GID` 对齐到有权读取媒体目录的 NAS 用户。
 - **Postgres 数据:** Rust 版状态在 compose named volume `postgres-data`;停止灰度用 `docker compose down`,不要 `down -v` 或手工删 volume。
+- **Catalog 数据:** Rust 版运行时只查 Postgres `catalog_items`;`catalog_115.db` 只作为 legacy 迁移输入,不会作为在线 sqlite 数据源。
 - **仍在预览:** Rust 版已接入 session/CSRF、登录限流、trusted proxy/XFF 和基础 CSP/安全响应头；上线前仍必须完成 16 tab 逐项功能齐平复核和 NAS 灰度验收。
 
 ## 已知未做(诚实清单)

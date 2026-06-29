@@ -1771,9 +1771,17 @@ describe('App shell', () => {
     let batchPayload: unknown = null;
     let movePreviewPayload: unknown = null;
     let moveExecutePayload: unknown = null;
+    let batchMovePayload: unknown = null;
     let undoCalls = 0;
     let batchTaskStarted = false;
     let batchTaskPolls = 0;
+    const batchMoveTask = taskRun(
+      'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1',
+      'manage_move_batch_execute',
+      '批量移动: 电影 -> 电视剧 (2 项)',
+      'pending'
+    );
+    batchMoveTask.total = 2;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/libraries') {
         return jsonResponse({
@@ -1964,6 +1972,13 @@ describe('App shell', () => {
           source: 'api'
         });
       }
+      if (url.pathname === '/api/v2/manage/move/batch/execute') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        batchMovePayload = JSON.parse(String(init?.body));
+        return jsonResponse(batchMoveTask);
+      }
       return undefined;
     });
 
@@ -2061,6 +2076,42 @@ describe('App shell', () => {
       reason: '归档'
     }));
     expect(await screen.findByText('移动: 电影/旧电影 -> 电视剧/归档电影')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('批量移动来源库'), { target: { value: '电影' } });
+    fireEvent.change(screen.getByLabelText('批量移动目标库'), { target: { value: '电视剧' } });
+    fireEvent.change(screen.getByLabelText('批量移动内容'), { target: { value: '批量旧电影 | item-batch-move | 批量归档电影\n批量旧剧' } });
+    fireEvent.change(screen.getByLabelText('批量移动冲突处理'), { target: { value: 'smart' } });
+    fireEvent.change(screen.getByLabelText('批量移动原因'), { target: { value: '批量归档' } });
+    fireEvent.click(screen.getByRole('button', { name: '生成批量移动预览' }));
+    expect(await screen.findByText('2 项 · 电影 → 电视剧')).toBeInTheDocument();
+    expect(screen.getByText('批量旧电影 → 批量归档电影')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '真实执行批量移动' }));
+    expect(await screen.findByText('确认批量真实移动')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认批量移动' }));
+
+    await waitFor(() => expect(batchMovePayload).toEqual({
+      from_lib: '电影',
+      to_lib: '电视剧',
+      items: [
+        { folder: '批量旧电影', item_id: 'item-batch-move', to_folder: '批量归档电影' },
+        { folder: '批量旧剧', item_id: null, to_folder: null }
+      ],
+      on_conflict: 'smart',
+      reason: '批量归档'
+    }));
+    expect(await screen.findByText('批量移动: 电影 -> 电视剧 (2 项)')).toBeInTheDocument();
+    dispatchTaskDone(batchMoveTask, {
+      ok: false,
+      from_lib: '电影',
+      to_lib: '电视剧',
+      total: 2,
+      ok_count: 1,
+      error_count: 1,
+      smart_count: 1,
+      results: []
+    });
+    expect(await screen.findByText('✓ 1 / 2 · 智能 1 · 失败 1')).toBeInTheDocument();
   });
 
   it('creates, saves, and deletes Emby users from the users tab with csrf', async () => {
@@ -2552,6 +2603,11 @@ describe('App shell', () => {
     let savedPayload: unknown = null;
     const importPayloads: unknown[] = [];
     let passwordPayload: unknown = null;
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText }
+    });
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/config' && (!init?.method || init.method === 'GET')) {
         return jsonResponse({
@@ -2559,6 +2615,7 @@ describe('App shell', () => {
             emby_url: 'http://emby.local:8096/emby',
             api_key: '***',
             c115_cookie: '***',
+            cd2_webhook_secret: '***',
             c115_cid_map: { 电影: '12345' },
             trusted_proxies: ['192.168.2.1'],
             auto_strm_enabled: false,
@@ -2568,6 +2625,9 @@ describe('App shell', () => {
             custom_flag: true
           }
         });
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
       }
       if (url.pathname === '/api/v2/libraries') {
         return jsonResponse({
@@ -2635,6 +2695,7 @@ describe('App shell', () => {
             auto_strm_enabled: true,
             auto_strm_fullauto: false,
             cd2_mount_prefix: '/CloudNAS/CloudDrive',
+            cd2_webhook_secret: '***',
             auto_strm_debounce_sec: 12,
             custom_flag: true
           }
@@ -2658,6 +2719,13 @@ describe('App shell', () => {
     await screen.findByText('自动检测扫描 6 个目录，单匹配且空 cid 的行已填入。');
     expect(screen.getByLabelText('电视剧 cid')).toHaveValue('67890');
 
+    fireEvent.change(screen.getByLabelText('CD2 webhook 密钥'), { target: { value: 'secret-123' } });
+    fireEvent.click(screen.getByRole('button', { name: '复制 URL' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/api/v2/autostrm/webhook?key=secret-123`));
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新状态' }));
+    expect(await screen.findByText((_, element) => element?.textContent === 'unmatched 3')).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole('button', { name: '保存全部' }));
 
     await waitFor(() => expect(savedPayload).toEqual({
@@ -2671,6 +2739,7 @@ describe('App shell', () => {
         auto_strm_enabled: true,
         auto_strm_fullauto: false,
         cd2_mount_prefix: '/CloudNAS/CloudDrive',
+        cd2_webhook_secret: 'secret-123',
         auto_strm_debounce_sec: 12
       }
     }));
@@ -2931,7 +3000,10 @@ describe('App shell', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Undo 记录' }));
     expect(await screen.findByText('片源 A')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: '查看恢复指引' }));
+    fireEvent.click(screen.getByRole('button', { name: '执行/查看 Undo' }));
+    const undoConfirm = (await screen.findByText(/部分类型会直接移动/)).closest('section');
+    expect(undoConfirm).not.toBeNull();
+    fireEvent.click(within(undoConfirm as HTMLElement).getByRole('button', { name: '执行 Undo' }));
 
     await waitFor(() => expect(undoPayload).toEqual({ id: undoId }));
     expect(await screen.findByText('人工恢复')).toBeInTheDocument();

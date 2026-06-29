@@ -1921,10 +1921,21 @@ export interface components {
             warning?: string | null;
         };
         EmbyLibrary: {
+            count?: number;
+            counts?: components["schemas"]["EmbyLibraryCounts"];
+            excluded_paths?: string[];
+            folder?: string | null;
             id?: string | null;
             name: string;
             paths: string[];
+            sub?: string;
             type: string;
+        };
+        EmbyLibraryCounts: {
+            episodes: number;
+            items: number;
+            movies: number;
+            series: number;
         };
         EmbyUpdate: {
             Path: string;
@@ -1982,6 +1993,11 @@ export interface components {
             total_size_kb: number;
             truncated: boolean;
             warnings: string[];
+        };
+        ExcludedLibrary: {
+            name: string;
+            paths: string[];
+            reason: string;
         };
         ExtensionCount: {
             /** Format: int64 */
@@ -2052,6 +2068,7 @@ export interface components {
             source: string;
         };
         LibrariesResponse: {
+            excluded: components["schemas"]["ExcludedLibrary"][];
             libraries: components["schemas"]["EmbyLibrary"][];
         };
         LibraryItemEntry: {

@@ -177,6 +177,81 @@ async fn create_library_rejects_duplicate_name_without_creating_dirs_or_posting_
 }
 
 #[tokio::test]
+async fn list_libraries_returns_card_counts_and_excluded_hints() {
+    let _guard = TEST_DB_LOCK.lock().await;
+    let Some((_tmp, state)) = test_state().await else {
+        eprintln!(
+            "skipping library list DB test; set EMBY_MANAGER_LIBRARY_CREATE_TEST_DATABASE_URL"
+        );
+        return;
+    };
+    let virtual_folders = r#"[
+        {
+            "ItemId": "movie-lib",
+            "Name": "电影",
+            "CollectionType": "movies",
+            "Locations": ["/strm/电影"]
+        },
+        {
+            "ItemId": "show-lib",
+            "Name": "电视剧",
+            "CollectionType": "tvshows",
+            "Locations": ["/strm/电视剧"],
+            "LibraryOptions": {
+                "ExcludedSubFolders": ["/strm/电视剧/花絮"]
+            }
+        },
+        {
+            "ItemId": "box-lib",
+            "Name": "合集",
+            "CollectionType": "boxsets",
+            "Locations": ["/metadata/collections"]
+        }
+    ]"#;
+    let (base_url, requests) = spawn_fake_emby(vec![
+        FakeResponse::json(virtual_folders),
+        FakeResponse::json(r#"{"Items": [], "TotalRecordCount": 7}"#),
+        FakeResponse::json(r#"{"Items": [], "TotalRecordCount": 2}"#),
+        FakeResponse::json(r#"{"Items": [], "TotalRecordCount": 25}"#),
+        FakeResponse::json(r#"{"Items": [], "TotalRecordCount": 3}"#),
+    ])
+    .await;
+    configure_emby(&state, &base_url).await;
+    let app = test_app(state.clone());
+
+    let (status, body) = send(&app, Method::GET, "/api/v2/libraries", None).await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["libraries"][0]["name"], "电影");
+    assert_eq!(body["libraries"][0]["count"], 7);
+    assert_eq!(body["libraries"][0]["sub"], "7 部影片");
+    assert_eq!(body["libraries"][0]["counts"]["movies"], 7);
+    assert_eq!(body["libraries"][0]["folder"], "电影");
+    assert_eq!(body["libraries"][1]["count"], 2);
+    assert_eq!(body["libraries"][1]["sub"], "2 部 · 25 集");
+    assert_eq!(body["libraries"][1]["counts"]["series"], 2);
+    assert_eq!(body["libraries"][1]["counts"]["episodes"], 25);
+    assert_eq!(
+        body["libraries"][1]["excluded_paths"],
+        json!(["/strm/电视剧/花絮"])
+    );
+    assert_eq!(body["excluded"][0]["name"], "合集");
+    assert!(
+        body["excluded"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("/strm/")),
+        "{body}"
+    );
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 5, "{requests:#?}");
+    assert_virtual_folder_get(&requests[0]);
+    assert_item_count_get(&requests[1], "movie-lib", "Movie");
+    assert_item_count_get(&requests[2], "show-lib", "Series");
+    assert_item_count_get(&requests[3], "show-lib", "Episode");
+}
+
+#[tokio::test]
 async fn create_library_posts_virtual_folder_with_template_options_and_creates_roots() {
     let _guard = TEST_DB_LOCK.lock().await;
     let Some((_tmp, state)) = test_state().await else {
@@ -450,6 +525,23 @@ fn assert_virtual_folder_get(request: &str) {
         "{request}"
     );
     assert!(line.contains("api_key=secret-key"), "{line}");
+}
+
+fn assert_item_count_get(request: &str, parent_id: &str, item_type: &str) {
+    let line = request_line(request);
+    assert!(line.starts_with("GET /Items?"), "{request}");
+    let encoded_parent = parent_id.replace(' ', "%20");
+    assert!(
+        line.contains(&format!("ParentId={encoded_parent}"))
+            || line.contains(&format!("ParentId={}", parent_id.replace(' ', "+"))),
+        "{line}"
+    );
+    assert!(
+        line.contains(&format!("IncludeItemTypes={item_type}")),
+        "{line}"
+    );
+    assert!(line.contains("Recursive=true"), "{line}");
+    assert!(line.contains("Limit=0"), "{line}");
 }
 
 fn assert_no_virtual_folder_post(requests: &[String]) {

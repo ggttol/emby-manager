@@ -1,4 +1,4 @@
-use emby_manager::emby::{EmbyClient, EmbyLibrary};
+use emby_manager::emby::{EmbyClient, EmbyLibrary, EmbyLibraryCounts};
 use std::sync::{Arc, Mutex};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -13,13 +13,19 @@ async fn emby_client_lists_libraries_from_virtual_folders() {
             "Name": "Movies",
             "CollectionType": "movies",
             "Locations": ["/strm/Movies", "/strm/Movies"],
-            "LibraryOptions": {"PathInfos": [{"Path": "/media/Movies"}]}
+            "ItemCount": 8,
+            "LibraryOptions": {
+                "PathInfos": [{"Path": "/media/Movies"}],
+                "ExcludedSubFolders": ["/strm/Movies/extras"]
+            }
         },
         {
             "ItemId": "lib-shows",
             "Name": "Shows",
             "CollectionType": "tvshows",
-            "Locations": ["/strm/Shows"]
+            "Locations": ["/strm/Shows"],
+            "SeriesCount": 2,
+            "EpisodeCount": "24"
         },
         {
             "Name": "",
@@ -44,18 +50,43 @@ async fn emby_client_lists_libraries_from_virtual_folders() {
                 name: "Movies".to_string(),
                 library_type: "movies".to_string(),
                 paths: vec!["/strm/Movies".to_string(), "/media/Movies".to_string()],
+                count: 8,
+                sub: "8 部影片".to_string(),
+                counts: EmbyLibraryCounts {
+                    items: 8,
+                    movies: 8,
+                    series: 0,
+                    episodes: 0,
+                },
+                folder: Some("Movies".to_string()),
+                excluded_paths: vec!["/strm/Movies/extras".to_string()],
             },
             EmbyLibrary {
                 id: Some("lib-shows".to_string()),
                 name: "Shows".to_string(),
                 library_type: "tvshows".to_string(),
                 paths: vec!["/strm/Shows".to_string()],
+                count: 2,
+                sub: "2 部 · 24 集".to_string(),
+                counts: EmbyLibraryCounts {
+                    items: 26,
+                    movies: 0,
+                    series: 2,
+                    episodes: 24,
+                },
+                folder: Some("Shows".to_string()),
+                excluded_paths: Vec::new(),
             },
             EmbyLibrary {
                 id: None,
                 name: "(unnamed)".to_string(),
                 library_type: "mixed".to_string(),
                 paths: vec!["/mixed".to_string()],
+                count: 0,
+                sub: "0 部影片".to_string(),
+                counts: EmbyLibraryCounts::default(),
+                folder: None,
+                excluded_paths: Vec::new(),
             },
         ]
     );
@@ -65,6 +96,32 @@ async fn emby_client_lists_libraries_from_virtual_folders() {
         request.starts_with("GET /emby/Library/VirtualFolders?api_key=secret-key HTTP/1.1"),
         "{request}"
     );
+}
+
+#[tokio::test]
+async fn emby_client_counts_library_items_with_limit_zero() {
+    let body = r#"{"Items": [], "TotalRecordCount": 42}"#;
+    let (base_url, requests) = spawn_fake_emby_many(vec![body]).await;
+    let client = EmbyClient::new(base_url, "secret-key", reqwest::Client::new());
+
+    let count = client.item_count("lib movies", "Movie").await.unwrap();
+
+    assert_eq!(count, 42);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].starts_with("GET /Items?"), "{}", requests[0]);
+    assert!(
+        requests[0].contains("ParentId=lib%20movies")
+            || requests[0].contains("ParentId=lib+movies"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[0].contains("IncludeItemTypes=Movie"),
+        "{}",
+        requests[0]
+    );
+    assert!(requests[0].contains("Limit=0"), "{}", requests[0]);
 }
 
 #[tokio::test]

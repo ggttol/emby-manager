@@ -1,4 +1,4 @@
-import { ClipboardCheck, Copy, Download, KeyRound, RefreshCw, Save, SearchCheck, ShieldCheck } from 'lucide-react';
+import { ClipboardCheck, Copy, Download, KeyRound, RefreshCw, Save, SearchCheck, ShieldCheck, Shuffle, Webhook } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
@@ -6,6 +6,7 @@ import { ConfirmDanger } from './Modal';
 import { useToast } from './Toast';
 
 type C115AutoCidResponse = components['schemas']['C115AutoCidResponse'];
+type AutostrmStatusResponse = components['schemas']['AutostrmStatusResponse'];
 type ChangePasswordRequest = components['schemas']['ChangePasswordRequest'];
 type ChangePasswordResponse = components['schemas']['ChangePasswordResponse'];
 type ConfigImportReport = components['schemas']['ConfigImportReport'];
@@ -144,6 +145,38 @@ function formatList(items: string[], empty: string) {
   return items.length ? items.join('、') : empty;
 }
 
+function count(value: number | null | undefined) {
+  return new Intl.NumberFormat('zh-CN').format(value ?? 0);
+}
+
+function dateText(value: string | null | undefined) {
+  if (!value) return '无';
+  try {
+    return new Intl.DateTimeFormat('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    }).format(new Date(value));
+  } catch {
+    return value;
+  }
+}
+
+function generateSecret() {
+  const bytes = new Uint8Array(24);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 18)}`;
+}
+
+function webhookUrl(secret: string) {
+  const base = `${window.location.origin}/api/v2/autostrm/webhook`;
+  return secret.trim() ? `${base}?key=${encodeURIComponent(secret.trim())}` : base;
+}
+
 function ImportReport({ report }: { report: ConfigImportReport }) {
   const hasWarnings = report.warnings.length > 0 || report.rejected.length > 0;
   return (
@@ -181,6 +214,8 @@ export function SettingsPanel() {
   const [saving, setSaving] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [detectResult, setDetectResult] = useState<C115AutoCidResponse | null>(null);
+  const [autostrmStatus, setAutostrmStatus] = useState<AutostrmStatusResponse | null>(null);
+  const [loadingAutostrmStatus, setLoadingAutostrmStatus] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importJson, setImportJson] = useState('');
@@ -194,6 +229,9 @@ export function SettingsPanel() {
   const toast = useToast();
 
   const maskedApiKey = config.settings.api_key === '***';
+  const webhookSecretSet = Boolean(stringValue(config.settings.cd2_webhook_secret));
+  const maskedWebhookSecret = config.settings.cd2_webhook_secret === '***';
+  const copyableWebhookUrl = webhookUrl(cd2Secret);
   const sortedRows = useMemo(() => cidRows, [cidRows]);
   const importSignature = importJson.trim();
   const canApplyImport = Boolean(
@@ -328,6 +366,32 @@ export function SettingsPanel() {
       toast.push(`自动检测 cid 失败：${message}`, 'error');
     } finally {
       setDetecting(false);
+    }
+  };
+
+  const refreshAutostrmStatus = async () => {
+    setLoadingAutostrmStatus(true);
+    try {
+      const status = await api<AutostrmStatusResponse>('/api/v2/autostrm/status');
+      setAutostrmStatus(status);
+      toast.push('Autostrm 状态已刷新', 'ok');
+    } catch (e) {
+      toast.push(`Autostrm 状态加载失败：${errorMessage(e)}`, 'error');
+    } finally {
+      setLoadingAutostrmStatus(false);
+    }
+  };
+
+  const copyWebhookUrl = async () => {
+    if (!cd2Secret.trim()) {
+      toast.push(maskedWebhookSecret ? '后端只返回脱敏密钥；输入或生成新密钥后再复制 URL' : '先输入或生成 webhook 密钥', 'warn');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(copyableWebhookUrl);
+      toast.push('Webhook URL 已复制', 'ok');
+    } catch (e) {
+      toast.push(`复制 webhook URL 失败：${errorMessage(e)}`, 'error');
     }
   };
 
@@ -532,7 +596,7 @@ export function SettingsPanel() {
               aria-label="Emby API Key"
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value)}
-              placeholder={maskedApiKey ? '已设置，留空会清空；保持 *** 可保留原值' : 'Emby 控制台生成的 API Key'}
+              placeholder={maskedApiKey ? '已设置，留空保留；输入新值会替换' : 'Emby 控制台生成的 API Key'}
             />
           </label>
         </section>
@@ -596,6 +660,10 @@ export function SettingsPanel() {
       <div className="settingsGrid">
         <section className="settingsBlock">
           <h2>自动 strm</h2>
+          <div className="settingsStatus">
+            <Webhook size={16} />
+            {webhookSecretSet ? 'Webhook 密钥已设置，保存空输入不会覆盖' : 'Webhook 密钥未设置'}
+          </div>
           <label className="switchRow settingsSwitch">
             <input type="checkbox" checked={autoEnabled} onChange={(event) => setAutoEnabled(event.target.checked)} />
             <span>启用自动 strm</span>
@@ -616,6 +684,30 @@ export function SettingsPanel() {
             <span>webhook 密钥</span>
             <input className="input" aria-label="CD2 webhook 密钥" value={cd2Secret} onChange={(event) => setCd2Secret(event.target.value)} placeholder="留空不修改已设置密钥" />
           </label>
+          <div className="settingsActionRow">
+            <button type="button" className="btn ghost compact" onClick={() => setCd2Secret(generateSecret())}>
+              <Shuffle size={14} />
+              生成密钥
+            </button>
+            <button type="button" className="btn ghost compact" onClick={copyWebhookUrl} disabled={!cd2Secret.trim()}>
+              <Copy size={14} />
+              复制 URL
+            </button>
+            <button type="button" className="btn ghost compact" onClick={refreshAutostrmStatus} disabled={loadingAutostrmStatus}>
+              <RefreshCw size={14} />
+              {loadingAutostrmStatus ? '刷新中' : '刷新状态'}
+            </button>
+          </div>
+          <code className="settingsUrl">{cd2Secret.trim() ? copyableWebhookUrl : `${window.location.origin}/api/v2/autostrm/webhook?key=...`}</code>
+          <div className="settingsHint">CloudDrive2 webhook 使用 POST；密钥可放 query `key`，也可放 `X-Webhook-Secret` header。</div>
+          {autostrmStatus && (
+            <div className="miniStats settingsMiniStats">
+              <span>seen <strong>{count(autostrmStatus.seen.total)}</strong></span>
+              <span>seen 库 <strong>{count(autostrmStatus.seen.libraries)}</strong></span>
+              <span>unmatched <strong>{count(autostrmStatus.unmatched.total)}</strong></span>
+              <span>最近 seen <strong>{dateText(autostrmStatus.seen.last_seen_at)}</strong></span>
+            </div>
+          )}
         </section>
 
         <section className="settingsBlock">

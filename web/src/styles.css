@@ -1262,6 +1262,28 @@ main {
   font-weight: 720;
 }
 
+.settingsActionRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.settingsUrl {
+  display: block;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.settingsMiniStats {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .settingsSecret {
   min-height: 88px;
   resize: vertical;

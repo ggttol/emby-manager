@@ -12,6 +12,9 @@ type LibraryItemsResponse = components['schemas']['LibraryItemsResponse'];
 type LibrariesResponse = components['schemas']['LibrariesResponse'];
 type ManageDeleteBatchRequest = components['schemas']['ManageDeleteBatchRequest'];
 type ManageDeleteRequest = components['schemas']['ManageDeleteRequest'];
+type ManageMoveBatchItem = components['schemas']['ManageMoveBatchItem'];
+type ManageMoveBatchRequest = components['schemas']['ManageMoveBatchRequest'];
+type ManageMoveBatchResult = components['schemas']['ManageMoveBatchResult'];
 type ManageMoveRequest = components['schemas']['ManageMoveRequest'];
 type TaskRun = components['schemas']['TaskRun'];
 type UndoEntry = components['schemas']['UndoEntry'];
@@ -63,7 +66,8 @@ function libraryOptions(libraries: EmbyLibrary[]) {
 const manageRefreshKinds = new Set([
   'manage_delete_execute',
   'manage_delete_batch_execute',
-  'manage_move_execute'
+  'manage_move_execute',
+  'manage_move_batch_execute'
 ]);
 
 function shouldRefreshManage(task: TaskRun) {
@@ -140,6 +144,98 @@ function parseBatchDeleteInput(text: string, reason: string): ManageDeleteBatchR
   };
 }
 
+function parseBatchMoveJsonItem(value: unknown, index: number): ManageMoveBatchItem {
+  if (!isRecord(value)) throw new Error(`第 ${index + 1} 项不是对象`);
+  const folder = optionalText(value.folder);
+  if (!folder) throw new Error(`第 ${index + 1} 项缺少 folder`);
+  return {
+    folder,
+    item_id: optionalText(value.item_id) || optionalText(value.id),
+    to_folder: optionalText(value.to_folder) || optionalText(value.target_folder)
+  };
+}
+
+function parseBatchMoveLine(line: string, index: number): ManageMoveBatchItem {
+  const arrow = line.includes('=>') ? '=>' : line.includes('->') ? '->' : null;
+  const [sourceRaw, ...targetParts] = arrow ? line.split(arrow) : [line];
+  const source = sourceRaw.trim();
+  const arrowTarget = targetParts.join(arrow || '').trim();
+  const delimiter = ['\t', '|', ','].find((item) => source.includes(item));
+  if (!delimiter) {
+    if (!source) throw new Error(`第 ${index + 1} 行缺少 folder`);
+    return {
+      folder: source,
+      item_id: null,
+      to_folder: optionalText(arrowTarget)
+    };
+  }
+  const parts = source.split(delimiter).map((item) => item.trim());
+  const folder = optionalText(parts[0]);
+  if (!folder) throw new Error(`第 ${index + 1} 行缺少 folder`);
+  return {
+    folder,
+    item_id: optionalText(parts[1]),
+    to_folder: optionalText(arrowTarget) || optionalText(parts.slice(2).join(delimiter))
+  };
+}
+
+function parseBatchMoveInput(
+  text: string,
+  fromLib: string,
+  toLib: string,
+  reason: string,
+  onConflict: string
+): ManageMoveBatchRequest {
+  const trimmed = text.trim();
+  if (!trimmed) throw new Error('先填写批量移动内容');
+  const requestReason = optionalText(reason);
+  const selectedFrom = optionalText(fromLib);
+  const selectedTo = optionalText(toLib);
+  const selectedConflict = optionalText(onConflict) || 'error';
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (e) {
+      throw new Error(`JSON 解析失败：${errorMessage(e)}`);
+    }
+    if (Array.isArray(parsed)) {
+      if (!selectedFrom || !selectedTo) throw new Error('JSON 数组模式需要先选择来源库和目标库');
+      return {
+        from_lib: selectedFrom,
+        to_lib: selectedTo,
+        items: parsed.map(parseBatchMoveJsonItem),
+        on_conflict: selectedConflict,
+        reason: requestReason
+      };
+    }
+    if (isRecord(parsed) && Array.isArray(parsed.items)) {
+      const jsonFrom = optionalText(parsed.from_lib) || optionalText(parsed.from);
+      const jsonTo = optionalText(parsed.to_lib) || optionalText(parsed.to);
+      const resolvedFrom = jsonFrom || selectedFrom;
+      const resolvedTo = jsonTo || selectedTo;
+      if (!resolvedFrom || !resolvedTo) throw new Error('JSON 对象需要 from_lib/from 和 to_lib/to，或先选择来源库和目标库');
+      return {
+        from_lib: resolvedFrom,
+        to_lib: resolvedTo,
+        items: parsed.items.map(parseBatchMoveJsonItem),
+        on_conflict: optionalText(parsed.on_conflict) || selectedConflict,
+        reason: optionalText(parsed.reason) || requestReason
+      };
+    }
+    throw new Error('JSON 需要是数组，或包含 items 数组的对象');
+  }
+  if (!selectedFrom || !selectedTo) throw new Error('先选择来源库和目标库');
+  const items = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map(parseBatchMoveLine);
+  return {
+    from_lib: selectedFrom,
+    to_lib: selectedTo,
+    items,
+    on_conflict: selectedConflict,
+    reason: requestReason
+  };
+}
+
 function itemBrowserLabel(item: LibraryItemEntry) {
   const year = item.year ? ` (${item.year})` : '';
   const tmdb = item.tmdb ? ` · tmdb ${item.tmdb}` : '';
@@ -185,6 +281,43 @@ function appendBatchDeleteItem(text: string, item: ManageDeleteRequest) {
   return text.trimEnd() ? `${text.trimEnd()}\n${line}` : line;
 }
 
+function batchMoveItemFromBrowser(item: LibraryItemEntry): ManageMoveBatchItem {
+  return {
+    folder: item.folder,
+    item_id: item.id || null,
+    to_folder: null
+  };
+}
+
+function appendBatchMoveItem(text: string, item: ManageMoveBatchItem) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      if (Array.isArray(parsed)) {
+        return JSON.stringify([...parsed, item], null, 2);
+      }
+      if (isRecord(parsed) && Array.isArray(parsed.items)) {
+        return JSON.stringify({ ...parsed, items: [...parsed.items, item] }, null, 2);
+      }
+    } catch {
+      // Fall through to line append when the textarea is not valid JSON yet.
+    }
+  }
+  const line = item.to_folder
+    ? `${item.folder} | ${item.item_id || ''} | ${item.to_folder}`
+    : [item.folder, item.item_id].filter(Boolean).join(' | ');
+  return text.trimEnd() ? `${text.trimEnd()}\n${line}` : line;
+}
+
+function isMoveBatchResult(value: unknown): value is ManageMoveBatchResult {
+  return isRecord(value)
+    && typeof value.total === 'number'
+    && typeof value.ok_count === 'number'
+    && typeof value.error_count === 'number'
+    && Array.isArray(value.results);
+}
+
 export function ManagePanel() {
   const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
   const [undoItems, setUndoItems] = useState<UndoEntry[]>([]);
@@ -208,16 +341,25 @@ export function ManagePanel() {
   const [toFolder, setToFolder] = useState('');
   const [moveItemId, setMoveItemId] = useState('');
   const [moveReason, setMoveReason] = useState('');
+  const [batchFromLib, setBatchFromLib] = useState('');
+  const [batchToLib, setBatchToLib] = useState('');
+  const [batchMoveText, setBatchMoveText] = useState('');
+  const [batchMoveReason, setBatchMoveReason] = useState('');
+  const [batchMoveConflict, setBatchMoveConflict] = useState('error');
+  const [batchMovePreview, setBatchMovePreview] = useState<ManageMoveBatchRequest | null>(null);
+  const [pendingBatchMove, setPendingBatchMove] = useState<ManageMoveBatchRequest | null>(null);
   const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState<'delete' | 'move' | 'batch-delete' | null>(null);
+  const [submitting, setSubmitting] = useState<'delete' | 'move' | 'batch-delete' | 'batch-move' | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
   const [error, setError] = useState('');
   const [lastTask, setLastTask] = useState<TaskRun | null>(null);
   const [confirmMove, setConfirmMove] = useState(false);
+  const [confirmBatchMove, setConfirmBatchMove] = useState(false);
   const toast = useToast();
 
   const sortedLibraries = useMemo(() => libraryOptions(libraries), [libraries]);
+  const lastMoveBatchResult = isMoveBatchResult(lastTask?.result) ? lastTask.result : null;
 
   const applyDefaultLibs = useCallback((next: EmbyLibrary[]) => {
     const first = libraryOptions(next)[0]?.name || '';
@@ -225,6 +367,8 @@ export function ManagePanel() {
     setDeleteLib((value) => value || first);
     setFromLib((value) => value || first);
     setToLib((value) => value || first);
+    setBatchFromLib((value) => value || first);
+    setBatchToLib((value) => value || first);
   }, []);
 
   const load = useCallback(async () => {
@@ -293,8 +437,11 @@ export function ManagePanel() {
     if (shouldRefreshManage(task)) {
       void load();
     }
+    const batchSummary = isMoveBatchResult(task.result)
+      ? ` · ✓${task.result.ok_count}/${task.result.total}${task.result.error_count ? ` · 失败 ${task.result.error_count}` : ''}`
+      : '';
     toast.push(
-      task.status === 'done' ? `任务完成：${task.label || task.kind}` : `任务结束：${task.label || task.kind} · ${task.status}`,
+      task.status === 'done' ? `任务完成：${task.label || task.kind}${batchSummary}` : `任务结束：${task.label || task.kind} · ${task.status}`,
       task.status === 'done' ? 'ok' : 'warn'
     );
   });
@@ -434,6 +581,16 @@ export function ManagePanel() {
     toast.push(`已加入批量删除：${browserSelectedItem.name}`, 'ok');
   };
 
+  const addBrowserItemToBatchMove = () => {
+    if (!browserSelectedItem || !browserLib.trim()) {
+      toast.push('先选择一个库项目', 'warn');
+      return;
+    }
+    setBatchFromLib(browserLib.trim());
+    setBatchMoveText((value) => appendBatchMoveItem(value, batchMoveItemFromBrowser(browserSelectedItem)));
+    toast.push(`已加入批量移动：${browserSelectedItem.name}`, 'ok');
+  };
+
   const submitMove = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!fromLib.trim() || !fromFolder.trim() || !toLib.trim()) {
@@ -498,6 +655,71 @@ export function ManagePanel() {
     }
   };
 
+  const buildBatchMovePayload = () => parseBatchMoveInput(
+    batchMoveText,
+    batchFromLib,
+    batchToLib,
+    batchMoveReason,
+    batchMoveConflict
+  );
+
+  const submitBatchMovePreview = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError('');
+    try {
+      const payload = buildBatchMovePayload();
+      if (payload.items.length === 0) {
+        toast.push('批量移动至少需要 1 项', 'warn');
+        return;
+      }
+      setBatchMovePreview(payload);
+      toast.push(`批量移动预览已生成：${payload.items.length} 项`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`批量移动内容无效：${message}`, 'error');
+    }
+  };
+
+  const prepareBatchMoveExecute = () => {
+    setError('');
+    try {
+      const payload = buildBatchMovePayload();
+      if (payload.items.length === 0) {
+        toast.push('批量移动至少需要 1 项', 'warn');
+        return;
+      }
+      setBatchMovePreview(payload);
+      setPendingBatchMove(payload);
+      setConfirmBatchMove(true);
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`批量移动内容无效：${message}`, 'error');
+    }
+  };
+
+  const executeBatchMove = async () => {
+    if (!pendingBatchMove) return;
+    setConfirmBatchMove(false);
+    setSubmitting('batch-move');
+    setError('');
+    try {
+      const task = await api<TaskRun>('/api/v2/manage/move/batch/execute', {
+        method: 'POST',
+        body: JSON.stringify(pendingBatchMove)
+      });
+      setLastTask(task);
+      toast.push(`已创建批量真实移动任务：${task.label || task.kind}`, 'ok');
+    } catch (e) {
+      const message = errorMessage(e);
+      setError(message);
+      toast.push(`批量真实移动任务创建失败：${message}`, 'error');
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
   const renderLibSelect = (label: string, value: string, onChange: (value: string) => void) => (
     <label>
       <span>{label}</span>
@@ -548,6 +770,21 @@ export function ManagePanel() {
             <div className="dangerCopy">
               <p>将移动媒体目录，重建目标 STRM，删除旧 STRM，并刷新目标 Emby 库。</p>
               <code>{fromLib.trim()}/{fromFolder.trim()} → {toLib.trim()}/{toFolder.trim() || fromFolder.trim().split('/').filter(Boolean).at(-1) || fromFolder.trim()}</code>
+            </div>
+          )}
+        />
+      )}
+      {confirmBatchMove && pendingBatchMove && (
+        <ConfirmDanger
+          title="确认批量真实移动"
+          confirmText="确认批量移动"
+          onCancel={() => setConfirmBatchMove(false)}
+          onConfirm={executeBatchMove}
+          body={(
+            <div className="dangerCopy">
+              <p>将逐项移动媒体目录，重建目标 STRM，删除旧 STRM，并写入 undo 记录。</p>
+              <code>{pendingBatchMove.items.length} 项 · {pendingBatchMove.from_lib} → {pendingBatchMove.to_lib}</code>
+              <small>{pendingBatchMove.items.slice(0, 5).map((item) => item.to_folder ? `${item.folder} → ${item.to_folder}` : item.folder).join('、')}</small>
             </div>
           )}
         />
@@ -696,6 +933,10 @@ export function ManagePanel() {
               <Plus size={16} />
               加入批量删除文本
             </button>
+            <button type="button" className="btn ghost" onClick={addBrowserItemToBatchMove} disabled={!browserSelectedItem}>
+              <Plus size={16} />
+              加入批量移动文本
+            </button>
           </div>
         </div>
 
@@ -731,6 +972,53 @@ export function ManagePanel() {
             </button>
           </div>
         </form>
+
+        <form className="manageForm" onSubmit={submitBatchMovePreview}>
+          <div className="manageFormHead">
+            <ListChecks size={18} />
+            <strong>批量移动</strong>
+          </div>
+          {renderLibSelect('批量移动来源库', batchFromLib, setBatchFromLib)}
+          {renderLibSelect('批量移动目标库', batchToLib, setBatchToLib)}
+          <label>
+            <span>移动项</span>
+            <textarea
+              className="input"
+              aria-label="批量移动内容"
+              value={batchMoveText}
+              onChange={(event) => setBatchMoveText(event.target.value)}
+              rows={7}
+              placeholder={'旧剧 folder\n旧电影 folder | item-id | 新 folder\n旧剧 folder => 新剧 folder\n或 JSON: {"items":[{"folder":"旧剧","item_id":"item-1","to_folder":"新剧"}]}'}
+            />
+          </label>
+          <label>
+            <span>冲突处理</span>
+            <select className="input" aria-label="批量移动冲突处理" value={batchMoveConflict} onChange={(event) => setBatchMoveConflict(event.target.value)}>
+              <option value="error">遇到目标同名 folder 则报错</option>
+              <option value="skip">目标已存在时跳过</option>
+              <option value="smart">智能归档冲突处理</option>
+            </select>
+          </label>
+          <label>
+            <span>批量原因</span>
+            <input className="input" aria-label="批量移动原因" value={batchMoveReason} onChange={(event) => setBatchMoveReason(event.target.value)} placeholder="可选，写入批量任务参数" />
+          </label>
+          {batchMovePreview && (
+            <div className="taskMeta manageTaskMeta">
+              <div><dt>批量移动预览</dt><dd>{batchMovePreview.items.length} 项 · {batchMovePreview.from_lib} → {batchMovePreview.to_lib}</dd></div>
+              <div><dt>冲突处理</dt><dd>{batchMovePreview.on_conflict || 'error'}</dd></div>
+              <div><dt>首项</dt><dd>{batchMovePreview.items[0]?.to_folder ? `${batchMovePreview.items[0].folder} → ${batchMovePreview.items[0].to_folder}` : batchMovePreview.items[0]?.folder || '无'}</dd></div>
+            </div>
+          )}
+          <div className="inlineActions">
+            <button className="btn" disabled={submitting !== null}>
+              生成批量移动预览
+            </button>
+            <button type="button" className="btn danger" disabled={submitting !== null} onClick={prepareBatchMoveExecute}>
+              {submitting === 'batch-move' ? '创建中' : '真实执行批量移动'}
+            </button>
+          </div>
+        </form>
       </div>
 
       {lastTask && (
@@ -740,6 +1028,7 @@ export function ManagePanel() {
             <div><dt>任务</dt><dd>{lastTask.label || lastTask.kind}</dd></div>
             <div><dt>状态</dt><dd>{lastTask.status}</dd></div>
             <div><dt>ID</dt><dd>{lastTask.id}</dd></div>
+            {lastMoveBatchResult && <div><dt>批量摘要</dt><dd>✓ {lastMoveBatchResult.ok_count} / {lastMoveBatchResult.total} · 智能 {lastMoveBatchResult.smart_count} · 失败 {lastMoveBatchResult.error_count}</dd></div>}
             <div><dt>结果</dt><dd>{stringify(lastTask.result) || '等待任务中心更新'}</dd></div>
           </div>
         </section>

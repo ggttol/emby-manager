@@ -23,6 +23,8 @@ pub struct EmbyVirtualFolder {
     pub locations: Vec<String>,
     #[serde(rename = "LibraryOptions")]
     pub library_options: Option<EmbyLibraryOptions>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -211,6 +213,24 @@ pub struct EmbyLibrary {
     #[serde(rename = "type")]
     pub library_type: String,
     pub paths: Vec<String>,
+    #[serde(default)]
+    pub count: usize,
+    #[serde(default)]
+    pub sub: String,
+    #[serde(default)]
+    pub counts: EmbyLibraryCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    #[serde(default)]
+    pub excluded_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct EmbyLibraryCounts {
+    pub items: usize,
+    pub movies: usize,
+    pub series: usize,
+    pub episodes: usize,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -277,6 +297,37 @@ impl EmbyClient {
             .into_iter()
             .map(EmbyLibrary::from)
             .collect())
+    }
+
+    pub async fn item_count(&self, parent_id: &str, item_types: &str) -> anyhow::Result<usize> {
+        if parent_id.trim().is_empty() {
+            bail!("parent_id is required for Emby item counting");
+        }
+        if item_types.trim().is_empty() {
+            bail!("item_types is required for Emby item counting");
+        }
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let url = format!("{}/Items", self.base_url);
+        let page = self
+            .http
+            .get(url)
+            .query(&[
+                ("api_key", self.api_key.as_str()),
+                ("ParentId", parent_id.trim()),
+                ("Recursive", "true"),
+                ("IncludeItemTypes", item_types.trim()),
+                ("Limit", "0"),
+            ])
+            .send()
+            .await
+            .context("failed to call Emby /Items for item count")?
+            .error_for_status()
+            .context("Emby /Items returned an error for item count")?
+            .json::<EmbyItemsPage>()
+            .await?;
+        Ok(page.total_record_count.unwrap_or(page.items.len()))
     }
 
     pub async fn create_virtual_folder(
@@ -1088,17 +1139,30 @@ impl EmbyItem {
 impl From<EmbyVirtualFolder> for EmbyLibrary {
     fn from(folder: EmbyVirtualFolder) -> Self {
         let mut paths = Vec::new();
-        for path in folder.locations {
+        for path in folder.locations.iter() {
             push_path(&mut paths, path);
         }
-        if let Some(options) = folder.library_options {
-            for info in options.path_infos {
-                if let Some(path) = info.path {
+        let mut counts = counts_from_map(&folder.extra);
+        let mut excluded_paths = string_list_from_map(&folder.extra, "ExcludedSubFolders");
+        let mut option_counts = EmbyLibraryCounts::default();
+        let mut option_excluded_paths = Vec::new();
+        if let Some(options) = folder.library_options.as_ref() {
+            option_counts = counts_from_map(&options.extra);
+            option_excluded_paths = string_list_from_map(&options.extra, "ExcludedSubFolders");
+            for info in options.path_infos.iter() {
+                if let Some(path) = &info.path {
                     push_path(&mut paths, path);
                 }
             }
         }
-        Self {
+        counts.merge_missing(option_counts);
+        append_unique_strings(&mut excluded_paths, option_excluded_paths);
+        let library_type = folder
+            .collection_type
+            .unwrap_or_else(|| "mixed".to_string());
+        counts.apply_item_fallback(&library_type);
+        let folder_name = paths.iter().find_map(|path| folder_from_strm_path(path));
+        let mut library = Self {
             id: folder
                 .item_id
                 .and_then(|id| (!id.trim().is_empty()).then(|| id.trim().to_string())),
@@ -1107,16 +1171,161 @@ impl From<EmbyVirtualFolder> for EmbyLibrary {
             } else {
                 folder.name
             },
-            library_type: folder
-                .collection_type
-                .unwrap_or_else(|| "mixed".to_string()),
+            library_type,
             paths,
+            count: 0,
+            sub: String::new(),
+            counts,
+            folder: folder_name,
+            excluded_paths,
+        };
+        library.refresh_summary();
+        library
+    }
+}
+
+impl EmbyLibrary {
+    pub fn refresh_summary(&mut self) {
+        self.counts.apply_item_fallback(&self.library_type);
+        self.count = self.counts.display_count(&self.library_type);
+        self.sub = self.counts.display_subtitle(&self.library_type);
+        if self.folder.is_none() {
+            self.folder = self
+                .paths
+                .iter()
+                .find_map(|path| folder_from_strm_path(path));
         }
     }
 }
 
-fn push_path(paths: &mut Vec<String>, path: String) {
-    let path = path.trim();
+impl EmbyLibraryCounts {
+    pub fn merge_missing(&mut self, other: Self) {
+        if self.items == 0 {
+            self.items = other.items;
+        }
+        if self.movies == 0 {
+            self.movies = other.movies;
+        }
+        if self.series == 0 {
+            self.series = other.series;
+        }
+        if self.episodes == 0 {
+            self.episodes = other.episodes;
+        }
+    }
+
+    pub fn apply_item_fallback(&mut self, library_type: &str) {
+        if self.items == 0 {
+            self.items = self.movies + self.series + self.episodes;
+        }
+        if library_type.eq_ignore_ascii_case("tvshows") {
+            if self.series == 0 && self.episodes == 0 {
+                self.series = self.items;
+            }
+        } else if self.movies == 0 && self.series == 0 && self.episodes == 0 {
+            self.movies = self.items;
+        }
+    }
+
+    pub fn display_count(&self, library_type: &str) -> usize {
+        if library_type.eq_ignore_ascii_case("tvshows") {
+            self.series
+        } else {
+            self.movies
+        }
+    }
+
+    pub fn display_subtitle(&self, library_type: &str) -> String {
+        if library_type.eq_ignore_ascii_case("tvshows") {
+            format!("{} 部 · {} 集", self.series, self.episodes)
+        } else {
+            format!("{} 部影片", self.movies)
+        }
+    }
+}
+
+fn counts_from_map(map: &Map<String, Value>) -> EmbyLibraryCounts {
+    EmbyLibraryCounts {
+        items: usize_from_map(
+            map,
+            &[
+                "ItemCount",
+                "ItemsCount",
+                "ChildCount",
+                "TotalRecordCount",
+                "RecursiveItemCount",
+                "Count",
+            ],
+        )
+        .unwrap_or_default(),
+        movies: usize_from_map(map, &["MovieCount", "MoviesCount"]).unwrap_or_default(),
+        series: usize_from_map(map, &["SeriesCount", "ShowCount", "ShowsCount"])
+            .unwrap_or_default(),
+        episodes: usize_from_map(map, &["EpisodeCount", "EpisodesCount"]).unwrap_or_default(),
+    }
+}
+
+fn usize_from_map(map: &Map<String, Value>, keys: &[&str]) -> Option<usize> {
+    keys.iter()
+        .find_map(|key| map.get(*key).and_then(value_as_usize))
+}
+
+fn value_as_usize(value: &Value) -> Option<usize> {
+    match value {
+        Value::Number(number) => number
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok()),
+        Value::String(value) => value.trim().parse::<usize>().ok(),
+        _ => None,
+    }
+}
+
+fn string_list_from_map(map: &Map<String, Value>, key: &str) -> Vec<String> {
+    let Some(value) = map.get(key) else {
+        return Vec::new();
+    };
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .filter_map(|value| match value {
+                Value::String(text) => {
+                    let text = text.trim();
+                    (!text.is_empty()).then(|| text.to_string())
+                }
+                _ => None,
+            })
+            .collect(),
+        Value::String(text) => {
+            let text = text.trim();
+            if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![text.to_string()]
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn append_unique_strings(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        if !target.iter().any(|existing| existing == &value) {
+            target.push(value);
+        }
+    }
+}
+
+fn folder_from_strm_path(path: &str) -> Option<String> {
+    let normalized = path.trim().trim_end_matches('/');
+    let (_, rest) = normalized.split_once("/strm/")?;
+    rest.split('/')
+        .next()
+        .filter(|folder| !folder.trim().is_empty())
+        .map(ToString::to_string)
+}
+
+fn push_path(paths: &mut Vec<String>, path: impl AsRef<str>) {
+    let path = path.as_ref().trim();
     if !path.is_empty() && !paths.iter().any(|existing| existing == path) {
         paths.push(path.to_string());
     }

@@ -2,7 +2,7 @@ import { FileText, RefreshCw, RotateCcw } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
-import { Modal } from './Modal';
+import { ConfirmDanger, Modal } from './Modal';
 import { useToast } from './Toast';
 
 type AppLogEntry = components['schemas']['AppLogEntry'];
@@ -99,6 +99,7 @@ export function LogsPanel() {
   const [loadingUndo, setLoadingUndo] = useState(true);
   const [error, setError] = useState('');
   const [executingId, setExecutingId] = useState<string | null>(null);
+  const [confirmUndo, setConfirmUndo] = useState<UndoEntry | null>(null);
   const [undoResult, setUndoResult] = useState<UndoExecuteResponse | null>(null);
   const toast = useToast();
 
@@ -160,6 +161,7 @@ export function LogsPanel() {
   };
 
   const executeUndo = async (item: UndoEntry) => {
+    setConfirmUndo(null);
     setExecutingId(item.id);
     setError('');
     try {
@@ -237,11 +239,26 @@ export function LogsPanel() {
       {view === 'logs' ? (
         <LogTable logs={visibleLogs} loading={loadingLogs} />
       ) : (
-        <UndoTable items={visibleUndo} loading={loadingUndo} executingId={executingId} onExecute={executeUndo} />
+        <UndoTable items={visibleUndo} loading={loadingUndo} executingId={executingId} onExecute={setConfirmUndo} />
+      )}
+
+      {confirmUndo && (
+        <ConfirmDanger
+          title="确认执行 Undo"
+          confirmText="执行 Undo"
+          onCancel={() => setConfirmUndo(null)}
+          onConfirm={() => executeUndo(confirmUndo)}
+          body={(
+            <div className="dangerCopy">
+              <p>将按这条 undo 记录尝试恢复。部分类型会直接移动、恢复或修改本地文件；不支持自动恢复的类型会返回人工指引。</p>
+              <code>{opLabel(confirmUndo.op)} · {objectValue(confirmUndo.payload, ['folder', 'lose_was', 'lose_folder']) || confirmUndo.id}</code>
+            </div>
+          )}
+        />
       )}
 
       {undoResult && (
-        <Modal title="Undo 恢复指引" onClose={() => setUndoResult(null)}>
+        <Modal title="Undo 执行结果" onClose={() => setUndoResult(null)}>
           <div className="modalBody undoResult">
             <span className={`badge ${undoResult.ok ? 'done' : 'warn'}`}>{actionLabel(undoResult.action)}</span>
             <p>{undoResult.msg}</p>
@@ -368,7 +385,7 @@ function UndoTable({
                 </td>
                 <td>
                   <button className="btn ghost compact" onClick={() => onExecute(item)} disabled={executingId === item.id}>
-                    {executingId === item.id ? '请求中' : '查看恢复指引'}
+                    {executingId === item.id ? '执行中' : '执行/查看 Undo'}
                   </button>
                 </td>
               </tr>

@@ -37,6 +37,14 @@ pub const SCAN_TASK_CANCELLED_SENTINEL: &str = "__task_cancelled__";
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LibrariesResponse {
     pub libraries: Vec<EmbyLibrary>,
+    pub excluded: Vec<ExcludedLibrary>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ExcludedLibrary {
+    pub name: String,
+    pub reason: String,
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -377,8 +385,70 @@ pub async fn libraries(State(state): State<AppState>) -> AppResult<Json<Librarie
     ensure_api_key_configured(&api_key)?;
 
     let client = EmbyClient::new(emby_url, api_key, state.http.clone());
-    let libraries = client.libraries().await?;
-    Ok(Json(LibrariesResponse { libraries }))
+    let mut libraries = client.libraries().await?;
+    enrich_library_card_stats(&client, &mut libraries).await;
+    let excluded = excluded_libraries(&libraries);
+    Ok(Json(LibrariesResponse {
+        libraries,
+        excluded,
+    }))
+}
+
+async fn enrich_library_card_stats(client: &EmbyClient, libraries: &mut [EmbyLibrary]) {
+    for library in libraries {
+        let Some(id) = library.id.clone() else {
+            library.refresh_summary();
+            continue;
+        };
+        if library.library_type.eq_ignore_ascii_case("tvshows") {
+            let mut counted = false;
+            if let Ok(series) = client.item_count(&id, "Series").await {
+                library.counts.series = series;
+                counted = true;
+            }
+            if let Ok(episodes) = client.item_count(&id, "Episode").await {
+                library.counts.episodes = episodes;
+                counted = true;
+            }
+            if counted {
+                library.counts.items = library.counts.series + library.counts.episodes;
+            }
+        } else if let Ok(movies) = client
+            .item_count(&id, library_item_types(&library.library_type))
+            .await
+        {
+            library.counts.movies = movies;
+            library.counts.items = movies;
+        }
+        library.refresh_summary();
+    }
+}
+
+fn excluded_libraries(libraries: &[EmbyLibrary]) -> Vec<ExcludedLibrary> {
+    libraries
+        .iter()
+        .filter_map(|library| {
+            if library.paths.is_empty() {
+                return Some(ExcludedLibrary {
+                    name: library.name.clone(),
+                    reason: "无路径".to_string(),
+                    paths: Vec::new(),
+                });
+            }
+            if library
+                .paths
+                .iter()
+                .any(|path| folder_from_strm_path(path).is_some())
+            {
+                return None;
+            }
+            Some(ExcludedLibrary {
+                name: library.name.clone(),
+                reason: "无 /strm/ 路径(boxset 或别的库类型)".to_string(),
+                paths: library.paths.clone(),
+            })
+        })
+        .collect()
 }
 
 #[utoipa::path(post, path = "/api/v2/libraries", tag = "media", request_body = CreateLibraryRequest, responses((status = 200, body = CreateLibraryResponse)))]
