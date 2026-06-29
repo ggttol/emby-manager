@@ -1,4 +1,5 @@
 use crate::{
+    c115::{self, C115_API, C115_SITE, C115Client},
     config_store,
     emby::{EmbyClient, EmbyLibrary},
     error::{AppError, AppResult},
@@ -192,6 +193,12 @@ pub struct DedupAutoAllResponse {
     pub async_requested: bool,
 }
 
+#[derive(Clone)]
+struct C115DeleteContext {
+    client: C115Client,
+    cid_map: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReplacePlan {
     pub lib: String,
@@ -245,9 +252,11 @@ pub async fn execute_dedup(
     }
 
     let emby_client = dedup_emby_client(&state).await?;
+    let c115_delete = dedup_c115_delete_context(&state).await?;
     let mut removed = Vec::with_capacity(req.remove.len());
     for item in &req.remove {
-        removed.push(delete_duplicate_folder(&state, item, &emby_client).await?);
+        removed
+            .push(delete_duplicate_folder(&state, item, &emby_client, c115_delete.as_ref()).await?);
     }
 
     Ok(Json(DedupExecuteResponse {
@@ -341,8 +350,14 @@ pub async fn auto_all(
     let mut results = Vec::new();
 
     let groups = analysis.dups.into_iter().take(limit).collect::<Vec<_>>();
-    let emby_client = if groups.iter().any(|group| !group.remove.is_empty()) {
+    let has_removals = groups.iter().any(|group| !group.remove.is_empty());
+    let emby_client = if has_removals {
         Some(dedup_emby_client(&state).await?)
+    } else {
+        None
+    };
+    let c115_delete = if has_removals {
+        dedup_c115_delete_context(&state).await?
     } else {
         None
     };
@@ -359,7 +374,7 @@ pub async fn auto_all(
             let client = emby_client
                 .as_ref()
                 .expect("dedup auto-all groups with removals require an Emby client");
-            match delete_duplicate_folder(&state, &item, client).await {
+            match delete_duplicate_folder(&state, &item, client, c115_delete.as_ref()).await {
                 Ok(_) => removed += 1,
                 Err(e) => {
                     err = Some(e.to_string());
@@ -407,6 +422,13 @@ fn spawn_dedup_batch(state: AppState, task_id: Uuid, groups: Vec<DedupExecuteBat
                 return;
             }
         };
+        let c115_delete = match dedup_c115_delete_context(&state).await {
+            Ok(context) => context,
+            Err(err) => {
+                let _ = tasks::finish_error(&state.pool, task_id, &err.to_string(), None).await;
+                return;
+            }
+        };
 
         let mut results = Vec::new();
         for (index, group) in groups.iter().enumerate() {
@@ -426,7 +448,9 @@ fn spawn_dedup_batch(state: AppState, task_id: Uuid, groups: Vec<DedupExecuteBat
             let mut removed = 0usize;
             let mut err = None;
             for item in &group.remove {
-                match delete_duplicate_folder(&state, item, &emby_client).await {
+                match delete_duplicate_folder(&state, item, &emby_client, c115_delete.as_ref())
+                    .await
+                {
                     Ok(_) => removed += 1,
                     Err(current) => {
                         err = Some(current.to_string());
@@ -961,6 +985,7 @@ async fn delete_duplicate_folder(
     state: &AppState,
     item: &DedupFolderRef,
     emby_client: &EmbyClient,
+    c115_delete: Option<&C115DeleteContext>,
 ) -> AppResult<DedupDeleteResult> {
     let lib = required_value(&item.lib, "lib")?;
     let folder = required_value(&item.folder, "folder")?;
@@ -980,19 +1005,16 @@ async fn delete_duplicate_folder(
     }
 
     let mut deleted_from = Vec::new();
-    match remove_path_if_exists(&cd_target).await {
-        Ok(true) => deleted_from.push("115".to_string()),
-        Ok(false) => {}
-        Err(err) => {
-            tracing::warn!(
-                path = %cd_target.display(),
-                error = %err,
-                "115 duplicate folder delete failed; continuing STRM cleanup"
-            );
-        }
+    if delete_c115_folder(c115_delete, lib, folder, &cd_target).await? {
+        deleted_from.push("115".to_string());
     }
     if remove_path_if_exists(&strm_target).await? {
         deleted_from.push("strm".to_string());
+    }
+    if deleted_from.is_empty() {
+        return Err(AppError::NotFound(format!(
+            "未找到可删除的 115/STRM 目录: {lib}/{folder}"
+        )));
     }
 
     let undo_id = Uuid::new_v4();
@@ -1024,6 +1046,51 @@ async fn delete_duplicate_folder(
         emby_updates,
         notified,
         undo_id,
+    })
+}
+
+async fn dedup_c115_delete_context(state: &AppState) -> AppResult<Option<C115DeleteContext>> {
+    let cookie = match c115::require_c115_cookie(
+        config_store::get_string(&state.pool, "c115_cookie").await?,
+    ) {
+        Ok(cookie) => cookie,
+        Err(_) => return Ok(None),
+    };
+    let cid_map = c115::cid_map(&state.pool).await?;
+    if cid_map.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(C115DeleteContext {
+        client: C115Client::new_with_site(C115_API, C115_SITE, cookie, state.http.clone()),
+        cid_map,
+    }))
+}
+
+async fn delete_c115_folder(
+    context: Option<&C115DeleteContext>,
+    lib: &str,
+    folder: &str,
+    cd_target: &Path,
+) -> AppResult<bool> {
+    if let Some(context) = context
+        && let Some(parent_cid) = context.cid_map.get(lib)
+    {
+        match context.client.delete_child_dir(parent_cid, folder).await {
+            Ok(true) => return Ok(true),
+            Ok(false) => {}
+            Err(err) => {
+                return Err(AppError::BadRequest(format!(
+                    "115 网盘目录删除失败: {lib}/{folder}: {err}"
+                )));
+            }
+        }
+    }
+
+    remove_path_if_exists(cd_target).await.map_err(|err| {
+        AppError::BadRequest(format!(
+            "115 挂载目录删除失败: {}: {err}",
+            cd_target.display()
+        ))
     })
 }
 

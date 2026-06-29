@@ -23,7 +23,7 @@ pub const C115_API: &str = "https://webapi.115.com";
 pub const C115_SITE: &str = "https://115.com";
 pub const C115_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const C115_COOKIE_KEY: &str = "c115_cookie";
-const C115_CID_MAP_KEY: &str = "c115_cid_map";
+pub const C115_CID_MAP_KEY: &str = "c115_cid_map";
 const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
 
 #[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
@@ -209,6 +209,7 @@ struct C115GenericApiResponse {
     state: bool,
     error: Option<String>,
     msg: Option<String>,
+    errno: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -630,6 +631,70 @@ impl C115Client {
                 Some(C115DirEntry { cid, name })
             })
             .collect())
+    }
+
+    pub async fn delete_child_dir(&self, parent_cid: &str, folder: &str) -> AppResult<bool> {
+        let folder = non_empty_trimmed(folder)
+            .ok_or_else(|| AppError::BadRequest("115 删除目录名不能为空".to_string()))?;
+        let parent_cid = validate_target_cid(parent_cid)?;
+        let matches = self
+            .list_dirs(&parent_cid)
+            .await?
+            .into_iter()
+            .filter(|dir| dir.name == folder)
+            .collect::<Vec<_>>();
+        if matches.is_empty() {
+            return Ok(false);
+        }
+        if matches.len() > 1 {
+            return Err(AppError::Conflict(format!(
+                "115 目录 cid={parent_cid} 下存在多个同名文件夹「{folder}」，为避免误删已中止"
+            )));
+        }
+        self.delete_ids(&parent_cid, &[matches[0].cid.clone()])
+            .await?;
+        Ok(true)
+    }
+
+    pub async fn delete_ids(&self, parent_cid: &str, ids: &[String]) -> AppResult<()> {
+        let cookie = require_c115_cookie(Some(self.cookie.clone()))?;
+        let parent_cid = validate_target_cid(parent_cid)?;
+        let ids = ids
+            .iter()
+            .filter_map(|id| non_empty_trimmed(id).map(ToString::to_string))
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Err(AppError::BadRequest("115 删除 ids 不能为空".to_string()));
+        }
+        let url = format!("{}/rb/delete", self.base_url);
+        let mut form = vec![
+            ("pid".to_string(), parent_cid),
+            ("ignore_warn".to_string(), "1".to_string()),
+        ];
+        for (idx, id) in ids.iter().enumerate() {
+            form.push((format!("fid[{idx}]"), id.clone()));
+        }
+        let resp = self
+            .http
+            .post(url)
+            .form(&form)
+            .header(USER_AGENT, C115_UA)
+            .header(COOKIE, cookie)
+            .header(REFERER, "https://115.com/")
+            .header(ACCEPT, "application/json, text/plain, */*")
+            .send()
+            .await
+            .map_err(|e| AppError::BadRequest(format!("115 删除请求失败: {e}")))?;
+        let result: C115GenericApiResponse = self.parse_json_response(resp, "115 删除").await?;
+        if !result.state {
+            let err = result
+                .error
+                .or(result.msg)
+                .or_else(|| result.errno.map(|errno| format!("errno={errno}")))
+                .unwrap_or_else(|| "115 返回 state=false".to_string());
+            return Err(AppError::BadRequest(format!("115 删除失败: {err}")));
+        }
+        Ok(())
     }
 
     pub async fn auto_cid(
@@ -1704,7 +1769,7 @@ async fn resolve_target_cid(
     Ok((validate_target_cid(cid)?, Some(lib.to_string())))
 }
 
-async fn cid_map(pool: &sqlx::PgPool) -> AppResult<BTreeMap<String, String>> {
+pub async fn cid_map(pool: &sqlx::PgPool) -> AppResult<BTreeMap<String, String>> {
     let Some(value) = config_store::get_raw(pool, C115_CID_MAP_KEY).await? else {
         return Ok(BTreeMap::new());
     };
