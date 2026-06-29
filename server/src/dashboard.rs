@@ -1,7 +1,7 @@
 use crate::{
     config_store, dedup,
     emby::{EmbyClient, EmbyLibrary},
-    error::AppResult,
+    error::{AppResult, redact_sensitive_text},
     posters::{self, PosterDetectRequest},
     state::AppState,
     zhuigeng,
@@ -56,7 +56,7 @@ pub async fn dashboard_todo(
             response.noposter = total;
             response.noposter_by_lib = by_lib;
         }
-        Err(err) => response.noposter_err = Some(err.to_string()),
+        Err(err) => response.noposter_err = Some(redact_sensitive_text(&err.to_string())),
     }
 
     match no_rating_todo(&state).await {
@@ -64,7 +64,7 @@ pub async fn dashboard_todo(
             response.no_rating = total;
             response.no_rating_by_lib = by_lib;
         }
-        Err(err) => response.no_rating_err = Some(err.to_string()),
+        Err(err) => response.no_rating_err = Some(redact_sensitive_text(&err.to_string())),
     }
 
     match dedup::analyze_duplicate_groups(&state.settings.strm_root) {
@@ -72,7 +72,7 @@ pub async fn dashboard_todo(
             response.dups_auto = dups.dups.len();
             response.dups_review = dups.review.len();
         }
-        Err(err) => response.dups_err = Some(err.to_string()),
+        Err(err) => response.dups_err = Some(redact_sensitive_text(&err.to_string())),
     }
 
     match zhuigeng::status(State(state.clone())).await {
@@ -80,7 +80,7 @@ pub async fn dashboard_todo(
             response.airing_count = status.continuing;
             response.airing_low_count = status.continuing;
         }
-        Err(err) => response.airing_err = Some(err.to_string()),
+        Err(err) => response.airing_err = Some(redact_sensitive_text(&err.to_string())),
     }
 
     Ok(Json(response))

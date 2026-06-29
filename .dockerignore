@@ -1,6 +1,7 @@
 .git
 .github
 .DS_Store
+.deploy/
 
 __pycache__/
 *.py[cod]

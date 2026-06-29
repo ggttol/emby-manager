@@ -1,4 +1,8 @@
-use crate::{config_store, error::AppResult, state::AppState};
+use crate::{
+    config_store,
+    error::{AppResult, redact_sensitive_text},
+    state::AppState,
+};
 use axum::{Json, Router, extract::State, routing::get};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -601,7 +605,7 @@ pub async fn probe_emby_health(
             summary.status = "unavailable".to_string();
             summary.warning = Some(format!(
                 "Emby /System/Info 不可用: {}",
-                shorten(&err.to_string(), 220)
+                shorten(&redact_sensitive_text(&err.to_string()), 220)
             ));
             return summary;
         }
@@ -632,7 +636,7 @@ pub async fn probe_emby_health(
             summary.status = "parse_error".to_string();
             summary.warning = Some(format!(
                 "Emby /System/Info 响应解析失败: {}",
-                shorten(&err.to_string(), 220)
+                shorten(&redact_sensitive_text(&err.to_string()), 220)
             ));
             return summary;
         }
