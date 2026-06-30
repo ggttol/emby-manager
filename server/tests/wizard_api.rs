@@ -850,6 +850,8 @@ async fn spawn_fake_json_server(
 }
 
 async fn test_state_with_roots(cd_root: PathBuf, strm_root: PathBuf) -> Option<AppState> {
+    std::fs::create_dir_all(&cd_root).expect("create cd test root");
+    std::fs::create_dir_all(&strm_root).expect("create strm test root");
     let database_url = wizard_test_database_url()?;
     let pool = PgPoolOptions::new()
         .max_connections(5)
