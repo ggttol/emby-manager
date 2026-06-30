@@ -80,11 +80,65 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
         ],
         "TotalRecordCount": 2
     }"#;
+    let poster_items_after_fix = r#"{
+        "Items": [
+            {
+                "Id": "movie-missing-poster",
+                "Name": "Share Movie",
+                "Type": "Movie",
+                "Path": "/strm/电影/Share Movie [tmdbid-100]/Share Movie.strm",
+                "ProviderIds": {"Tmdb": "100"},
+                "ImageTags": {"Primary": "fixed-poster-tag"}
+            },
+            {
+                "Id": "movie-wrong-tmdb",
+                "Name": "Wrong Movie",
+                "Type": "Movie",
+                "Path": "/strm/电影/Wrong Movie [tmdbid-200]/movie.strm",
+                "ProviderIds": {"Tmdb": "201"},
+                "ImageTags": {"Primary": "poster-tag"}
+            }
+        ],
+        "TotalRecordCount": 2
+    }"#;
+    let missing_poster_before = r#"{
+        "Items": [{
+            "Id": "movie-missing-poster",
+            "Name": "Share Movie",
+            "Type": "Movie",
+            "Path": "/strm/电影/Share Movie [tmdbid-100]/Share Movie.strm",
+            "ProviderIds": {"Tmdb": "100"},
+            "ImageTags": {}
+        }],
+        "TotalRecordCount": 1
+    }"#;
+    let missing_poster_after = r#"{
+        "Items": [{
+            "Id": "movie-missing-poster",
+            "Name": "Share Movie",
+            "Type": "Movie",
+            "Path": "/strm/电影/Share Movie [tmdbid-100]/Share Movie.strm",
+            "ProviderIds": {"Tmdb": "100"},
+            "ImageTags": {"Primary": "fixed-poster-tag"}
+        }],
+        "TotalRecordCount": 1
+    }"#;
     let (emby_base, emby_requests, emby_handle) = spawn_fake_json_server(vec![
         fake_json(libraries),
         fake_response("204 No Content", ""),
         fake_json(libraries),
         fake_json(poster_items),
+        fake_json(libraries),
+        fake_json(poster_items),
+        fake_json(missing_poster_before),
+        fake_json(missing_poster_before),
+        fake_response("204 No Content", ""),
+        fake_response("204 No Content", ""),
+        fake_json(missing_poster_after),
+        fake_json(libraries),
+        fake_json(poster_items_after_fix),
+        fake_json(libraries),
+        fake_json(poster_items_after_fix),
     ])
     .await;
 
@@ -210,12 +264,25 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
     assert_eq!(task["result"]["poster"]["triggered"], true);
     assert_eq!(task["result"]["poster"]["scanned_libraries"], 1);
     assert_eq!(task["result"]["poster"]["scanned_items"], 2);
-    assert_eq!(task["result"]["poster"]["issue_count"], 2);
-    assert_eq!(task["result"]["poster"]["missing_primary_count"], 1);
+    assert_eq!(task["result"]["poster"]["issue_count"], 1);
+    assert_eq!(task["result"]["poster"]["missing_primary_count"], 0);
     assert_eq!(task["result"]["poster"]["mismatch_count"], 1);
     assert_eq!(
         task["result"]["poster"]["items"].as_array().unwrap().len(),
-        2
+        1
+    );
+    assert_eq!(task["result"]["poster_auto_fix"]["triggered"], true);
+    assert_eq!(task["result"]["poster_auto_fix"]["fixed_count"], 1);
+    assert_eq!(task["result"]["poster_auto_fix"]["skipped_count"], 0);
+    assert_eq!(task["result"]["poster_auto_fix"]["error_count"], 0);
+    assert_eq!(
+        task["result"]["poster_auto_fix"]["items"][0]["id"],
+        "movie-missing-poster"
+    );
+    assert_eq!(task["result"]["poster_auto_fix"]["items"][0]["tmdb"], "100");
+    assert_eq!(
+        task["result"]["poster_auto_fix"]["items"][0]["poster"],
+        true
     );
     assert_ne!(task["result"]["check"]["status"], "placeholder");
     assert_eq!(task["result"]["check"]["status"], "errors");
@@ -279,7 +346,7 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
     );
 
     let emby_requests = emby_requests.lock().unwrap();
-    assert_eq!(emby_requests.len(), 4);
+    assert_eq!(emby_requests.len(), 15);
     assert!(
         emby_requests[0].starts_with("GET /Library/VirtualFolders?api_key=secret-key"),
         "{}",
@@ -314,6 +381,34 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
         emby_requests[3].contains("IncludeItemTypes=Movie"),
         "{}",
         emby_requests[3]
+    );
+    assert!(
+        emby_requests[6].starts_with("GET /Items?")
+            && emby_requests[6].contains("Ids=movie-missing-poster"),
+        "{}",
+        emby_requests[6]
+    );
+    assert!(
+        emby_requests[8].starts_with("POST /Items/RemoteSearch/Apply/movie-missing-poster?"),
+        "{}",
+        emby_requests[8]
+    );
+    assert!(
+        emby_requests[9].starts_with("POST /Items/movie-missing-poster/Refresh?"),
+        "{}",
+        emby_requests[9]
+    );
+    assert!(
+        emby_requests[12].starts_with("GET /Items?")
+            && emby_requests[12].contains("ParentId=lib-movie"),
+        "{}",
+        emby_requests[12]
+    );
+    assert!(
+        emby_requests[14].starts_with("GET /Items?")
+            && emby_requests[14].contains("ParentId=lib-movie"),
+        "{}",
+        emby_requests[14]
     );
 }
 
