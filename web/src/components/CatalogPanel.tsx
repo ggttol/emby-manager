@@ -26,6 +26,8 @@ type CatalogTransferPlanRequest = components['schemas']['CatalogTransferPlanRequ
 type CatalogTransferPlanResponse = components['schemas']['CatalogTransferPlanResponse'];
 type CatalogTransferTarget = components['schemas']['CatalogTransferTarget'];
 type ConfigResponse = components['schemas']['ConfigResponse'];
+type AddNewItem = components['schemas']['AddNewItem'];
+type AddNewRequest = components['schemas']['AddNewRequest'];
 type TaskRun = components['schemas']['TaskRun'];
 
 type CatalogSource = 'local' | 'remote';
@@ -40,6 +42,7 @@ type TransferTarget = {
 type PendingTransfer = {
   items: CatalogItem[];
   mode: 'single' | 'batch';
+  execution: 'wizard' | 'transfer';
   target: TransferTarget;
   plans: CatalogTransferPlanResponse[];
   context?: CatalogLibraryContextResponse | null;
@@ -138,6 +141,21 @@ function planActionLabel(action: CatalogTransferPlanResponse['action']) {
   if (action === 'save_share') return '115 秒传';
   if (action === 'offline_download') return '离线下载';
   return '不支持';
+}
+
+function wizardItemKind(action: CatalogTransferPlanResponse['action']): NonNullable<AddNewItem['kind']> {
+  if (action === 'offline_download') return 'offline_download';
+  if (action === 'save_share') return 'share115';
+  return 'other';
+}
+
+function wizardItemFromCatalog(item: CatalogItem, plan: CatalogTransferPlanResponse): AddNewItem {
+  return {
+    url: item.link,
+    kind: wizardItemKind(plan.action),
+    pwd: item.rc || plan.save?.receive_code || undefined,
+    label: item.name
+  };
 }
 
 function recommendationClass(level?: string | null) {
@@ -457,8 +475,9 @@ export function CatalogPanel() {
     setProgressText('正在预检目录转存计划...');
     try {
       const plans = await Promise.all(transferItems.map((item) => planTransferItem(item, target)));
+      const execution = target.lib && plans.some((plan) => plan.action !== 'unsupported') ? 'wizard' : 'transfer';
       setPackageAck('');
-      setPending({ items: transferItems, mode, target, plans, context: source === 'remote' ? libraryContext : null });
+      setPending({ items: transferItems, mode, execution, target, plans, context: source === 'remote' ? libraryContext : null });
       setError('');
     } catch (e) {
       const message = errorMessage(e);
@@ -481,15 +500,33 @@ export function CatalogPanel() {
     });
   };
 
+  const createWizardTask = async (transferItems: CatalogItem[], target: TransferTarget, plans: CatalogTransferPlanResponse[]): Promise<TaskRun> => {
+    const request: AddNewRequest = {
+      target: target.cid ? { cid: target.cid, lib: target.lib } : { lib: target.lib },
+      delay_ms: 500,
+      items: transferItems.map((item, index) => wizardItemFromCatalog(item, plans[index]))
+    };
+    return api<TaskRun>('/api/v2/wizard/add-new', {
+      method: 'POST',
+      body: JSON.stringify(request)
+    });
+  };
+
   const runTransfer = async (transfer: PendingTransfer) => {
     setPending(null);
     setTransferring(true);
-    setProgressText('正在创建目录转存任务...');
+    setProgressText(transfer.execution === 'wizard' ? '正在创建一条龙转存任务...' : '正在创建目录转存任务...');
     try {
-      const task = await createTransferBatchTask(transfer.items, transfer.target);
+      const task = transfer.execution === 'wizard'
+        ? await createWizardTask(transfer.items, transfer.target, transfer.plans)
+        : await createTransferBatchTask(transfer.items, transfer.target);
       trackTask(task);
       if (transfer.mode === 'batch') setSelected(new Set());
-      const prefix = transfer.mode === 'batch' ? '批量任务已交给任务中心，可在任务中心取消' : '任务已交给任务中心，可在任务中心取消';
+      const prefix = transfer.execution === 'wizard'
+        ? '一条龙任务已交给任务中心，会继续生成 STRM、扫库、修海报和检查重复'
+        : transfer.mode === 'batch'
+          ? '批量任务已交给任务中心，可在任务中心取消'
+          : '任务已交给任务中心，可在任务中心取消';
       toast.push(`${prefix}：${taskSummary(task)}`, 'ok');
       setError('');
     } catch (e) {
@@ -739,11 +776,17 @@ export function CatalogPanel() {
       )}
 
       {pending && (
-        <Modal title={pending.mode === 'batch' ? '批量转存确认' : `${actionLabel(pending.items[0])}确认`} onClose={() => setPending(null)}>
+        <Modal title={pending.execution === 'wizard' ? '一条龙转存确认' : pending.mode === 'batch' ? '批量转存确认' : `${actionLabel(pending.items[0])}确认`} onClose={() => setPending(null)}>
           <div className="modalBody catalogConfirm">
             <p>
               确认后会创建一个可取消任务，交给任务中心处理 <strong>{pending.items.length}</strong> 条到 <strong>{pending.target.label}</strong>
             </p>
+            {pending.execution === 'wizard' && (
+              <div className="notice catalogPlanContext">
+                <strong>将使用一条龙加新</strong>
+                <span>转存后会继续生成目标库缺失 STRM、触发 Emby 刷新、检查/自动修复海报，并输出重复资源检查结果。</span>
+              </div>
+            )}
             {pending.context && (
               <div className="notice catalogPlanContext">
                 <strong>本库情况：{pending.context.summary.note}</strong>
@@ -788,7 +831,7 @@ export function CatalogPanel() {
           <footer className="modalActions">
             <button className="btn ghost" onClick={() => setPending(null)}>取消</button>
             <button className={packageCount ? 'btn danger' : 'btn'} onClick={() => runTransfer(pending)} disabled={confirmDisabled}>
-              {pending.mode === 'batch' ? '开始提交' : actionLabel(pending.items[0])}
+              {pending.execution === 'wizard' ? '创建一条龙任务' : pending.mode === 'batch' ? '开始提交' : actionLabel(pending.items[0])}
             </button>
           </footer>
         </Modal>

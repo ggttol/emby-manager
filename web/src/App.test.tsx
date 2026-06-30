@@ -2249,9 +2249,9 @@ describe('App shell', () => {
     expect(await screen.findByText('已删除 Bob')).toBeInTheDocument();
   });
 
-  it('searches catalog and creates catalog transfer execute tasks with csrf', async () => {
+  it('searches catalog and creates one-dragon add-new tasks with csrf', async () => {
     const planPayloads: unknown[] = [];
-    const executePayloads: unknown[] = [];
+    const wizardPayloads: unknown[] = [];
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/catalog/stats') {
         return jsonResponse({ available: true, total: 260000, packages: 1200 });
@@ -2326,21 +2326,21 @@ describe('App shell', () => {
           unsupported: action === 'unsupported' ? { link: item.link, reason: 'unsupported type' } : null
         });
       }
-      if (url.pathname === '/api/v2/catalog/transfer/execute') {
+      if (url.pathname === '/api/v2/wizard/add-new') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
         const payload = JSON.parse(String(init?.body));
-        executePayloads.push(payload);
+        wizardPayloads.push(payload);
         return jsonResponse({
-          id: executePayloads.length === 1
+          id: wizardPayloads.length === 1
             ? '44444444-4444-4444-8444-444444444444'
             : '55555555-5555-4555-8555-555555555555',
-          kind: 'catalog_transfer_execute',
-          label: executePayloads.length === 1 ? '目录转存: The Movie -> cid=12345' : '目录转存: 2 项 -> cid=12345',
+          kind: 'add_new',
+          label: wizardPayloads.length === 1 ? '一条龙加新资源: 1 项 -> 库「电影」' : '一条龙加新资源: 2 项 -> 库「电影」',
           status: 'pending',
           progress: 0,
-          total: payload.items.length,
+          total: payload.items.length + 3,
           status_text: '排队中',
           cancel_requested: false,
           queued_at: '2026-06-28T00:00:00Z',
@@ -2384,22 +2384,20 @@ describe('App shell', () => {
       },
       lib: '电影'
     });
-    fireEvent.click(screen.getAllByRole('button', { name: '转存' }).at(-1)!);
+    fireEvent.click(screen.getByRole('button', { name: '创建一条龙任务' }));
 
-    await waitFor(() => expect(executePayloads).toHaveLength(1));
-    expect(executePayloads[0]).toEqual({
+    await waitFor(() => expect(wizardPayloads).toHaveLength(1));
+    expect(wizardPayloads[0]).toEqual({
+      target: { lib: '电影' },
+      delay_ms: 500,
       items: [{
-        name: 'The Movie',
-        sheet: '电影',
-        link: 'https://115.com/s/abc?password=xy12',
-        link_type: 'share115',
-        is_pkg: false,
-        share: 'abc',
-        rc: 'xy12'
-      }],
-      target: { lib: '电影' }
+        url: 'https://115.com/s/abc?password=xy12',
+        kind: 'share115',
+        pwd: 'xy12',
+        label: 'The Movie'
+      }]
     });
-    expect(await screen.findByText('任务已交给任务中心，可在任务中心取消：目录转存: The Movie -> cid=12345')).toBeInTheDocument();
+    expect(await screen.findByText('一条龙任务已交给任务中心，会继续生成 STRM、扫库、修海报和检查重复：一条龙加新资源: 1 项 -> 库「电影」')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '全选' }));
     fireEvent.click(screen.getByRole('button', { name: '转存选中' }));
@@ -2430,37 +2428,32 @@ describe('App shell', () => {
         lib: '电影'
       }
     ]);
-    fireEvent.click(screen.getByRole('button', { name: '开始提交' }));
+    fireEvent.click(screen.getByRole('button', { name: '创建一条龙任务' }));
 
-    await waitFor(() => expect(executePayloads).toHaveLength(2));
-    expect(executePayloads[1]).toEqual({
+    await waitFor(() => expect(wizardPayloads).toHaveLength(2));
+    expect(wizardPayloads[1]).toEqual({
+      target: { lib: '电影' },
+      delay_ms: 500,
       items: [
         {
-          name: 'The Movie',
-          sheet: '电影',
-          link: 'https://115.com/s/abc?password=xy12',
-          link_type: 'share115',
-          is_pkg: false,
-          share: 'abc',
-          rc: 'xy12'
+          url: 'https://115.com/s/abc?password=xy12',
+          kind: 'share115',
+          pwd: 'xy12',
+          label: 'The Movie'
         },
         {
-          name: 'The Magnet',
-          sheet: '电影',
-          link: 'magnet:?xt=urn:btih:123',
-          link_type: 'magnet',
-          is_pkg: false,
-          share: null,
-          rc: null
+          url: 'magnet:?xt=urn:btih:123',
+          kind: 'offline_download',
+          label: 'The Magnet'
         }
-      ],
-      target: { lib: '电影' }
+      ]
     });
-    expect(await screen.findByText('批量任务已交给任务中心，可在任务中心取消：目录转存: 2 项 -> cid=12345')).toBeInTheDocument();
+    expect(await screen.findByText('一条龙任务已交给任务中心，会继续生成 STRM、扫库、修海报和检查重复：一条龙加新资源: 2 项 -> 库「电影」')).toBeInTheDocument();
   });
 
   it('shows remote catalog context and smart-selects recommended 115 resources', async () => {
     const planPayloads: unknown[] = [];
+    let wizardPayload: unknown = null;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/catalog/stats') {
         return jsonResponse({ available: true, total: 260000, packages: 1200 });
@@ -2583,6 +2576,29 @@ describe('App shell', () => {
           }
         });
       }
+      if (url.pathname === '/api/v2/wizard/add-new') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        wizardPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          kind: 'add_new',
+          label: '一条龙加新资源: 1 项 -> 库「电视剧」',
+          status: 'pending',
+          progress: 0,
+          total: 4,
+          status_text: '排队中',
+          cancel_requested: false,
+          queued_at: '2026-06-28T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-28T00:00:00Z',
+          params: {},
+          result: null,
+          source: 'api'
+        });
+      }
       return undefined;
     });
 
@@ -2614,8 +2630,22 @@ describe('App shell', () => {
       lib: '电视剧'
     });
     expect(await screen.findByText('本库情况：库内已有条目但存在缺集，可优先选补缺或全集资源')).toBeInTheDocument();
+    expect(screen.getByText('将使用一条龙加新')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    fireEvent.change(screen.getByLabelText('含整包合集，输入“整包”确认'), { target: { value: '整包' } });
+    fireEvent.click(screen.getByRole('button', { name: '创建一条龙任务' }));
+
+    await waitFor(() => expect(wizardPayload).toEqual({
+      target: { lib: '电视剧' },
+      delay_ms: 500,
+      items: [{
+        url: 'https://115cdn.com/s/swfull?password=8888',
+        kind: 'share115',
+        pwd: '8888',
+        label: '莫离 S01E01-E40 2160p'
+      }]
+    }));
+
     fireEvent.change(screen.getByLabelText('资源数据源'), { target: { value: 'local' } });
     expect(screen.queryByText('莫离 S01E01-E40 2160p')).not.toBeInTheDocument();
     expect(screen.getByText('等待搜索')).toBeInTheDocument();
