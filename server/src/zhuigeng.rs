@@ -1101,7 +1101,7 @@ fn compute_virtual_behind(local: &LocalEpisodeSummary) -> BehindSummary {
             resource_hint: None,
         };
     }
-    missing.sort_by(|left, right| compare_episode_pair(left, right));
+    missing.sort_by(compare_episode_pair);
     let resource_hint = format_episode_segments(&missing);
     let hint = Some(format!(
         "Emby 虚拟集提示缺 {} 集 · {}",

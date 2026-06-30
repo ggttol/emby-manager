@@ -403,11 +403,25 @@ export function CatalogPanel() {
     search();
   };
 
+  const clearSearchResults = () => {
+    setItems([]);
+    setResultTotal(0);
+    setRemoteDiskTypes([]);
+    setLibraryContext(null);
+    setSelected(new Set());
+    setSearched(false);
+    setTruncated(false);
+  };
+
   const changeSource = (next: CatalogSource) => {
     setSource(next);
     setLinkFilter('');
-    setRemoteDiskTypes([]);
-    setLibraryContext(null);
+    clearSearchResults();
+  };
+
+  const changeLinkFilter = (next: LinkFilter) => {
+    setLinkFilter(next);
+    clearSearchResults();
   };
 
   const parseTarget = (): TransferTarget | null => {
@@ -562,7 +576,7 @@ export function CatalogPanel() {
             className="input"
             aria-label={source === 'remote' ? '网盘类型' : '链接类型'}
             value={linkFilter}
-            onChange={(event) => setLinkFilter(event.target.value as LinkFilter)}
+            onChange={(event) => changeLinkFilter(event.target.value as LinkFilter)}
           >
             {filterOptions.map((option) => (
               <option key={option.value || 'all'} value={option.value}>{option.label}</option>

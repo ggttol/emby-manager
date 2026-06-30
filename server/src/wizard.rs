@@ -1491,7 +1491,7 @@ async fn auto_resolve_emby_duplicates(
             if kept.episode_count == 0 {
                 unresolved = true;
                 items.push(auto_resolve_skipped(
-                    &tmdb,
+                    tmdb,
                     kept,
                     old,
                     "目标库本地 STRM 数量为 0，跳过自动删除".to_string(),
@@ -1501,7 +1501,7 @@ async fn auto_resolve_emby_duplicates(
             if kept.episode_count < old.episode_count {
                 unresolved = true;
                 items.push(auto_resolve_skipped(
-                    &tmdb,
+                    tmdb,
                     kept,
                     old,
                     format!(
@@ -1514,7 +1514,7 @@ async fn auto_resolve_emby_duplicates(
             let Some(item_id) = old.item_id.as_deref().and_then(non_empty_trimmed) else {
                 unresolved = true;
                 items.push(auto_resolve_skipped(
-                    &tmdb,
+                    tmdb,
                     kept,
                     old,
                     "旧追更条目缺少 Emby item id，跳过自动删除".to_string(),

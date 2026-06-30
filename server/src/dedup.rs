@@ -994,14 +994,14 @@ async fn delete_duplicate_folder(
     let cd_target = safe_under(&cd_lib, folder)?;
     let strm_target = safe_under(&strm_lib, folder)?;
 
-    if let Some(item_id) = item.item_id.as_deref().and_then(non_empty_trimmed) {
-        if let Err(err) = emby_client.delete_item(item_id).await {
-            tracing::warn!(
-                item_id,
-                error = %err,
-                "Emby item delete failed during dedup; continuing STRM cleanup"
-            );
-        }
+    if let Some(item_id) = item.item_id.as_deref().and_then(non_empty_trimmed)
+        && let Err(err) = emby_client.delete_item(item_id).await
+    {
+        tracing::warn!(
+            item_id,
+            error = %err,
+            "Emby item delete failed during dedup; continuing STRM cleanup"
+        );
     }
 
     let mut deleted_from = Vec::new();

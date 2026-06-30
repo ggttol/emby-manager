@@ -29,6 +29,13 @@ const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
 const C115_DELETE_RETRY_COUNT: usize = 5;
 const C115_DELETE_RETRY_DELAY: Duration = Duration::from_millis(1800);
 
+struct C115AutoCidWalkState<'a> {
+    targets: &'a BTreeMap<String, String>,
+    matches: &'a mut BTreeMap<String, Vec<C115CidMatch>>,
+    visited: &'a mut HashSet<String>,
+    scanned: &'a mut usize,
+}
+
 #[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ShareUrl {
     pub url: String,
@@ -736,10 +743,12 @@ impl C115Client {
             "0".to_string(),
             String::new(),
             max_depth,
-            &targets,
-            &mut matches,
-            &mut visited,
-            &mut scanned,
+            C115AutoCidWalkState {
+                targets: &targets,
+                matches: &mut matches,
+                visited: &mut visited,
+                scanned: &mut scanned,
+            },
         )
         .await?;
         Ok(C115AutoCidResponse {
@@ -858,11 +867,14 @@ impl C115Client {
         cid: String,
         prefix: String,
         depth: usize,
-        targets: &BTreeMap<String, String>,
-        matches: &mut BTreeMap<String, Vec<C115CidMatch>>,
-        visited: &mut HashSet<String>,
-        scanned: &mut usize,
+        state: C115AutoCidWalkState<'_>,
     ) -> AppResult<()> {
+        let C115AutoCidWalkState {
+            targets,
+            matches,
+            visited,
+            scanned,
+        } = state;
         let mut stack = vec![(cid, prefix, depth)];
         while let Some((cid, prefix, depth)) = stack.pop() {
             if *scanned >= 80 || !visited.insert(cid.clone()) {
@@ -1705,10 +1717,10 @@ fn snap_file_from_item(
     let id = file_id
         .clone()
         .or_else(|| item.cid.as_ref().and_then(value_to_string));
-    if let Some(wanted) = wanted {
-        if !id.as_ref().is_some_and(|id| wanted.contains(id)) {
-            return None;
-        }
+    if let Some(wanted) = wanted
+        && !id.as_ref().is_some_and(|id| wanted.contains(id))
+    {
+        return None;
     }
 
     Some(C115SnapFile {
@@ -1848,10 +1860,10 @@ fn library_target_names(lib_name: &str, paths: &[String]) -> Vec<(String, String
             out.push((name.to_string(), lib_name.to_string()));
         }
     }
-    if out.is_empty() {
-        if let Some(name) = non_empty_trimmed(lib_name) {
-            out.push((name.to_string(), lib_name.to_string()));
-        }
+    if out.is_empty()
+        && let Some(name) = non_empty_trimmed(lib_name)
+    {
+        out.push((name.to_string(), lib_name.to_string()));
     }
     out
 }

@@ -44,6 +44,18 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 ];
 const CLEANUP_DIMENSIONS: &[&str] = &["rating", "age", "idle", "size", "meta"];
 
+type TaskHistoryCounters = (
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<DateTime<Utc>>,
+);
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct InsightMeta {
     pub generated_at: DateTime<Utc>,
@@ -1195,17 +1207,7 @@ async fn task_history_summary(pool: &PgPool) -> AppResult<TaskHistorySummary> {
         cancelled,
         interrupted,
         last_updated_at,
-    ): (
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        Option<DateTime<Utc>>,
-    ) = sqlx::query_as(
+    ): TaskHistoryCounters = sqlx::query_as(
         "SELECT
                 COUNT(*)::bigint,
                 COUNT(*) FILTER (WHERE status = 'pending')::bigint,
@@ -1786,18 +1788,17 @@ fn scan_empty_strm_dirs(root: &Path, limit: usize) -> EmptyDirScan {
 
     let mut dirs = Vec::<(PathBuf, usize)>::new();
     let mut blocked_dirs = HashSet::<PathBuf>::new();
-    let mut visited = 0usize;
-    for entry in WalkDir::new(root)
+    for (visited, entry) in WalkDir::new(root)
         .min_depth(1)
         .follow_links(false)
         .contents_first(true)
         .into_iter()
+        .enumerate()
     {
         if visited >= STRM_SUMMARY_ENTRY_LIMIT {
             scan.truncated = true;
             break;
         }
-        visited += 1;
 
         let entry = match entry {
             Ok(entry) => entry,

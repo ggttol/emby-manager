@@ -23,7 +23,7 @@ use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 const SCHEDULER_POLL_SECONDS: u64 = 30;
-const SCHEDULER_ADVISORY_LOCK_ID: i64 = 8097_8098_42;
+const SCHEDULER_ADVISORY_LOCK_ID: i64 = 8_097_809_842;
 const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
 const DEFAULT_POSTER_FIX_LIMIT: usize = 200;
 const DEFAULT_SERIES_REFRESH_LIMIT: usize = 500;

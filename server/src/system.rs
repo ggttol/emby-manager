@@ -719,7 +719,7 @@ fn run_df(path: &Path) -> Result<Option<DiskSummary>, String> {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let Some(line) = text.lines().filter(|line| !line.trim().is_empty()).last() else {
+    let Some(line) = text.lines().rfind(|line| !line.trim().is_empty()) else {
         return Ok(None);
     };
     let cols = line.split_whitespace().collect::<Vec<_>>();

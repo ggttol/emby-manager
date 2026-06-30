@@ -163,7 +163,7 @@ pub async fn update_user_policy_with_client(
     let mut user = client.user(id).await?;
     merge_policy(&mut user.policy, req)?;
     client.update_user_policy(id, &user.policy).await?;
-    let updated = client.user(&id).await.unwrap_or(user);
+    let updated = client.user(id).await.unwrap_or(user);
     Ok(UpdateUserPolicyResponse {
         ok: true,
         user: UserSummary::from(updated),

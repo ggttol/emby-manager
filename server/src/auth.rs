@@ -246,9 +246,7 @@ fn client_ip_for_request(
     peer_ip: Option<IpAddr>,
     trusted_proxies: &[IpAddr],
 ) -> Option<IpAddr> {
-    let Some(peer_ip) = peer_ip else {
-        return None;
-    };
+    let peer_ip = peer_ip?;
     if !trusted_proxies.contains(&peer_ip) {
         return Some(peer_ip);
     }
@@ -531,13 +529,12 @@ fn credentials_from_headers(headers: &HeaderMap) -> Option<AuthCredentials> {
     if let Some(v) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
+        && let Some(t) = v.strip_prefix("Bearer ")
     {
-        if let Some(t) = v.strip_prefix("Bearer ") {
-            return Some(AuthCredentials {
-                token: t.trim().to_string(),
-                source: AuthSource::Bearer,
-            });
-        }
+        return Some(AuthCredentials {
+            token: t.trim().to_string(),
+            source: AuthSource::Bearer,
+        });
     }
     let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
     cookie.split(';').find_map(|part| {

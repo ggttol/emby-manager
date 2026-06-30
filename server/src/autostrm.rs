@@ -471,12 +471,7 @@ fn insert_library_folder_aliases(map: &mut BTreeMap<String, String>, library: &E
     map.insert(library.name.clone(), library.name.clone());
     for path in &library.paths {
         let normalized = path.replace('\\', "/");
-        if let Some(name) = normalized
-            .split('/')
-            .filter(|part| !part.trim().is_empty())
-            .next_back()
-            .filter(|part| !part.is_empty())
-        {
+        if let Some(name) = normalized.split('/').rfind(|part| !part.trim().is_empty()) {
             map.insert(name.to_string(), library.name.clone());
         }
     }

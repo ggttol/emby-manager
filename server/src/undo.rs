@@ -21,6 +21,8 @@ const DEFAULT_LIMIT: i64 = 50;
 const MAX_LIMIT: i64 = 200;
 const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
 
+type UndoValidationResult<T> = Result<T, Box<UndoExecuteResponse>>;
+
 #[derive(Debug, Clone, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct UndoListQuery {
     pub limit: Option<i64>,
@@ -200,7 +202,7 @@ fn manual_restore_response(entry: &UndoEntry) -> UndoExecuteResponse {
 fn move_requires_execution_response(entry: &UndoEntry) -> UndoExecuteResponse {
     let payload = match parse_move_payload(entry) {
         Ok(payload) => payload,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     UndoExecuteResponse {
         ok: false,
@@ -217,7 +219,7 @@ fn move_requires_execution_response(entry: &UndoEntry) -> UndoExecuteResponse {
 fn rebind_response(entry: &UndoEntry) -> UndoExecuteResponse {
     let payload = match parse_rebind_payload(entry) {
         Ok(payload) => payload,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     UndoExecuteResponse {
         ok: false,
@@ -243,7 +245,7 @@ async fn execute_rebind_undo(
 ) -> AppResult<UndoExecuteResponse> {
     let payload = match parse_rebind_payload(entry) {
         Ok(payload) => payload,
-        Err(response) => return Ok(response),
+        Err(response) => return Ok(*response),
     };
     let client = rebind_emby_client(state).await?;
     let status = match client
@@ -291,7 +293,7 @@ struct RebindUndoPayload {
     name: Option<String>,
 }
 
-fn parse_rebind_payload(entry: &UndoEntry) -> Result<RebindUndoPayload, UndoExecuteResponse> {
+fn parse_rebind_payload(entry: &UndoEntry) -> UndoValidationResult<RebindUndoPayload> {
     let item_id = payload_string(&entry.payload, &["item_id", "id"]);
     let old_tmdb = payload_string(&entry.payload, &["old_tmdb"]);
     let missing: Vec<&str> = [
@@ -302,14 +304,14 @@ fn parse_rebind_payload(entry: &UndoEntry) -> Result<RebindUndoPayload, UndoExec
     .filter_map(|(key, value)| value.is_none().then_some(key))
     .collect();
     if !missing.is_empty() {
-        return Err(unsupported_response(
+        return Err(Box::new(unsupported_response(
             entry,
             &format!(
                 "rebind undo payload 缺少 {},无法安全恢复海报绑定",
                 missing.join("/")
             ),
             Some("请手动检查当前海报/TMDB 绑定状态".to_string()),
-        ));
+        )));
     }
     Ok(RebindUndoPayload {
         item_id: item_id.expect("validated item_id"),
@@ -338,11 +340,11 @@ fn ensure_rebind_api_key_configured(api_key: &str) -> AppResult<()> {
 async fn execute_move_undo(state: &AppState, entry: &UndoEntry) -> AppResult<UndoExecuteResponse> {
     let (payload, plan) = match build_move_undo_plan(state, entry) {
         Ok(plan) => plan,
-        Err(response) => return Ok(response),
+        Err(response) => return Ok(*response),
     };
     let preflight = match preflight_move_undo(entry, &payload, &plan) {
         Ok(preflight) => preflight,
-        Err(response) => return Ok(response),
+        Err(response) => return Ok(*response),
     };
 
     create_parent(&plan.restore_cd).await?;
@@ -353,11 +355,11 @@ async fn execute_move_undo(state: &AppState, entry: &UndoEntry) -> AppResult<Und
     tokio::fs::rename(&plan.current_cd, &plan.restore_cd)
         .await
         .map_err(anyhow::Error::from)?;
-    if preflight.move_strm {
-        if let Err(err) = tokio::fs::rename(&plan.current_strm, &plan.restore_strm).await {
-            let _ = tokio::fs::rename(&plan.restore_cd, &plan.current_cd).await;
-            return Err(AppError::Anyhow(err.into()));
-        }
+    if preflight.move_strm
+        && let Err(err) = tokio::fs::rename(&plan.current_strm, &plan.restore_strm).await
+    {
+        let _ = tokio::fs::rename(&plan.restore_cd, &plan.current_cd).await;
+        return Err(AppError::Anyhow(err.into()));
     }
 
     let updated =
@@ -413,7 +415,7 @@ struct MoveUndoPreflight {
 fn build_move_undo_plan(
     state: &AppState,
     entry: &UndoEntry,
-) -> Result<(MoveUndoPayload, MoveUndoPlan), UndoExecuteResponse> {
+) -> UndoValidationResult<(MoveUndoPayload, MoveUndoPlan)> {
     let payload = parse_move_payload(entry)?;
     let plan = MoveUndoPlan {
         current_cd: guarded_media_path(
@@ -444,20 +446,20 @@ fn build_move_undo_plan(
     Ok((payload, plan))
 }
 
-fn parse_move_payload(entry: &UndoEntry) -> Result<MoveUndoPayload, UndoExecuteResponse> {
+fn parse_move_payload(entry: &UndoEntry) -> UndoValidationResult<MoveUndoPayload> {
     let missing: Vec<&str> = ["from", "to", "folder", "to_folder"]
         .into_iter()
         .filter(|key| required_payload_string(&entry.payload, key).is_none())
         .collect();
     if !missing.is_empty() {
-        return Err(unsupported_response(
+        return Err(Box::new(unsupported_response(
             entry,
             &format!(
                 "move undo payload 缺少 {},无法安全判断反向移动路径",
                 missing.join("/")
             ),
             Some("请手动确认 115 与 STRM 当前路径后恢复,再扫描对应库".to_string()),
-        ));
+        )));
     }
     Ok(MoveUndoPayload {
         from: required_payload_string(&entry.payload, "from")
@@ -479,13 +481,13 @@ fn guarded_path(
     entry: &UndoEntry,
     base: impl AsRef<Path>,
     segment: &str,
-) -> Result<PathBuf, UndoExecuteResponse> {
+) -> UndoValidationResult<PathBuf> {
     safe_under(base, segment).map_err(|err| {
-        unsupported_response(
+        Box::new(unsupported_response(
             entry,
             &format!("move undo payload 含非法路径段,已拒绝执行: {err}"),
             Some("请手动确认路径没有绝对路径、.. 或符号链接越界".to_string()),
-        )
+        ))
     })
 }
 
@@ -494,7 +496,7 @@ fn guarded_media_path(
     root: &Path,
     lib: &str,
     folder: &str,
-) -> Result<PathBuf, UndoExecuteResponse> {
+) -> UndoValidationResult<PathBuf> {
     guarded_path(entry, root, lib)?;
     guarded_path(entry, root, folder)?;
     guarded_path(entry, root, &format!("{lib}/{folder}"))
@@ -504,9 +506,9 @@ fn preflight_move_undo(
     entry: &UndoEntry,
     payload: &MoveUndoPayload,
     plan: &MoveUndoPlan,
-) -> Result<MoveUndoPreflight, UndoExecuteResponse> {
+) -> UndoValidationResult<MoveUndoPreflight> {
     if !plan.current_cd.is_dir() {
-        return Err(move_manual_restore_response(
+        return Err(Box::new(move_manual_restore_response(
             entry,
             payload,
             &format!(
@@ -514,10 +516,10 @@ fn preflight_move_undo(
                 plan.current_cd.display()
             ),
             "请确认文件夹是否已被移动/删除,必要时从 115 web 手动恢复后扫描原库",
-        ));
+        )));
     }
     if plan.restore_cd.exists() {
-        return Err(move_manual_restore_response(
+        return Err(Box::new(move_manual_restore_response(
             entry,
             payload,
             &format!(
@@ -525,10 +527,10 @@ fn preflight_move_undo(
                 plan.restore_cd.display()
             ),
             "请手动合并或移开目标目录后再重试",
-        ));
+        )));
     }
     if plan.restore_strm.exists() {
-        return Err(move_manual_restore_response(
+        return Err(Box::new(move_manual_restore_response(
             entry,
             payload,
             &format!(
@@ -536,10 +538,10 @@ fn preflight_move_undo(
                 plan.restore_strm.display()
             ),
             "请手动确认 STRM 目录后再重试,或移开冲突目录并重新执行",
-        ));
+        )));
     }
     if plan.current_strm.exists() && !plan.current_strm.is_dir() {
-        return Err(move_manual_restore_response(
+        return Err(Box::new(move_manual_restore_response(
             entry,
             payload,
             &format!(
@@ -547,14 +549,14 @@ fn preflight_move_undo(
                 plan.current_strm.display()
             ),
             "请手动检查 STRM 文件/目录状态后扫描对应库",
-        ));
+        )));
     }
     Ok(MoveUndoPreflight {
         move_strm: plan.current_strm.is_dir(),
     })
 }
 
-async fn create_parent(path: &PathBuf) -> AppResult<()> {
+async fn create_parent(path: &Path) -> AppResult<()> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await

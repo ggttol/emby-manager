@@ -2614,6 +2614,11 @@ describe('App shell', () => {
       lib: '电视剧'
     });
     expect(await screen.findByText('本库情况：库内已有条目但存在缺集，可优先选补缺或全集资源')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '取消' }));
+    fireEvent.change(screen.getByLabelText('资源数据源'), { target: { value: 'local' } });
+    expect(screen.queryByText('莫离 S01E01-E40 2160p')).not.toBeInTheDocument();
+    expect(screen.getByText('等待搜索')).toBeInTheDocument();
   });
 
   it('previews 115 share files and creates save/offline/scan tasks with csrf', async () => {

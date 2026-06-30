@@ -1492,7 +1492,16 @@ pub async fn catalog_transfer_execute(
     )
     .await?;
     spawn_catalog_transfer_execute(
-        state, task.id, cookie, api_base, site_base, plans, target_cid, target_lib,
+        state,
+        CatalogTransferExecution {
+            id: task.id,
+            cookie,
+            api_base,
+            site_base,
+            plans,
+            target_cid,
+            target_lib,
+        },
     );
     Ok(Json(task))
 }
@@ -1621,8 +1630,7 @@ async fn c115_base_urls(pool: &sqlx::PgPool) -> AppResult<(String, String)> {
     Ok((api_base, site_base))
 }
 
-fn spawn_catalog_transfer_execute(
-    state: AppState,
+struct CatalogTransferExecution {
     id: Uuid,
     cookie: String,
     api_base: String,
@@ -1630,8 +1638,19 @@ fn spawn_catalog_transfer_execute(
     plans: Vec<CatalogTransferPlanResponse>,
     target_cid: String,
     target_lib: Option<String>,
-) {
+}
+
+fn spawn_catalog_transfer_execute(state: AppState, execution: CatalogTransferExecution) {
     tokio::spawn(async move {
+        let CatalogTransferExecution {
+            id,
+            cookie,
+            api_base,
+            site_base,
+            plans,
+            target_cid,
+            target_lib,
+        } = execution;
         let Ok(_permit) = state.clouddrive_slot.clone().acquire_owned().await else {
             let _ = tasks::finish_error(&state.pool, id, "115 任务串行锁不可用", None).await;
             return;

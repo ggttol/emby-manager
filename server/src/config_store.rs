@@ -464,15 +464,11 @@ fn is_positive_integer(value: &str) -> bool {
 }
 
 fn is_importable_config_key(key: &str) -> bool {
-    IMPORTABLE_CONFIG_KEYS
-        .iter()
-        .any(|candidate| *candidate == key)
+    IMPORTABLE_CONFIG_KEYS.contains(&key)
 }
 
 fn is_protected_import_key(key: &str) -> bool {
-    PROTECTED_IMPORT_KEYS
-        .iter()
-        .any(|candidate| *candidate == key)
+    PROTECTED_IMPORT_KEYS.contains(&key)
 }
 
 fn is_sensitive_key(key: &str) -> bool {

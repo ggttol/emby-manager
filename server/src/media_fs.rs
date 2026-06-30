@@ -34,6 +34,17 @@ const VIDEO_EXTENSIONS: &[&str] = &[
 const SUBTITLE_EXTENSIONS: &[&str] = &["ass", "idx", "smi", "srt", "ssa", "sub", "sup", "vtt"];
 pub const SCAN_TASK_CANCELLED_SENTINEL: &str = "__task_cancelled__";
 
+struct MoveBatchExecution {
+    id: Uuid,
+    emby_url: String,
+    api_key: String,
+    from_lib: String,
+    to_lib: String,
+    from_lib_folder: String,
+    to_lib_folder: String,
+    items: Vec<ManageMoveRequest>,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LibrariesResponse {
     pub libraries: Vec<EmbyLibrary>,
@@ -976,14 +987,16 @@ pub async fn execute_move_batch(
     .await?;
     spawn_move_batch_execute(
         state,
-        task.id,
-        emby_url,
-        api_key,
-        req.from_lib,
-        req.to_lib,
-        from_lib_folder,
-        to_lib_folder,
-        items,
+        MoveBatchExecution {
+            id: task.id,
+            emby_url,
+            api_key,
+            from_lib: req.from_lib,
+            to_lib: req.to_lib,
+            from_lib_folder,
+            to_lib_folder,
+            items,
+        },
     );
     Ok(Json(task))
 }
@@ -1455,17 +1468,17 @@ fn spawn_move_execute(
     });
 }
 
-fn spawn_move_batch_execute(
-    state: AppState,
-    id: Uuid,
-    emby_url: String,
-    api_key: String,
-    from_lib: String,
-    to_lib: String,
-    from_lib_folder: String,
-    to_lib_folder: String,
-    items: Vec<ManageMoveRequest>,
-) {
+fn spawn_move_batch_execute(state: AppState, execution: MoveBatchExecution) {
+    let MoveBatchExecution {
+        id,
+        emby_url,
+        api_key,
+        from_lib,
+        to_lib,
+        from_lib_folder,
+        to_lib_folder,
+        items,
+    } = execution;
     tokio::spawn(async move {
         let Ok(_permit) = state.task_slots.clone().acquire_owned().await else {
             let _ = tasks::finish_error(&state.pool, id, "任务并发槽不可用", None).await;
