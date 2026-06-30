@@ -1,14 +1,24 @@
 import {
   Activity,
+  CalendarClock,
   Database,
+  Eraser,
+  FileSearch,
   FolderSearch,
+  HardDrive,
+  Image,
   LayoutDashboard,
   ListChecks,
   LogOut,
+  MonitorCog,
   Search,
   Settings,
   Shield,
-  UserRound
+  Sparkles,
+  Trash2,
+  UserRound,
+  UsersRound,
+  type LucideIcon
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import {
@@ -28,7 +38,7 @@ import { CleanupPanel, DedupPanel, ZhuigengGapsPanel } from './components/Insigh
 import { LogsPanel } from './components/LogsPanel';
 import { ManagePanel } from './components/ManagePanel';
 import { PostersPanel } from './components/PostersPanel';
-import { DashboardPanel, SubtitlesPanel, SystemPanel } from './components/ReadOnlyPanels';
+import { DashboardPanel, SystemPanel } from './components/ReadOnlyPanels';
 import { ScanPanel } from './components/ScanPanel';
 import { SchedulesPanel } from './components/SchedulesPanel';
 import { SettingsPanel } from './components/SettingsPanel';
@@ -39,25 +49,34 @@ type Tab = {
   label: string;
   endpoint: string;
   description: string;
+  icon: LucideIcon;
+  group: 'overview' | 'media' | 'resources' | 'repair' | 'ops';
 };
 
 const tabs: Tab[] = [
-  { id: 'dashboard', label: '仪表盘', endpoint: '/api/v2/system/summary', description: '在线状态、库卡片和待办入口' },
-  { id: 'scan', label: '扫描', endpoint: '/api/v2/libraries', description: '单库 / 全库扫描与孤儿 strm 清理' },
-  { id: 'c115', label: '115 转存', endpoint: '/api/v2/c115/test', description: '分享链接 snap、转存、离线下载' },
-  { id: 'catalog', label: '找资源', endpoint: '/api/v2/catalog/stats', description: 'Postgres catalog 搜索和转存入口' },
-  { id: 'zhuigeng', label: '追更检查', endpoint: '/api/v2/gaps/scan', description: '在更剧扫描和缺集汇总' },
-  { id: 'gaps', label: '缺集检查', endpoint: '/api/v2/gaps/scan', description: '本地剧集和 TMDb 季集表对照' },
-  { id: 'posters', label: '海报修复', endpoint: '/api/v2/posters/detect-mismatch', description: '无海报与 tmdbid 错绑检测' },
-  { id: 'subtitles', label: '字幕', endpoint: '/api/v2/libraries', description: '外挂字幕覆盖统计' },
-  { id: 'dedup', label: '去重', endpoint: '/api/v2/manage/undo', description: '重复资源分析、删除、替换' },
-  { id: 'manage', label: '删除·移动', endpoint: '/api/v2/manage/undo', description: '危险操作、移动和 undo' },
-  { id: 'cleanup', label: '智能清理', endpoint: '/api/v2/cleanup/suggest', description: '评分、无观看、空间和元数据维度' },
-  { id: 'system', label: '系统', endpoint: '/api/v2/system/summary', description: 'Docker、负载、磁盘、健康预警' },
-  { id: 'schedules', label: '定时', endpoint: '/api/v2/schedules', description: '每日 / 每周 / 每月任务编排' },
-  { id: 'logs', label: '日志', endpoint: '/api/v2/logs', description: '应用日志和审计记录' },
-  { id: 'users', label: '用户', endpoint: '/api/v2/users', description: 'Emby 用户策略、限速和并发' },
-  { id: 'settings', label: '设置', endpoint: '/api/v2/config', description: '路径、密钥、导入导出和迁移状态' }
+  { id: 'dashboard', label: '仪表盘', endpoint: '/api/v2/system/summary', description: '在线状态、库卡片和待办入口', icon: LayoutDashboard, group: 'overview' },
+  { id: 'scan', label: '扫描', endpoint: '/api/v2/libraries', description: '单库 / 全库扫描与孤儿 strm 清理', icon: FolderSearch, group: 'media' },
+  { id: 'c115', label: '115 转存', endpoint: '/api/v2/c115/test', description: '分享链接 snap、转存、离线下载', icon: HardDrive, group: 'resources' },
+  { id: 'catalog', label: '找资源', endpoint: '/api/v2/catalog/stats', description: 'Postgres catalog 搜索和转存入口', icon: Search, group: 'resources' },
+  { id: 'zhuigeng', label: '追更检查', endpoint: '/api/v2/gaps/scan', description: '在更剧扫描和缺集汇总', icon: Sparkles, group: 'repair' },
+  { id: 'gaps', label: '缺集检查', endpoint: '/api/v2/gaps/scan', description: '本地剧集和 TMDb 季集表对照', icon: FileSearch, group: 'repair' },
+  { id: 'posters', label: '海报修复', endpoint: '/api/v2/posters/detect-mismatch', description: '无海报与 tmdbid 错绑检测', icon: Image, group: 'repair' },
+  { id: 'dedup', label: '去重', endpoint: '/api/v2/manage/undo', description: '重复资源分析、删除、替换', icon: Eraser, group: 'media' },
+  { id: 'manage', label: '删除·移动', endpoint: '/api/v2/manage/undo', description: '危险操作、移动和 undo', icon: Trash2, group: 'media' },
+  { id: 'cleanup', label: '智能清理', endpoint: '/api/v2/cleanup/suggest', description: '评分、无观看、空间和元数据维度', icon: ListChecks, group: 'media' },
+  { id: 'system', label: '系统', endpoint: '/api/v2/system/summary', description: 'Docker、负载、磁盘、健康预警', icon: MonitorCog, group: 'ops' },
+  { id: 'schedules', label: '定时', endpoint: '/api/v2/schedules', description: '每日 / 每周 / 每月任务编排', icon: CalendarClock, group: 'ops' },
+  { id: 'logs', label: '日志', endpoint: '/api/v2/logs', description: '应用日志和审计记录', icon: Activity, group: 'ops' },
+  { id: 'users', label: '用户', endpoint: '/api/v2/users', description: 'Emby 用户策略、限速和并发', icon: UsersRound, group: 'ops' },
+  { id: 'settings', label: '设置', endpoint: '/api/v2/config', description: '路径、密钥、导入导出和迁移状态', icon: Settings, group: 'ops' }
+];
+
+const navGroups: Array<{ id: Tab['group']; label: string }> = [
+  { id: 'overview', label: '总览' },
+  { id: 'resources', label: '加资源' },
+  { id: 'media', label: '媒体库' },
+  { id: 'repair', label: '修复检查' },
+  { id: 'ops', label: '系统' }
 ];
 
 type AuthState =
@@ -72,6 +91,7 @@ function errorMessage(error: unknown) {
 function Shell({ username, onLogout }: { username: string; onLogout: () => void }) {
   const [active, setActive] = useState(tabs[0].id);
   const tab = useMemo(() => tabs.find((item) => item.id === active) || tabs[0], [active]);
+  const groupLabel = navGroups.find((group) => group.id === tab.group)?.label || '';
 
   return (
     <div className="app">
@@ -81,16 +101,31 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
           <div><strong>Emby Manager</strong><span>Rust Preview</span></div>
         </div>
         <nav>
-          {tabs.map((item) => (
-            <button key={item.id} className={item.id === active ? 'active' : ''} onClick={() => setActive(item.id)}>
-              {item.label}
-            </button>
+          {navGroups.map((group) => (
+            <div className="navSection" key={group.id}>
+              <span className="navGroupLabel">{group.label}</span>
+              {tabs.filter((item) => item.group === group.id).map((item) => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.id}
+                    className={`navButton ${item.id === active ? 'active' : ''}`}
+                    onClick={() => setActive(item.id)}
+                    title={item.description}
+                  >
+                    <Icon size={17} />
+                    <span>{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
           ))}
         </nav>
       </aside>
       <main>
         <header className="topbar">
-          <div>
+          <div className="topbarTitle">
+            <span>{groupLabel}</span>
             <h1>{tab.label}</h1>
             <p>{tab.description}</p>
           </div>
@@ -180,14 +215,6 @@ function TabPanel({ tab }: { tab: Tab }) {
     return (
       <section className="panel">
         <SystemPanel />
-      </section>
-    );
-  }
-
-  if (tab.id === 'subtitles') {
-    return (
-      <section className="panel">
-        <SubtitlesPanel />
       </section>
     );
   }
@@ -287,7 +314,7 @@ function FallbackPanel({ tab }: { tab: Tab }) {
       <div className="panelActions">
         <button className="btn" onClick={load} disabled={loading}>{loading ? '加载中' : '刷新'}</button>
       </div>
-      {(tab.id === 'scan' || tab.id === 'subtitles') && (
+      {tab.id === 'scan' && (
         <div className="inlineTool">
           <label>
             <span>strm 库名</span>
@@ -305,7 +332,7 @@ function FallbackPanel({ tab }: { tab: Tab }) {
 
 function FeatureMap({ id }: { id: string }) {
   const cards = [
-    { icon: <LayoutDashboard />, title: 'UI 壳', text: '16 个 tab 已拆成 React 路由入口。' },
+    { icon: <LayoutDashboard />, title: 'UI 壳', text: '15 个 tab 已拆成 React 路由入口。' },
     { icon: <Activity />, title: '任务中心', text: '轮询 /api/v2/tasks，支持取消、搜索和全局进度。' },
     { icon: <Database />, title: 'Postgres', text: '配置、任务、调度、undo、catalog 共用数据库。' },
     { icon: <FolderSearch />, title: '业务 Port', text: `${id} 模块按旧版语义迁移，写操作走任务中心跟踪。` }

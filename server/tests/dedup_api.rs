@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    time::{Duration, sleep},
 };
 use uuid::Uuid;
 
@@ -222,6 +223,158 @@ async fn duplicates_include_emby_provider_id_groups_without_folder_tmdb() {
     );
 }
 
+#[tokio::test]
+async fn execute_dedup_allows_emby_item_only_duplicate_delete() {
+    let Some((_tmp, state)) = test_state().await else {
+        eprintln!("skipping dedup API DB test; set EMBY_MANAGER_DEDUP_TEST_DATABASE_URL");
+        return;
+    };
+    let (base_url, requests) = spawn_fake_emby(vec![FakeResponse::no_content()]).await;
+    configure_emby(&state, &base_url).await;
+
+    let response = dedup::execute_dedup(
+        State(state.clone()),
+        Json(dedup::DedupExecuteRequest {
+            tmdb: Some("661029".to_string()),
+            remove: vec![dedup::DedupFolderRef {
+                lib: "TV".to_string(),
+                folder: "../Pokemon XY".to_string(),
+                item_id: Some("53148".to_string()),
+            }],
+            reason: Some("provider duplicate item cleanup".to_string()),
+        }),
+    )
+    .await
+    .expect("Emby item-only duplicate delete should execute")
+    .0;
+
+    assert!(response.ok);
+    assert_eq!(response.tmdb.as_deref(), Some("661029"));
+    assert_eq!(response.removed.len(), 1);
+    assert_eq!(response.removed[0].folder, "../Pokemon XY");
+    assert_eq!(response.removed[0].deleted_from, vec!["emby"]);
+    assert!(response.removed[0].emby_updates.is_empty());
+    assert!(!response.removed[0].notified);
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].starts_with("DELETE /Items/53148?"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        requests[0].contains("api_key=secret-key"),
+        "{}",
+        requests[0]
+    );
+}
+
+#[tokio::test]
+async fn execute_dedup_stops_local_cleanup_when_emby_delete_fails() {
+    let Some((_tmp, state)) = test_state().await else {
+        eprintln!("skipping dedup API DB test; set EMBY_MANAGER_DEDUP_TEST_DATABASE_URL");
+        return;
+    };
+    let (base_url, requests) = spawn_fake_emby(vec![FakeResponse::server_error()]).await;
+    configure_emby(&state, &base_url).await;
+
+    let cd_folder = state.settings.cd_root.join("TV/Show [tmdbid-100]");
+    let strm_folder = state.settings.strm_root.join("TV/Show [tmdbid-100]");
+    std::fs::create_dir_all(&cd_folder).unwrap();
+    std::fs::create_dir_all(&strm_folder).unwrap();
+    std::fs::write(strm_folder.join("S01E01.strm"), "strm").unwrap();
+
+    let err = dedup::execute_dedup(
+        State(state.clone()),
+        Json(dedup::DedupExecuteRequest {
+            tmdb: Some("100".to_string()),
+            remove: vec![dedup::DedupFolderRef {
+                lib: "TV".to_string(),
+                folder: "Show [tmdbid-100]".to_string(),
+                item_id: Some("item-fails".to_string()),
+            }],
+            reason: Some("emby delete failure must abort".to_string()),
+        }),
+    )
+    .await
+    .expect_err("Emby delete failure must fail the dedup request");
+
+    assert!(matches!(err, AppError::Conflict(_)), "{err:?}");
+    assert!(cd_folder.exists(), "115/CloudDrive folder must remain");
+    assert!(strm_folder.exists(), "STRM folder must remain");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].starts_with("DELETE /Items/item-fails?"),
+        "{}",
+        requests[0]
+    );
+}
+
+#[tokio::test]
+async fn execute_dedup_batch_marks_task_error_when_a_group_fails() {
+    let Some((_tmp, state)) = test_state().await else {
+        eprintln!("skipping dedup API DB test; set EMBY_MANAGER_DEDUP_TEST_DATABASE_URL");
+        return;
+    };
+    let (base_url, _requests) = spawn_fake_emby(vec![FakeResponse::server_error()]).await;
+    configure_emby(&state, &base_url).await;
+
+    let strm_folder = state.settings.strm_root.join("TV/Show [tmdbid-200]");
+    std::fs::create_dir_all(&strm_folder).unwrap();
+    std::fs::write(strm_folder.join("S01E01.strm"), "strm").unwrap();
+
+    let task = dedup::execute_dedup_batch(
+        State(state.clone()),
+        Json(dedup::DedupExecuteBatchRequest {
+            groups: vec![dedup::DedupExecuteBatchGroup {
+                tmdb: Some("200".to_string()),
+                remove: vec![dedup::DedupFolderRef {
+                    lib: "TV".to_string(),
+                    folder: "Show [tmdbid-200]".to_string(),
+                    item_id: Some("item-fails".to_string()),
+                }],
+            }],
+        }),
+    )
+    .await
+    .expect("batch task should be created")
+    .0;
+
+    let mut row: Option<(String, Option<Value>, Option<String>)> = None;
+    for _ in 0..40 {
+        let current = sqlx::query_as::<_, (String, Option<Value>, Option<String>)>(
+            "SELECT status, result, error FROM task_runs WHERE id = $1",
+        )
+        .bind(task.id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("load task");
+        if !matches!(current.0.as_str(), "pending" | "running") {
+            row = Some(current);
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    let (status, result, error) = row.expect("task should finish");
+    let result = result.expect("failed batch should still store a structured result");
+    assert_eq!(status, "error");
+    assert!(
+        error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("批量去重失败"),
+        "{error:?}"
+    );
+    assert_eq!(result["ok"], json!(false));
+    assert_eq!(result["ok_count"], json!(0));
+    assert_eq!(result["error_count"], json!(1));
+    assert_eq!(result["results"][0]["ok"], json!(false));
+    assert!(strm_folder.exists(), "failed dedup must not remove STRM");
+}
+
 async fn configure_emby(state: &AppState, base_url: &str) {
     for (key, value) in [
         ("emby_url", json!(base_url)),
@@ -250,6 +403,13 @@ impl FakeResponse {
         Self {
             status: "204 No Content",
             body: "",
+        }
+    }
+
+    fn server_error() -> Self {
+        Self {
+            status: "500 Internal Server Error",
+            body: r#"{"error":"locked"}"#,
         }
     }
 

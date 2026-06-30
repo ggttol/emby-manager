@@ -412,13 +412,333 @@ async fn add_new_runs_batch_transfer_and_library_scan_with_item_errors() {
     );
 }
 
+#[tokio::test]
+async fn add_new_auto_fixes_missing_poster_without_declared_tmdb() {
+    let _guard = DB_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cd_root = tmp.path().join("cd");
+    let strm_root = tmp.path().join("strm");
+    let movie_dir = cd_root.join("电影/Remote Only Movie 2026");
+    std::fs::create_dir_all(&movie_dir).unwrap();
+    std::fs::write(movie_dir.join("Remote Only Movie 2026.mkv"), b"movie").unwrap();
+    let Some(state) = test_state_with_roots(cd_root.clone(), strm_root.clone()).await else {
+        eprintln!("skipping wizard API DB test; set EMBY_MANAGER_WIZARD_TEST_DATABASE_URL");
+        return;
+    };
+
+    let snap = r#"{
+        "state": true,
+        "data": {
+            "total": 1,
+            "shareinfo": {"share_title": "Remote Only Movie 2026"},
+            "list": [{"fid": "file-share", "n": "Remote Only Movie 2026.mkv", "s": 1024}]
+        }
+    }"#;
+    let receive = r#"{"state": true}"#;
+    let (c115_base, _c115_requests, c115_handle) =
+        spawn_fake_json_server(vec![fake_json(snap), fake_json(receive)]).await;
+
+    let libraries = r#"[{
+        "ItemId": "lib-movie",
+        "Name": "电影",
+        "CollectionType": "movies",
+        "Locations": ["/strm/电影"]
+    }]"#;
+    let item_missing = r#"{
+        "Items": [{
+            "Id": "movie-no-tmdb",
+            "Name": "Remote Only Movie 2026",
+            "Type": "Movie",
+            "Path": "/strm/电影/Remote Only Movie 2026/Remote Only Movie 2026.strm",
+            "ProviderIds": {},
+            "ImageTags": {}
+        }],
+        "TotalRecordCount": 1
+    }"#;
+    let item_fixed = r#"{
+        "Items": [{
+            "Id": "movie-no-tmdb",
+            "Name": "Remote Only Movie 2026",
+            "Type": "Movie",
+            "Path": "/strm/电影/Remote Only Movie 2026/Remote Only Movie 2026.strm",
+            "ProviderIds": {"Tmdb": "777"},
+            "ImageTags": {"Primary": "poster-tag"}
+        }],
+        "TotalRecordCount": 1
+    }"#;
+    let remote_candidates = r#"[{
+        "Name": "Remote Only Movie",
+        "ProductionYear": 2026,
+        "ProviderIds": {"Tmdb": "777"},
+        "ImageUrl": "https://image.example/poster.jpg"
+    }]"#;
+    let (emby_base, emby_requests, emby_handle) = spawn_fake_json_server(vec![
+        fake_json(libraries),
+        fake_response("204 No Content", ""),
+        fake_json(libraries),
+        fake_json(item_missing),
+        fake_json(libraries),
+        fake_json(item_missing),
+        fake_json(item_missing),
+        fake_json(remote_candidates),
+        fake_json(item_missing),
+        fake_response("204 No Content", ""),
+        fake_response("204 No Content", ""),
+        fake_json(item_fixed),
+        fake_json(libraries),
+        fake_json(item_fixed),
+        fake_json(libraries),
+        fake_json(item_fixed),
+    ])
+    .await;
+
+    configure_settings(&state, &c115_base, &emby_base).await;
+    let app = wizard::router().with_state(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v2/wizard/add-new")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "items": [{
+                            "name": "Remote Only Movie 2026",
+                            "link": "https://115.com/s/swRemote?password=RC",
+                            "link_type": "share115"
+                        }],
+                        "target": {"lib": "电影"},
+                        "delay_ms": 0
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+
+    let task = wait_for_task_status(&state, id, "done").await;
+    assert_eq!(task["result"]["ok"], true);
+    assert_eq!(task["result"]["strm"]["new_count"], 1);
+    assert_eq!(
+        task["result"]["strm"]["new_folders"]["Remote Only Movie 2026"],
+        1
+    );
+    assert_eq!(task["result"]["poster_auto_fix"]["triggered"], true);
+    assert_eq!(task["result"]["poster_auto_fix"]["fixed_count"], 1);
+    assert_eq!(task["result"]["poster_auto_fix"]["items"][0]["tmdb"], "777");
+    assert!(
+        task["result"]["poster_auto_fix"]["items"][0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("RemoteSearch"),
+        "{task}"
+    );
+    assert_eq!(task["result"]["poster"]["issue_count"], 0);
+    assert_eq!(task["result"]["check"]["status"], "ok");
+
+    timeout(Duration::from_secs(1), c115_handle)
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(1), emby_handle)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let emby_requests = emby_requests.lock().unwrap();
+    assert_eq!(emby_requests.len(), 16);
+    assert!(
+        emby_requests[7].starts_with("POST /Items/RemoteSearch/Movie?"),
+        "{}",
+        emby_requests[7]
+    );
+    assert!(
+        emby_requests[9].starts_with("POST /Items/RemoteSearch/Apply/movie-no-tmdb?"),
+        "{}",
+        emby_requests[9]
+    );
+    assert!(
+        emby_requests[10].starts_with("POST /Items/movie-no-tmdb/Refresh?"),
+        "{}",
+        emby_requests[10]
+    );
+}
+
+#[tokio::test]
+async fn followup_update_auto_deletes_same_library_old_version() {
+    let _guard = DB_LOCK.lock().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let cd_root = tmp.path().join("cd");
+    let strm_root = tmp.path().join("strm");
+    let old_cd = cd_root.join("电视剧追更/Update Show Old [tmdbid-100]");
+    let new_cd = cd_root.join("电视剧追更/Update Show [tmdbid-100]");
+    let old_strm = strm_root.join("电视剧追更/Update Show Old [tmdbid-100]");
+    std::fs::create_dir_all(&old_cd).unwrap();
+    std::fs::create_dir_all(&new_cd).unwrap();
+    std::fs::create_dir_all(&old_strm).unwrap();
+    for ep in 1..=24 {
+        std::fs::write(old_cd.join(format!("E{ep:02}.mkv")), b"old").unwrap();
+        std::fs::write(
+            old_strm.join(format!("E{ep:02}.strm")),
+            format!("/media/电视剧追更/Update Show Old [tmdbid-100]/E{ep:02}.mkv"),
+        )
+        .unwrap();
+    }
+    for ep in 1..=30 {
+        std::fs::write(new_cd.join(format!("E{ep:02}.mkv")), b"new").unwrap();
+    }
+    let Some(state) = test_state_with_roots(cd_root.clone(), strm_root.clone()).await else {
+        eprintln!("skipping wizard API DB test; set EMBY_MANAGER_WIZARD_TEST_DATABASE_URL");
+        return;
+    };
+
+    let snap = r#"{
+        "state": true,
+        "data": {
+            "total": 1,
+            "shareinfo": {"share_title": "Update Show"},
+            "list": [{"fid": "file-share", "n": "Update Show.mkv", "s": 1024}]
+        }
+    }"#;
+    let receive = r#"{"state": true}"#;
+    let (c115_base, _c115_requests, c115_handle) =
+        spawn_fake_json_server(vec![fake_json(snap), fake_json(receive)]).await;
+
+    let libraries = r#"[{
+        "ItemId": "lib-tv",
+        "Name": "电视剧追更",
+        "CollectionType": "tvshows",
+        "Locations": ["/strm/电视剧追更"]
+    }]"#;
+    let duplicate_items = r#"{
+        "Items": [
+            {
+                "Id": "old-series",
+                "Name": "Update Show Old",
+                "Type": "Series",
+                "Path": "/strm/电视剧追更/Update Show Old [tmdbid-100]/E01.strm",
+                "ProviderIds": {"Tmdb": "100"},
+                "ImageTags": {"Primary": "old-poster"}
+            },
+            {
+                "Id": "new-series",
+                "Name": "Update Show",
+                "Type": "Series",
+                "Path": "/strm/电视剧追更/Update Show [tmdbid-100]/E01.strm",
+                "ProviderIds": {"Tmdb": "100"},
+                "ImageTags": {"Primary": "new-poster"}
+            }
+        ],
+        "TotalRecordCount": 2
+    }"#;
+    let old_missing = r#"{"Items": [], "TotalRecordCount": 0}"#;
+    let (emby_base, emby_requests, emby_handle) = spawn_fake_json_server(vec![
+        fake_json(libraries),
+        fake_response("204 No Content", ""),
+        fake_json(libraries),
+        fake_json(duplicate_items),
+        fake_json(libraries),
+        fake_json(duplicate_items),
+        fake_response("204 No Content", ""),
+        fake_json(old_missing),
+        fake_response("204 No Content", ""),
+    ])
+    .await;
+
+    configure_settings(&state, &c115_base, &emby_base).await;
+    let app = wizard::router().with_state(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v2/wizard/add-new")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "items": [{
+                            "name": "Update Show",
+                            "link": "https://115.com/s/swUpdate?password=RC",
+                            "link_type": "share115"
+                        }],
+                        "target": {"lib": "电视剧追更"},
+                        "delay_ms": 0
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let id = Uuid::parse_str(body["id"].as_str().unwrap()).unwrap();
+    let task = wait_for_task_status(&state, id, "done").await;
+
+    assert_eq!(task["result"]["ok"], true);
+    assert_eq!(task["result"]["strm"]["new_count"], 30);
+    assert_eq!(task["result"]["auto_resolve"]["resolved_count"], 1);
+    assert_eq!(
+        task["result"]["auto_resolve"]["items"][0]["removed_item_id"],
+        "old-series"
+    );
+    assert_eq!(
+        task["result"]["auto_resolve"]["items"][0]["kept_folder"],
+        "Update Show [tmdbid-100]"
+    );
+    assert_eq!(task["result"]["dedup"]["review_count"], 0);
+    assert_eq!(task["result"]["check"]["status"], "ok");
+    assert!(!old_cd.exists(), "old media folder should be deleted");
+    assert!(!old_strm.exists(), "old strm folder should be deleted");
+    assert!(new_cd.exists(), "new media folder should be kept");
+    assert!(
+        strm_root
+            .join("电视剧追更/Update Show [tmdbid-100]/E30.strm")
+            .is_file(),
+        "new strm files should be kept"
+    );
+
+    timeout(Duration::from_secs(1), c115_handle)
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(1), emby_handle)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let emby_requests = emby_requests.lock().unwrap();
+    assert!(
+        emby_requests
+            .iter()
+            .any(|request| request.starts_with("DELETE /Items/old-series?")),
+        "{emby_requests:#?}"
+    );
+    assert!(
+        emby_requests
+            .iter()
+            .any(|request| request.starts_with("POST /Library/Media/Updated?")),
+        "{emby_requests:#?}"
+    );
+}
+
 async fn configure_settings(state: &AppState, c115_base: &str, emby_base: &str) {
     for (key, value) in [
         (
             "c115_cookie",
             json!("CID=cid-value; UID=123456_A1; SEID=seid-value"),
         ),
-        ("c115_cid_map", json!({"电影": "12345"})),
+        (
+            "c115_cid_map",
+            json!({"电影": "12345", "电视剧追更": "67890"}),
+        ),
         ("c115_api_base_url", json!(c115_base)),
         ("c115_site_base_url", json!(c115_base)),
         ("emby_url", json!(emby_base)),

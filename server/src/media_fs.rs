@@ -188,6 +188,7 @@ pub struct ScanLibraryRequest {
     pub recursive: Option<bool>,
     pub full: Option<bool>,
     pub generate_strm: Option<bool>,
+    pub force_refresh: Option<bool>,
     pub keyword: Option<String>,
     pub fullauto: Option<bool>,
     pub cleanup_orphans: Option<bool>,
@@ -698,8 +699,11 @@ pub async fn scan_library(
     let api_key = config_store::get_string_or(&state.pool, "api_key", "").await?;
     ensure_api_key_configured(&api_key)?;
 
+    let params = serde_json::to_value(&req).unwrap_or_else(|_| serde_json::json!({}));
     let label = scan_task_label(&req);
-    let task = tasks::insert_task(&state.pool, "scan_library", &label, 1).await?;
+    let task =
+        tasks::insert_task_with_meta(&state.pool, "scan_library", &label, 1, "manual", params)
+            .await?;
     spawn_scan_task(state, task.id, emby_url, api_key, req);
     Ok(Json(task))
 }
@@ -938,6 +942,18 @@ pub async fn execute_move_batch(
     State(state): State<AppState>,
     Json(req): Json<ManageMoveBatchRequest>,
 ) -> AppResult<Json<TaskRun>> {
+    Ok(Json(
+        create_move_batch_task(state, req, "manual", "manage_move_batch_execute", None).await?,
+    ))
+}
+
+pub async fn create_move_batch_task(
+    state: AppState,
+    req: ManageMoveBatchRequest,
+    source: &str,
+    kind: &str,
+    label_prefix: Option<&str>,
+) -> AppResult<TaskRun> {
     if req.items.is_empty() {
         return Err(AppError::BadRequest("items 不能为空".to_string()));
     }
@@ -976,12 +992,16 @@ pub async fn execute_move_batch(
         req.to_lib.trim(),
         items.len()
     );
+    let label = match label_prefix.and_then(non_empty_trimmed) {
+        Some(prefix) => format!("{prefix}: {label}"),
+        None => label,
+    };
     let task = tasks::insert_task_with_meta(
         &state.pool,
-        "manage_move_batch_execute",
+        kind,
         &label,
         items.len() as i64,
-        "manual",
+        source,
         params,
     )
     .await?;
@@ -998,7 +1018,7 @@ pub async fn execute_move_batch(
             items,
         },
     );
-    Ok(Json(task))
+    Ok(task)
 }
 
 fn ensure_api_key_configured(api_key: &str) -> AppResult<()> {
@@ -1559,12 +1579,19 @@ fn spawn_move_batch_execute(state: AppState, execution: MoveBatchExecution) {
             smart_count,
             results,
         };
-        let _ = tasks::finish_done(
-            &state.pool,
-            id,
-            serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
-        )
-        .await;
+        let error_count = result.error_count;
+        let result_value = serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({}));
+        if error_count > 0 {
+            let _ = tasks::finish_error(
+                &state.pool,
+                id,
+                &format!("批量移动失败: {ok_count}/{total} 成功，{error_count} 项失败"),
+                Some(result_value),
+            )
+            .await;
+        } else {
+            let _ = tasks::finish_done(&state.pool, id, result_value).await;
+        }
     });
 }
 
@@ -1905,7 +1932,14 @@ async fn move_cd_folder(plan: &MoveExecutePlan) -> AppResult<()> {
     }
     tokio::fs::rename(&plan.from_cd_target, &plan.to_cd_target)
         .await
-        .map_err(anyhow::Error::from)?;
+        .map_err(|err| {
+            AppError::Anyhow(anyhow::anyhow!(
+                "移动 115 文件夹失败: {} -> {}: {}",
+                plan.from_cd_target.display(),
+                plan.to_cd_target.display(),
+                err
+            ))
+        })?;
     Ok(())
 }
 
@@ -2626,7 +2660,11 @@ async fn run_strm_generate_task(
     }
 
     let mut items = Vec::new();
-    if strm.new_count > 0 || strm.orphans_cleaned > 0 || strm.permissions_fixed > 0 {
+    let should_refresh = req.force_refresh.unwrap_or(false)
+        || strm.new_count > 0
+        || strm.orphans_cleaned > 0
+        || strm.permissions_fixed > 0;
+    if should_refresh {
         let plan = resolve_scan_plan(client, &req).await?;
         match plan {
             ScanPlan::Items(targets) => {

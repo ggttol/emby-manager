@@ -34,7 +34,7 @@ pub struct CatalogSearchQuery {
     pub link_type: Option<String>,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CatalogItem {
     pub name: String,
     pub sheet: String,
@@ -55,7 +55,7 @@ pub struct CatalogSearchResponse {
     pub truncated: bool,
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub struct CatalogRemoteSearchQuery {
     pub q: String,
     pub limit: Option<i64>,
@@ -491,9 +491,16 @@ pub async fn catalog_remote_search(
     State(state): State<AppState>,
     Query(q): Query<CatalogRemoteSearchQuery>,
 ) -> AppResult<Json<CatalogRemoteSearchResponse>> {
+    Ok(Json(catalog_remote_search_for_state(&state, q).await?))
+}
+
+pub async fn catalog_remote_search_for_state(
+    state: &AppState,
+    q: CatalogRemoteSearchQuery,
+) -> AppResult<CatalogRemoteSearchResponse> {
     let keyword = q.q.trim().to_string();
     if keyword.is_empty() {
-        return Ok(Json(CatalogRemoteSearchResponse {
+        return Ok(CatalogRemoteSearchResponse {
             items: vec![],
             total: 0,
             limit: q.limit.unwrap_or(80).clamp(1, 500),
@@ -505,10 +512,10 @@ pub async fn catalog_remote_search(
             truncated: false,
             disk_types: vec![],
             context: Some(empty_library_context(&keyword, "请输入关键词")),
-        }));
+        });
     }
 
-    let context = match build_catalog_library_context(&state, &keyword, 8).await {
+    let context = match build_catalog_library_context(state, &keyword, 8).await {
         Ok(context) => context,
         Err(err) => unavailable_library_context(&keyword, err.to_string()),
     };
@@ -523,7 +530,7 @@ pub async fn catalog_remote_search(
         fetch_tg_resource_search(&state.http, &base_url, token.as_deref(), q).await?;
     apply_catalog_recommendations(&mut response.items, &context);
     response.context = Some(context);
-    Ok(Json(response))
+    Ok(response)
 }
 
 #[utoipa::path(get, path = "/api/v2/catalog/library-context", tag = "catalog", params(CatalogLibraryContextQuery), responses((status = 200, body = CatalogLibraryContextResponse)))]
@@ -1128,7 +1135,7 @@ fn normalized_remote_sort(value: Option<&str>) -> String {
     }
 }
 
-fn likely_remote_package_title(title: &str) -> bool {
+pub(crate) fn likely_remote_package_title(title: &str) -> bool {
     let lower = title.to_ascii_lowercase().replace([' ', '_'], "");
     title.contains("全集")
         || title.contains("合集")
@@ -1141,13 +1148,13 @@ fn likely_remote_package_title(title: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EpisodeSpan {
-    season: Option<i32>,
-    start: i32,
-    end: i32,
+pub(crate) struct EpisodeSpan {
+    pub season: Option<i32>,
+    pub start: i32,
+    pub end: i32,
 }
 
-fn extract_episode_spans(title: &str) -> Vec<EpisodeSpan> {
+pub(crate) fn extract_episode_spans(title: &str) -> Vec<EpisodeSpan> {
     let mut spans = extract_sxe_spans(title);
     if spans.is_empty()
         && let Some(count) = extract_chinese_episode_count(title)

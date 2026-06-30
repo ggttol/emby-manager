@@ -7,7 +7,10 @@ use crate::{
 };
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Query, State},
+    http::{HeaderValue, StatusCode, header},
+    response::Response,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -18,6 +21,7 @@ use uuid::Uuid;
 const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
 const DEFAULT_SCAN_LIMIT: usize = 30_000;
 const MAX_SCAN_LIMIT: usize = 100_000;
+const MAX_PROXY_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 
 #[derive(Debug, Clone, Default, Deserialize, utoipa::ToSchema)]
 pub struct PosterDetectRequest {
@@ -89,6 +93,11 @@ pub struct PosterSearchQuery {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Clone, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+pub struct PosterImageProxyQuery {
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct PosterSearchCandidate {
     pub name: String,
@@ -158,6 +167,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v2/posters/search", get(search_query).post(search))
         .route("/api/v2/posters/apply", post(apply))
         .route("/api/v2/posters/refresh-series", post(refresh_series))
+        .route("/api/v2/posters/image-proxy", get(image_proxy))
         .route("/api/v2/posters/fix-batch", post(fix_batch))
 }
 
@@ -225,6 +235,76 @@ pub async fn search_query(
         )
         .await?,
     ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v2/posters/image-proxy",
+    tag = "posters",
+    params(PosterImageProxyQuery),
+    responses(
+        (status = 200, description = "Proxied poster image bytes", content_type = "image/jpeg"),
+        (status = 400, description = "Invalid or unsupported image URL")
+    )
+)]
+pub async fn image_proxy(
+    State(state): State<AppState>,
+    Query(query): Query<PosterImageProxyQuery>,
+) -> AppResult<Response<Body>> {
+    let url = validate_proxy_image_url(&query.url)?;
+    let response = state
+        .http
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "emby-manager/0.1 poster-proxy")
+        .send()
+        .await
+        .map_err(|err| AppError::Anyhow(err.into()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::BadRequest(format!(
+            "poster image returned HTTP {}",
+            status.as_u16()
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROXY_IMAGE_BYTES)
+    {
+        return Err(AppError::BadRequest(
+            "poster image is larger than 5MB".to_string(),
+        ));
+    }
+    let content_type = match response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+    {
+        Some(value) if value.to_ascii_lowercase().starts_with("image/") => value.to_string(),
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "poster url did not return an image".to_string(),
+            ));
+        }
+        None => "image/jpeg".to_string(),
+    };
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|err| AppError::Anyhow(err.into()))?;
+    if bytes.len() as u64 > MAX_PROXY_IMAGE_BYTES {
+        return Err(AppError::BadRequest(
+            "poster image is larger than 5MB".to_string(),
+        ));
+    }
+    let content_type = HeaderValue::from_str(&content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("image/jpeg"));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .body(Body::from(bytes))
+        .map_err(|err| AppError::Anyhow(err.into()))
 }
 
 #[utoipa::path(
@@ -364,6 +444,26 @@ fn validate_tmdb_anyhow(tmdb: &str) -> anyhow::Result<()> {
         anyhow::bail!("tmdbid must contain digits only: {tmdb:?}");
     }
     Ok(())
+}
+
+fn validate_proxy_image_url(raw: &str) -> AppResult<reqwest::Url> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(AppError::BadRequest("image url is required".to_string()));
+    }
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| AppError::BadRequest("image url is invalid".to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(AppError::BadRequest(
+            "image url must use http or https".to_string(),
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(AppError::BadRequest(
+            "image url host is required".to_string(),
+        ));
+    }
+    Ok(url)
 }
 
 pub async fn search_posters(

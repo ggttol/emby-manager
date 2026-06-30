@@ -916,6 +916,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/posters/image-proxy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["image_proxy"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/posters/refresh-series": {
         parameters: {
             query?: never;
@@ -1140,6 +1156,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/zhuigeng/archive/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["archive_execute"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/zhuigeng/gaps-summary": {
         parameters: {
             query?: never;
@@ -1156,6 +1188,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/zhuigeng/resource-plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["resource_plan"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/zhuigeng/scan-airing": {
         parameters: {
             query?: never;
@@ -1166,6 +1214,38 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["scan_airing"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/zhuigeng/update/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["update_execute"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/zhuigeng/workbench": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["workbench"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1999,6 +2079,8 @@ export interface components {
             groups: components["schemas"]["DedupExecuteBatchGroup"][];
         };
         DedupExecuteBatchResult: {
+            error_count: number;
+            ok: boolean;
             ok_count: number;
             results: components["schemas"]["DedupExecuteBatchItemResult"][];
             total: number;
@@ -2475,6 +2557,9 @@ export interface components {
             ok: boolean;
             tmdb?: string | null;
         };
+        PosterImageProxyQuery: {
+            url: string;
+        };
         PosterSearchCandidate: {
             img: string;
             name: string;
@@ -2593,6 +2678,7 @@ export interface components {
         };
         ScanLibraryRequest: {
             cleanup_orphans?: boolean | null;
+            force_refresh?: boolean | null;
             full?: boolean | null;
             fullauto?: boolean | null;
             generate_strm?: boolean | null;
@@ -2945,6 +3031,16 @@ export interface components {
         UsersResponse: {
             users: components["schemas"]["UserSummary"][];
         };
+        ZhuigengArchiveExecuteRequest: {
+            items?: components["schemas"]["ZhuigengItemRef"][];
+            on_conflict?: string | null;
+            to_lib: string;
+        };
+        ZhuigengArchiveExecuteResponse: {
+            ok: boolean;
+            tasks: components["schemas"]["TaskRun"][];
+            total: number;
+        };
         ZhuigengGapRow: {
             behind: number;
             fmt: string;
@@ -2985,6 +3081,30 @@ export interface components {
             tmdb: string;
             tmdb_status: string;
         };
+        ZhuigengItemRef: {
+            behind?: number | null;
+            folder?: string | null;
+            id?: string | null;
+            lib: string;
+            name: string;
+            resource_hint?: string | null;
+            tmdb?: string | null;
+        };
+        ZhuigengResourcePlanRequest: {
+            exact?: boolean | null;
+            item: components["schemas"]["ZhuigengItemRef"];
+            /** Format: int64 */
+            limit?: number | null;
+        };
+        ZhuigengResourcePlanResponse: {
+            fallback_queries: string[];
+            item: components["schemas"]["ZhuigengItemRef"];
+            missing_hint?: string | null;
+            ok: boolean;
+            query: string;
+            recommended?: null | components["schemas"]["CatalogItem"];
+            search: components["schemas"]["CatalogRemoteSearchResponse"];
+        };
         ZhuigengScanAiringResponse: {
             copy_text: string;
             error_count: number;
@@ -3020,6 +3140,45 @@ export interface components {
             items: components["schemas"]["ZhuigengItem"][];
             ok: boolean;
             total: number;
+        };
+        ZhuigengUpdateExecuteRequest: {
+            candidate: components["schemas"]["CatalogTransferPlanItem"];
+            /** Format: int64 */
+            delay_ms?: number | null;
+            item: components["schemas"]["ZhuigengItemRef"];
+            target?: null | components["schemas"]["AddNewTarget"];
+        };
+        ZhuigengWorkbenchCounts: {
+            archive_ready: number;
+            behind_total: number;
+            complete_after_update: number;
+            healthy_airing: number;
+            metadata_error: number;
+            target_error: number;
+            total: number;
+            unknown: number;
+            update_needed: number;
+        };
+        /** @enum {string} */
+        ZhuigengWorkbenchLane: "healthy_airing" | "update_needed" | "archive_ready" | "complete_after_update" | "metadata_error" | "target_error" | "unknown";
+        ZhuigengWorkbenchResponse: {
+            copy_text: string;
+            counts: components["schemas"]["ZhuigengWorkbenchCounts"];
+            note: string;
+            ok: boolean;
+            rows: components["schemas"]["ZhuigengWorkbenchRow"][];
+            status: components["schemas"]["ZhuigengStatusResponse"];
+        };
+        ZhuigengWorkbenchRow: {
+            action: string;
+            archiveable: boolean;
+            blockers: string[];
+            item: components["schemas"]["ZhuigengItem"];
+            lane: components["schemas"]["ZhuigengWorkbenchLane"];
+            /** Format: int32 */
+            priority: number;
+            resource_query?: string | null;
+            updateable: boolean;
         };
     };
     responses: never;
@@ -4340,6 +4499,35 @@ export interface operations {
             };
         };
     };
+    image_proxy: {
+        parameters: {
+            query: {
+                url: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Proxied poster image bytes */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/jpeg": unknown;
+                };
+            };
+            /** @description Invalid or unsupported image URL */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     refresh_series: {
         parameters: {
             query?: never;
@@ -4753,6 +4941,29 @@ export interface operations {
             };
         };
     };
+    archive_execute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZhuigengArchiveExecuteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZhuigengArchiveExecuteResponse"];
+                };
+            };
+        };
+    };
     gaps_summary: {
         parameters: {
             query?: never;
@@ -4772,6 +4983,29 @@ export interface operations {
             };
         };
     };
+    resource_plan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZhuigengResourcePlanRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZhuigengResourcePlanResponse"];
+                };
+            };
+        };
+    };
     scan_airing: {
         parameters: {
             query?: never;
@@ -4787,6 +5021,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    update_execute: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ZhuigengUpdateExecuteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    workbench: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ZhuigengWorkbenchResponse"];
                 };
             };
         };

@@ -53,6 +53,7 @@ async fn manual_scan_all_endpoint_runs_real_scan_all_worker() {
             recursive: Some(true),
             full: Some(false),
             generate_strm: Some(true),
+            force_refresh: None,
             keyword: None,
             fullauto: Some(false),
             cleanup_orphans: Some(false),
@@ -85,6 +86,73 @@ async fn manual_scan_all_endpoint_runs_real_scan_all_worker() {
         requests[1].starts_with("POST /Items/lib-movies/Refresh?"),
         "{}",
         requests[1]
+    );
+}
+
+#[tokio::test]
+async fn manual_scan_library_force_refresh_runs_even_without_new_strm() {
+    let _guard = DB_LOCK.lock().await;
+    let Some(state) = test_state().await else {
+        eprintln!(
+            "skipping manual scan library DB test; set EMBY_MANAGER_SCHEDULER_TEST_DATABASE_URL"
+        );
+        return;
+    };
+    seed_scan_all_media(&state);
+    let generated = state
+        .settings
+        .strm_root
+        .join("MovieFolder")
+        .join("Old Movie [tmdbid-100]")
+        .join("movie.strm");
+    std::fs::create_dir_all(generated.parent().unwrap()).expect("create existing strm folder");
+    std::fs::write(
+        &generated,
+        "/media/MovieFolder/Old Movie [tmdbid-100]/movie.mkv",
+    )
+    .expect("write existing strm");
+
+    let libraries = r#"[{"ItemId":"lib-movies","Name":"Movies","CollectionType":"movies","Locations":["/strm/MovieFolder"]}]"#;
+    let (base_url, requests) = spawn_fake_emby(vec![
+        FakeResponse::ok_json(libraries),
+        FakeResponse::ok_json(libraries),
+        FakeResponse::no_content(),
+    ])
+    .await;
+    configure_emby(&state, &base_url).await;
+
+    let response = media_fs::scan_library(
+        State(state.clone()),
+        Json(media_fs::ScanLibraryRequest {
+            lib: Some("Movies".to_string()),
+            item_id: None,
+            recursive: Some(true),
+            full: Some(false),
+            generate_strm: Some(true),
+            force_refresh: Some(true),
+            keyword: None,
+            fullauto: Some(false),
+            cleanup_orphans: Some(false),
+        }),
+    )
+    .await
+    .expect("manual scan library should create a task")
+    .0;
+
+    assert_eq!(response.kind, "scan_library");
+    assert_eq!(response.params["force_refresh"], json!(true));
+
+    let task = wait_for_task_status(&state, response.id, "done").await;
+    assert_eq!(task["result"]["strm"]["new_count"], json!(0));
+    assert_eq!(task["result"]["triggered"], json!(1));
+    assert_eq!(task["result"]["strm"]["refreshed"], json!(true));
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[2].starts_with("POST /Items/lib-movies/Refresh?"),
+        "{}",
+        requests[2]
     );
 }
 

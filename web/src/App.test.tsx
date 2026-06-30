@@ -11,7 +11,6 @@ const tabLabels = [
   '追更检查',
   '缺集检查',
   '海报修复',
-  '字幕',
   '去重',
   '删除·移动',
   '智能清理',
@@ -371,6 +370,67 @@ const zhuigengStatus = {
   ]
 };
 
+const zhuigengCandidate = {
+  name: '示例剧 S01E03',
+  sheet: 'TG Resource API',
+  link: 'https://115.com/s/swabc',
+  is_pkg: false,
+  link_type: 'share115',
+  transfer: true,
+  share: 'https://115.com/s/swabc',
+  rc: 'abcd',
+  recommendation: {
+    score: 230,
+    level: 'best',
+    action: '推荐转存',
+    reasons: ['115 可直接转存', '资源到 E3，适合补缺'],
+    episode_ranges: ['S01E03'],
+    covers_missing: true,
+    duplicate_risk: false,
+    already_have: false
+  }
+};
+
+const zhuigengWorkbench = {
+  ok: true,
+  status: zhuigengStatus,
+  copy_text: zhuigengStatus.copy_text,
+  note: '已按追更运营流分组: 需更新 1，补齐后归档 0，可归档 1，异常 0',
+  counts: {
+    total: 2,
+    healthy_airing: 0,
+    update_needed: 1,
+    archive_ready: 1,
+    complete_after_update: 0,
+    metadata_error: 0,
+    target_error: 0,
+    unknown: 0,
+    behind_total: 1
+  },
+  rows: [
+    {
+      item: zhuigengStatus.items[0],
+      lane: 'update_needed',
+      priority: 721,
+      action: '找资源并一条龙更新',
+      resource_query: '示例剧 S01 E3',
+      archiveable: false,
+      updateable: true,
+      blockers: []
+    },
+    {
+      item: zhuigengStatus.items[1],
+      lane: 'archive_ready',
+      priority: 640,
+      action: '一键归档到完结库',
+      resource_query: null,
+      archiveable: true,
+      updateable: false,
+      blockers: []
+    }
+  ]
+};
+
 const zhuigengScanAiring = {
   ok: true,
   total: 1,
@@ -508,6 +568,39 @@ describe('App shell', () => {
               updated_at: '2026-06-28T00:01:02Z'
             },
             {
+              id: '55555555-5555-4555-8555-555555555555',
+              kind: 'zhuigeng_update',
+              label: '追更一条龙更新',
+              status: 'done',
+              progress: 1,
+              total: 1,
+              source: 'zhuigeng',
+              params: {},
+              status_text: '完成，发现 2 个可疑项',
+              result: {
+                ok: false,
+                transfer: { ok: true, total: 1, succeeded: 1, failed: 0 },
+                strm: { ok: true, new_count: 12 },
+                scan: { ok: true },
+                poster: { ok: true },
+                auto_resolve: { ok: true, error_count: 0 },
+                poster_auto_fix: { ok: true, error_count: 0 },
+                check: {
+                  ok: false,
+                  status: 'suspicious',
+                  item_error_count: 0,
+                  stage_error_count: 0,
+                  suspicious_count: 2
+                }
+              },
+              error: null,
+              cancel_requested: false,
+              queued_at: '2026-06-28T00:01:30Z',
+              started_at: '2026-06-28T00:01:31Z',
+              ended_at: '2026-06-28T00:01:32Z',
+              updated_at: '2026-06-28T00:01:32Z'
+            },
+            {
               id: '33333333-3333-4333-8333-333333333333',
               kind: 'cleanup',
               label: '清理预检',
@@ -523,6 +616,24 @@ describe('App shell', () => {
               started_at: '2026-06-28T00:02:01Z',
               ended_at: '2026-06-28T00:02:02Z',
               updated_at: '2026-06-28T00:02:02Z'
+            },
+            {
+              id: '44444444-4444-4444-8444-444444444444',
+              kind: 'zhuigeng_archive',
+              label: '追更完结归档',
+              status: 'done',
+              progress: 2,
+              total: 2,
+              source: 'zhuigeng',
+              params: {},
+              status_text: '完成',
+              result: { ok: false, total: 2, error_count: 2, results: [{ err: 'Permission denied' }] },
+              error: null,
+              cancel_requested: false,
+              queued_at: '2026-06-28T00:03:00Z',
+              started_at: '2026-06-28T00:03:01Z',
+              ended_at: '2026-06-28T00:03:02Z',
+              updated_at: '2026-06-28T00:03:02Z'
             }
           ]
         });
@@ -544,11 +655,17 @@ describe('App shell', () => {
     expect(screen.getAllByText('运行中').length).toBeGreaterThan(0);
     expect(screen.getByText('manual')).toBeInTheDocument();
     const drawer = getTaskCenterDrawer();
+    expect(within(drawer).getByRole('button', { name: /完成\s*2/ })).toBeInTheDocument();
+    expect(within(drawer).getByRole('button', { name: /异常\s*2/ })).toBeInTheDocument();
     fireEvent.change(within(drawer).getByLabelText('任务搜索'), { target: { value: 'Catalog' } });
     expect(within(drawer).getByText('Catalog 导入')).toBeInTheDocument();
+    expect(within(drawer).getByText('导入 3 项')).toBeInTheDocument();
+    expect(within(drawer).queryByText('{"imported":3}')).not.toBeInTheDocument();
     expect(within(drawer).queryByText('扫描电影库')).not.toBeInTheDocument();
     fireEvent.click(within(drawer).getByRole('button', { name: '清空任务搜索' }));
     expect(await within(drawer).findByText('扫描电影库')).toBeInTheDocument();
+    expect(within(drawer).getByText('转存 1/1 · 新增 STRM 12 · 可疑项 2')).toBeInTheDocument();
+    expect(within(drawer).queryByText(/"transfer":/)).not.toBeInTheDocument();
 
     fireEvent.click(within(drawer).getByRole('button', { name: '展开可见' }));
     expect(screen.getByText('22222222-2222-4222-8222-222222222222')).toBeInTheDocument();
@@ -566,6 +683,9 @@ describe('App shell', () => {
     fireEvent.click(screen.getByRole('button', { name: /异常/ }));
     expect(screen.getByText('清理预检')).toBeInTheDocument();
     expect(screen.getByText('路径未配置')).toBeInTheDocument();
+    expect(screen.getByText('追更完结归档')).toBeInTheDocument();
+    expect(screen.getAllByText('结果失败：2/2 项失败').length).toBeGreaterThan(0);
+    expect(within(drawer).queryByText('追更一条龙更新')).not.toBeInTheDocument();
   });
 
   it('renders the dashboard read-only overview with csrf protected insight calls', async () => {
@@ -619,10 +739,14 @@ describe('App shell', () => {
     expect(await screen.findByText('Rust Preview 总览')).toBeInTheDocument();
     expect(await screen.findByText('需要处理 unmatched')).toBeInTheDocument();
     expect(await screen.findByText('失败扫库')).toBeInTheDocument();
-    expect(await screen.findByText('120 / 9')).toBeInTheDocument();
-    expect(await screen.findByText('旧版待办计数')).toBeInTheDocument();
-    expect(screen.getAllByText('无海报 1').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('无评分 2').length).toBeGreaterThan(0);
+    expect(await screen.findByText('strm')).toBeInTheDocument();
+    expect(screen.getAllByText('120').length).toBeGreaterThan(0);
+    expect(screen.queryByText('字幕')).not.toBeInTheDocument();
+    expect(screen.getByText('无海报')).toBeInTheDocument();
+    expect(screen.getByText('无评分')).toBeInTheDocument();
+    expect(screen.queryByText('旧版待办计数')).not.toBeInTheDocument();
+    expect(screen.queryByText('无海报 1')).not.toBeInTheDocument();
+    expect(screen.queryByText('无评分 2')).not.toBeInTheDocument();
     await waitFor(() => {
       expect(cleanupCalled).toBe(true);
       expect(gapsCalled).toBe(true);
@@ -654,70 +778,6 @@ describe('App shell', () => {
     expect(screen.getByText('strm 根目录')).toBeInTheDocument();
     expect(screen.getByText('/volume1/strm')).toBeInTheDocument();
     expect(screen.getAllByText('旧版数据目录不存在').length).toBeGreaterThan(0);
-  });
-
-  it('renders subtitle overview and reloads by library', async () => {
-    const requestedLibs: Array<string | null> = [];
-    mockApi((url) => {
-      if (url.pathname === '/api/v2/system/summary') {
-        return jsonResponse(systemSummary);
-      }
-      if (url.pathname === '/api/v2/cleanup/suggest') {
-        return jsonResponse(cleanupSummary);
-      }
-      if (url.pathname === '/api/v2/gaps/scan') {
-        return jsonResponse(gapsSummary);
-      }
-      if (url.pathname === '/api/v2/autostrm/status') {
-        return jsonResponse(autostrmStatus);
-      }
-      if (url.pathname === '/api/v2/libraries/strm') {
-        requestedLibs.push(url.searchParams.get('lib'));
-        expect(url.searchParams.get('overview')).toBe('true');
-        return jsonResponse({
-          base: '/volume1/strm',
-          items: [],
-          truncated: false,
-          overview: {
-            base: '/volume1/strm',
-            max_depth: 8,
-            entry_limit: 100000,
-            directories: 12,
-            files: 144,
-            strm_files: 120,
-            subtitle_files: 9,
-            other_files: 15,
-            strm_bytes: 2048,
-            subtitle_bytes: 1024,
-            strm_with_subtitles: 90,
-            strm_without_subtitles: 30,
-            subtitle_coverage_percent: 75,
-            subtitle_extensions: [{ extension: 'srt', count: 7 }, { extension: 'ass', count: 2 }],
-            subtitle_languages: [{ language: 'zh', count: 6 }, { language: 'en', count: 3 }],
-            library_coverage: [{ library: '电影', strm_files: 120, with_subtitles: 90, missing_subtitles: 30, coverage_percent: 75 }],
-            missing_subtitle_samples: ['电影/B.strm'],
-            samples: [{ rel_path: '电影/A.srt', kind: 'subtitle', extension: 'srt', size: 512 }],
-            truncated: false,
-            warnings: []
-          }
-        });
-      }
-      return undefined;
-    });
-
-    render(<App />);
-
-    fireEvent.click(await screen.findByRole('button', { name: '字幕' }));
-    expect(await screen.findByText('外挂字幕概览')).toBeInTheDocument();
-    expect(screen.getByText('.srt')).toBeInTheDocument();
-    expect(screen.getAllByText('75.0%').length).toBeGreaterThan(0);
-    expect(screen.getByText('zh')).toBeInTheDocument();
-    expect(screen.getByText('电影/B.strm')).toBeInTheDocument();
-    expect(screen.getByText('电影/A.srt')).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText('字幕库名'), { target: { value: '电影' } });
-    fireEvent.click(screen.getByRole('button', { name: '查看概览' }));
-    await waitFor(() => expect(requestedLibs).toContain('电影'));
   });
 
   it('loads scan workspace and creates library/item refresh tasks with csrf', async () => {
@@ -836,13 +896,13 @@ describe('App shell', () => {
     expect((await screen.findAllByText('Movie/Movie.strm')).length).toBeGreaterThan(0);
     await waitFor(() => expect(strmLibs).toContain('电影'));
 
-    fireEvent.click(screen.getByRole('button', { name: '刷新选中库' }));
+    fireEvent.click(screen.getByRole('button', { name: '仅 Emby 刷新' }));
     await waitFor(() => expect(scanPayloads[0]).toEqual({ lib: '电影', recursive: true, full: false }));
 
     fireEvent.change(screen.getByLabelText('扫描目录关键词'), { target: { value: 'Movie' } });
     fireEvent.click(screen.getByLabelText('首次无 tmdbid 也生成'));
     fireEvent.click(screen.getByLabelText('清理孤儿 STRM（危险）'));
-    fireEvent.click(screen.getByRole('button', { name: '生成缺失 STRM' }));
+    fireEvent.click(screen.getByRole('button', { name: '扫描入库' }));
     expect(await screen.findByText('确认清理孤儿 STRM')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '确认生成并清理' }));
     await waitFor(() => expect(scanPayloads[1]).toEqual({
@@ -850,6 +910,7 @@ describe('App shell', () => {
       recursive: true,
       full: false,
       generate_strm: true,
+      force_refresh: true,
       keyword: 'Movie',
       fullauto: true,
       cleanup_orphans: true
@@ -1088,6 +1149,10 @@ describe('App shell', () => {
       limit: 8
     }));
     expect(await screen.findByText('正确电影 2024')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: '正确电影 海报' })).toHaveAttribute(
+      'src',
+      '/api/v2/posters/image-proxy?url=https%3A%2F%2Fimg.example%2Fposter.jpg'
+    );
 
     fireEvent.click(screen.getByText('正确电影 2024'));
     await waitFor(() => expect(applyPayload).toEqual({
@@ -1109,13 +1174,70 @@ describe('App shell', () => {
     let scanPayload: unknown = null;
     let seriesDetailQuery = '';
     let archivePayload: unknown = null;
+    let resourcePlanPayload: unknown = null;
+    let updatePayload: unknown = null;
     const scanAiringTask = taskRun('task-zhuigeng-airing', 'zhuigeng_scan_airing', '追更扫描在更剧');
     const gapsSummaryTask = taskRun('task-zhuigeng-gaps', 'zhuigeng_gaps_summary', '追更缺集汇总');
+    const updateTask = taskRun('task-zhuigeng-update', 'zhuigeng_update', '追更一条龙更新: 示例剧');
     mockApi((url, init) => {
-      if (url.pathname === '/api/v2/zhuigeng') {
+      if (url.pathname === '/api/v2/zhuigeng/workbench') {
         expect(init?.method || 'GET').toBe('GET');
         calls.push(url.pathname);
-        return jsonResponse(zhuigengStatus);
+        return jsonResponse(zhuigengWorkbench);
+      }
+      if (url.pathname === '/api/v2/zhuigeng/resource-plan') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        resourcePlanPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: true,
+          item: zhuigengWorkbench.rows[0].item,
+          query: '示例剧 S01 E3',
+          missing_hint: 'S01 E3',
+          fallback_queries: [],
+          recommended: zhuigengCandidate,
+          search: {
+            items: [zhuigengCandidate],
+            total: 1,
+            limit: 16,
+            offset: 0,
+            has_more: false,
+            query: '示例剧 S01 E3',
+            exact: false,
+            sort: 'resource',
+            truncated: false,
+            disk_types: [{ disk_type: '115', count: 1 }],
+            context: {
+              ok: true,
+              query: '示例剧',
+              total_matches: 1,
+              truncated: false,
+              warnings: [],
+              summary: {
+                matched: true,
+                duplicate: false,
+                duplicate_groups: 0,
+                libraries: ['剧集'],
+                tmdb_ids: ['100'],
+                years: [],
+                episode_ranges: ['S01E01-2'],
+                missing_ranges: ['S01E3'],
+                max_episode: 2,
+                total_episodes: 2,
+                note: '库内已有条目但存在缺集，可优先选补缺或全集资源'
+              },
+              items: []
+            }
+          }
+        });
+      }
+      if (url.pathname === '/api/v2/zhuigeng/update/execute') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        updatePayload = JSON.parse(String(init?.body));
+        return jsonResponse(updateTask);
       }
       if (url.pathname === '/api/v2/zhuigeng/scan-airing') {
         const headers = init?.headers as Headers;
@@ -1149,28 +1271,32 @@ describe('App shell', () => {
           ]
         });
       }
-      if (url.pathname === '/api/v2/manage/move/batch/execute') {
+      if (url.pathname === '/api/v2/zhuigeng/archive/execute') {
         const headers = init?.headers as Headers;
         expect(init?.method).toBe('POST');
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
         archivePayload = JSON.parse(String(init?.body));
         return jsonResponse({
-          id: '77777777-7777-4777-8777-777777777777',
-          kind: 'manage_move_batch_execute',
-          label: '批量移动: 剧集 -> 完结剧库 (1 项)',
-          source: 'manual',
-          params: {},
-          status: 'pending',
-          progress: 0,
+          ok: true,
           total: 1,
-          status_text: '排队中',
-          result: null,
-          error: null,
-          cancel_requested: false,
-          queued_at: '2026-06-28T00:03:00Z',
-          started_at: null,
-          ended_at: null,
-          updated_at: '2026-06-28T00:03:00Z'
+          tasks: [{
+            id: '77777777-7777-4777-8777-777777777777',
+            kind: 'zhuigeng_archive',
+            label: '追更完结归档: 批量移动: 剧集 -> 完结剧库 (1 项)',
+            source: 'zhuigeng',
+            params: {},
+            status: 'pending',
+            progress: 0,
+            total: 1,
+            status_text: '排队中',
+            result: null,
+            error: null,
+            cancel_requested: false,
+            queued_at: '2026-06-28T00:03:00Z',
+            started_at: null,
+            ended_at: null,
+            updated_at: '2026-06-28T00:03:00Z'
+          }]
         });
       }
       if (url.pathname === '/api/v2/gaps/scan-lib') {
@@ -1248,24 +1374,39 @@ describe('App shell', () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole('button', { name: '追更检查' }));
-    expect(await screen.findByText('追更 copy_text')).toBeInTheDocument();
+    expect(await screen.findByText('追更工作台')).toBeInTheDocument();
+    expect(await screen.findByText('求资源文本')).toBeInTheDocument();
     expect(screen.queryByText(/当前 Rust 版没有独立追更扫描接口/)).not.toBeInTheDocument();
     expect(screen.getByText('示例剧')).toBeInTheDocument();
     expect(screen.getByText('完结剧')).toBeInTheDocument();
     expect(screen.getByText('求 示例剧 [tmdb:100] — S01 E3')).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole('button', { name: '找资源' }).at(-1)!);
+    await waitFor(() => expect(resourcePlanPayload).toMatchObject({
+      item: { name: '示例剧', lib: '剧集', resource_hint: 'S01 E3' },
+      limit: 16
+    }));
+    expect(await screen.findByText('示例剧 S01E03')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '更新推荐 1' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: '更新推荐 1' }));
+    expect(await screen.findByText('确认批量一条龙更新')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认更新' }));
+    await waitFor(() => expect(updatePayload).toMatchObject({
+      item: { name: '示例剧', lib: '剧集' },
+      candidate: { name: '示例剧 S01E03', link_type: 'share115', share: 'https://115.com/s/swabc' },
+      target: { lib: '剧集' },
+      delay_ms: 500
+    }));
     expect(await screen.findByRole('combobox', { name: '归档目标库' })).toHaveValue('完结剧库');
     fireEvent.click(screen.getByLabelText('选择归档：完结剧'));
-    fireEvent.click(screen.getByRole('button', { name: /智能归档 1/ }));
+    fireEvent.click(screen.getByRole('button', { name: /归档 1/ }));
     expect(await screen.findByText('确认智能归档完结剧')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: '确认归档' }));
     await waitFor(() => expect(archivePayload).toEqual({
-      from_lib: '剧集',
       to_lib: '完结剧库',
-      items: [{ folder: '完结剧 [tmdb-200]', item_id: 'series-200', to_folder: null }],
-      on_conflict: 'smart',
-      reason: '追更完结剧智能归档'
+      items: [{ lib: '剧集', name: '完结剧', id: 'series-200', folder: '完结剧 [tmdb-200]', tmdb: '200', behind: 0, resource_hint: null }],
+      on_conflict: 'smart'
     }));
-    expect(await screen.findByText(/归档任务：批量移动: 剧集 -> 完结剧库/)).toBeInTheDocument();
+    expect(await screen.findByText(/归档任务：追更完结归档: 批量移动: 剧集 -> 完结剧库/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'scan-airing' }));
     await waitFor(() => expect(scanAiringCalled).toBe(true));
     dispatchTaskDone(scanAiringTask, zhuigengScanAiring);
@@ -1766,6 +1907,69 @@ describe('App shell', () => {
       '/api/v2/dedup/auto-all',
       '/api/v2/dedup/replace'
     ])));
+  });
+
+  it('smart-selects Emby ProviderIds review duplicate rows with item ids', async () => {
+    let dedupExecuteBatchPayload: unknown = null;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/dedup/duplicates') {
+        return jsonResponse({
+          dups: [],
+          review: [{
+            tmdb: '661029',
+            why: 'Emby ProviderIds.Tmdb 相同，媒体库内仍有重复 Item；可勾选旧目录/副本删除',
+            rows: [
+              { lib: '合集', folder: '精灵宝可梦（系列）', score: 0, n: 0, item_id: '53139' },
+              { lib: '合集', folder: '精灵宝可梦：XY', score: 0, n: 0, item_id: '53148' }
+            ]
+          }]
+        });
+      }
+      if (url.pathname === '/api/v2/dedup/execute-batch') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        dedupExecuteBatchPayload = JSON.parse(String(init?.body));
+        return jsonResponse({
+          id: 'ded66102-6610-4661-8661-000000000029',
+          kind: 'dedup_exec_batch',
+          label: '批量去重: 1 组',
+          status: 'pending',
+          progress: 0,
+          total: 1,
+          source: 'api',
+          params: dedupExecuteBatchPayload,
+          status_text: '排队中',
+          result: null,
+          error: null,
+          cancel_requested: false,
+          queued_at: '2026-06-30T00:00:00Z',
+          started_at: null,
+          ended_at: null,
+          updated_at: '2026-06-30T00:00:00Z'
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '去重' }));
+    const group = (await screen.findByText(/媒体库内仍有重复 Item/)).closest('article');
+    expect(group).not.toBeNull();
+    expect(within(group as HTMLElement).getByText('精灵宝可梦：XY')).toBeInTheDocument();
+    fireEvent.click(within(group as HTMLElement).getByRole('button', { name: /智能选本组/ }));
+    expect(screen.getByRole('button', { name: /删除 1/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /删除 1/ }));
+    expect(await screen.findByText('确认人工去重删除')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认删除选中重复目录' }));
+
+    await waitFor(() => expect(dedupExecuteBatchPayload).toEqual({
+      groups: [{
+        tmdb: '661029',
+        remove: [{ lib: '合集', folder: '精灵宝可梦：XY', item_id: '53148' }]
+      }]
+    }));
   });
 
   it('creates delete and move tasks from the manage panel with csrf', async () => {

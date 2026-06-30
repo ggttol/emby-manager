@@ -527,6 +527,51 @@ async fn move_batch_smart_deletes_source_when_target_has_more_strm() {
     assert_eq!(undo_payload["dst_n"], json!(2));
 }
 
+#[tokio::test]
+async fn move_batch_marks_task_error_when_items_fail() {
+    let _guard = DB_LOCK.lock().await;
+    let Some((_tmp, state)) = test_state().await else {
+        eprintln!("skipping manage execute DB test; set EMBY_MANAGER_MANAGE_TEST_DATABASE_URL");
+        return;
+    };
+    let libraries = r#"[
+        {"ItemId":"movie-lib","Name":"Movies","CollectionType":"movies","Locations":["/strm/Movies"]},
+        {"ItemId":"archive-lib","Name":"Archive","CollectionType":"movies","Locations":["/strm/Archive"]}
+    ]"#;
+    let (base_url, _requests) = spawn_fake_emby(vec![FakeResponse::json(libraries)]).await;
+    configure_emby(&state, &base_url).await;
+    create_library_roots(&state, "Movies");
+    create_library_roots(&state, "Archive");
+
+    let task = media_fs::execute_move_batch(
+        State(state.clone()),
+        Json(ManageMoveBatchRequest {
+            from_lib: "Movies".to_string(),
+            to_lib: "Archive".to_string(),
+            items: vec![ManageMoveBatchItem {
+                folder: "Missing".to_string(),
+                item_id: None,
+                to_folder: None,
+            }],
+            on_conflict: Some("smart".to_string()),
+            reason: Some(format!("move-batch-fail-{}", Uuid::new_v4())),
+        }),
+    )
+    .await
+    .expect("move batch should create task")
+    .0;
+
+    let task = wait_for_task_status(&state, task.id, "error").await;
+    assert_eq!(task["result"]["ok"], false);
+    assert_eq!(task["result"]["ok_count"], json!(0));
+    assert_eq!(task["result"]["error_count"], json!(1));
+    assert!(
+        task["error"]
+            .as_str()
+            .is_some_and(|err| err.contains("批量移动失败: 0/1 成功，1 项失败"))
+    );
+}
+
 async fn configure_emby(state: &AppState, base_url: &str) {
     for (key, value) in [
         ("emby_url", json!(base_url)),
@@ -560,7 +605,7 @@ async fn wait_for_task_status(state: &AppState, id: Uuid, status: &str) -> Value
         if task["status"] == status {
             return task;
         }
-        if task["status"] == "error" {
+        if status != "error" && task["status"] == "error" {
             panic!("task {id} failed: {}", task["error"]);
         }
         sleep(Duration::from_millis(25)).await;

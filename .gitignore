@@ -24,3 +24,10 @@ target/
 web/node_modules/
 web/dist/
 server/.sqlx/
+
+# local deploy artifacts and one-off maintenance scripts
+.deploy/
+scripts/batch_fix_mismatch.py
+scripts/bulk_tmdb_match.py
+scripts/check_wrong_poster.py
+scripts/delete_tv_episodes.py

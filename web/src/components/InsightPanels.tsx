@@ -1,13 +1,16 @@
 import {
   AlertTriangle,
+  Archive,
   CheckCircle2,
   Copy,
   FileText,
   ListChecks,
   Play,
   RefreshCw,
+  Search,
   SearchX,
   Trash2,
+  Wand2,
   Webhook
 } from 'lucide-react';
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
@@ -20,6 +23,8 @@ import { useToast } from './Toast';
 type CatalogInsight = components['schemas']['CatalogInsight'];
 type CatalogDuplicateGroup = components['schemas']['CatalogDuplicateGroup'];
 type CatalogDuplicatesResponse = components['schemas']['CatalogDuplicatesResponse'];
+type CatalogItem = components['schemas']['CatalogItem'];
+type CatalogTransferPlanItem = components['schemas']['CatalogTransferPlanItem'];
 type CleanupCandidate = components['schemas']['CleanupCandidate'];
 type CleanupSuggestRequest = components['schemas']['CleanupSuggestRequest'];
 type CleanupSummaryResponse = components['schemas']['CleanupSummaryResponse'];
@@ -39,7 +44,6 @@ type InsightTodo = components['schemas']['InsightTodo'];
 type LibrariesResponse = components['schemas']['LibrariesResponse'];
 type ManageDeleteBatchRequest = components['schemas']['ManageDeleteBatchRequest'];
 type ManageDeleteRequest = components['schemas']['ManageDeleteRequest'];
-type ManageMoveBatchRequest = components['schemas']['ManageMoveBatchRequest'];
 type ReplaceExecuteResponse = components['schemas']['ReplaceExecuteResponse'];
 type SeriesGapsResponse = components['schemas']['SeriesGapsResponse'];
 type StrmReadOnlyOverview = components['schemas']['StrmReadOnlyOverview'];
@@ -48,9 +52,15 @@ type TaskHistorySummary = components['schemas']['TaskHistorySummary'];
 type ZhuigengGapRow = components['schemas']['ZhuigengGapRow'];
 type ZhuigengGapsSummaryResponse = components['schemas']['ZhuigengGapsSummaryResponse'];
 type ZhuigengItem = components['schemas']['ZhuigengItem'];
+type ZhuigengItemRef = components['schemas']['ZhuigengItemRef'];
+type ZhuigengResourcePlanResponse = components['schemas']['ZhuigengResourcePlanResponse'];
 type ZhuigengScanAiringResponse = components['schemas']['ZhuigengScanAiringResponse'];
 type ZhuigengScanAiringRow = components['schemas']['ZhuigengScanAiringRow'];
 type ZhuigengStatusResponse = components['schemas']['ZhuigengStatusResponse'];
+type ZhuigengWorkbenchLane = components['schemas']['ZhuigengWorkbenchLane'];
+type ZhuigengWorkbenchResponse = components['schemas']['ZhuigengWorkbenchResponse'];
+type ZhuigengWorkbenchRow = components['schemas']['ZhuigengWorkbenchRow'];
+type ZhuigengArchiveExecuteResponse = components['schemas']['ZhuigengArchiveExecuteResponse'];
 
 type EmptyDirCleanupResponse = {
   ok: boolean;
@@ -187,6 +197,61 @@ function zhuigengArchiveKey(item: ZhuigengItem) {
   return `${item.lib}\u0000${item.folder || item.name}\u0000${item.id || item.tmdb || ''}`;
 }
 
+function zhuigengRowKey(row: ZhuigengWorkbenchRow) {
+  return zhuigengArchiveKey(row.item);
+}
+
+function itemRefFromZhuigeng(item: ZhuigengItem): ZhuigengItemRef {
+  return {
+    lib: item.lib,
+    name: item.name,
+    id: item.id || null,
+    folder: item.folder || null,
+    tmdb: item.tmdb || null,
+    behind: item.behind,
+    resource_hint: item.resource_hint || null
+  };
+}
+
+function catalogItemToPlanItem(item: CatalogItem): CatalogTransferPlanItem {
+  return {
+    name: item.name,
+    sheet: item.sheet,
+    link: item.link,
+    link_type: item.link_type,
+    is_pkg: item.is_pkg,
+    share: item.share || null,
+    rc: item.rc || null
+  };
+}
+
+function zhuigengLaneLabel(lane: ZhuigengWorkbenchLane) {
+  if (lane === 'update_needed') return '需更新';
+  if (lane === 'archive_ready') return '可归档';
+  if (lane === 'complete_after_update') return '补齐后归档';
+  if (lane === 'metadata_error') return '元数据异常';
+  if (lane === 'target_error') return '路径/目标异常';
+  if (lane === 'healthy_airing') return '正常在更';
+  return '待确认';
+}
+
+function zhuigengLaneTone(lane: ZhuigengWorkbenchLane): Tone {
+  if (lane === 'metadata_error' || lane === 'target_error') return 'error';
+  if (lane === 'update_needed' || lane === 'complete_after_update') return 'warn';
+  if (lane === 'healthy_airing') return 'ok';
+  return 'neutral';
+}
+
+function recommendationLabel(item: CatalogItem) {
+  const rec = item.recommendation;
+  if (!rec) return item.transfer ? '可转存' : '不可一条龙';
+  return `${rec.action} · ${rec.score}`;
+}
+
+function isTransferableCatalogItem(item: CatalogItem) {
+  return item.transfer && item.link_type === 'share115';
+}
+
 function dedupRowKey(tmdb: string | null | undefined, row: DedupRow) {
   return `${tmdb || 'unknown'}\u0000${row.lib}\u0000${row.folder}\u0000${row.item_id || ''}`;
 }
@@ -207,12 +272,17 @@ function hasDeclaredTmdb(folder: string) {
   return /tmdb/i.test(folder);
 }
 
+function isCollectionLikeFolder(folder: string) {
+  return /(合集|系列|全集|collection|complete)/i.test(folder);
+}
+
 function dedupSmartScore(row: DedupRow) {
   const duplicateSuffixPenalty = dedupDuplicateSuffixBase(row.folder) ? -300 : 0;
   return (
     dedupLibraryWeight(row.lib) * 1000 +
     (row.n || 0) * 20 +
     (row.score || 0) * 2 +
+    (isCollectionLikeFolder(row.folder) ? 40 : 0) +
     (hasDeclaredTmdb(row.folder) ? 12 : 0) +
     duplicateSuffixPenalty
   );
@@ -231,8 +301,13 @@ function smartKeepRow(rows: DedupRow[]) {
   return [...rows].sort(compareDedupSmartKeep)[0] || null;
 }
 
-function isSmartReviewRemoval(row: DedupRow, keep: DedupRow) {
+function isEmbyProviderReviewGroup(group: DedupReviewGroup) {
+  return group.why.includes('ProviderIds.Tmdb') || group.why.includes('媒体库内仍有重复 Item');
+}
+
+function isSmartReviewRemoval(row: DedupRow, keep: DedupRow, group: DedupReviewGroup) {
   if (row === keep) return false;
+  if (isEmbyProviderReviewGroup(group)) return true;
   if (dedupDuplicateSuffixBase(row.folder)) return true;
   if (dedupLibraryWeight(row.lib) < dedupLibraryWeight(keep.lib)) return true;
   if ((row.n || 0) < (keep.n || 0)) return true;
@@ -243,7 +318,7 @@ function isSmartReviewRemoval(row: DedupRow, keep: DedupRow) {
 function smartReviewRemoveRows(group: DedupReviewGroup) {
   const keep = smartKeepRow(group.rows);
   if (!keep) return [];
-  return group.rows.filter((row) => isSmartReviewRemoval(row, keep));
+  return group.rows.filter((row) => isSmartReviewRemoval(row, keep, group));
 }
 
 function dedupRowSummary(row: DedupRow) {
@@ -478,7 +553,6 @@ function StrmBlock({
       <div className="miniStats">
         <span>文件 <strong>{count(strm?.files)}</strong></span>
         <span>.strm <strong>{count(strm?.strm_files)}</strong></span>
-        <span>字幕 <strong>{count(strm?.subtitle_files)}</strong></span>
         <span>空目录 <strong>{count(strm?.empty_directories)}</strong></span>
         {emptyCleanup && <span>可清理 <strong>{count(emptyCleanup.candidate_count)}</strong></span>}
       </div>
@@ -783,7 +857,7 @@ function CleanupLayout({
       <div className="statGrid">
         <StatCard icon={<CheckCircle2 />} label="业务状态" value={data?.complete_business_port ? '完整' : '只读'} tone={data?.complete_business_port ? 'ok' : 'warn'} hint="Rust preview" />
         <StatCard icon={<ListChecks />} label={variant === 'dedup' ? '重复信号' : '清理候选'} value={count(variant === 'dedup' ? duplicateTotal : candidates.length)} tone={(variant === 'dedup' ? duplicateTotal : candidates.length) ? 'warn' : 'ok'} hint={variant === 'dedup' ? '不执行写操作' : `${count(selectedCount)} 已选`} />
-        <StatCard icon={<FileText />} label="strm / 字幕" value={`${count(data?.strm?.strm_files)} / ${count(data?.strm?.subtitle_files)}`} hint={data?.strm?.root || '等待数据'} />
+        <StatCard icon={<FileText />} label="strm" value={count(data?.strm?.strm_files)} hint={data?.strm?.root || '等待数据'} />
         <StatCard icon={<AlertTriangle />} label="异常任务" value={count(taskProblemCount(data?.task_history))} tone={taskProblemCount(data?.task_history) ? 'warn' : 'ok'} hint={`运行中 ${count(data?.task_history?.running)}`} />
       </div>
       <WarningList warnings={data?.warnings || []} />
@@ -1817,6 +1891,25 @@ export function DedupPanel() {
             </button>
           </div>
         </div>
+        <div className="readonlySplit dedupReviewSplit">
+          <DedupAutoGroups
+            groups={autoGroups}
+            selectedKeys={selectedDedupKeys}
+            onToggle={toggleDedupRow}
+            onSelectGroup={(tmdb, rows) => setDedupRowsSelected(tmdb, rows, true)}
+            onClearGroup={(tmdb, rows) => setDedupRowsSelected(tmdb, rows, false)}
+          />
+          <DedupReviewGroups
+            groups={reviewGroups}
+            selectedKeys={selectedDedupKeys}
+            onToggle={toggleDedupRow}
+            onSmartGroup={smartSelectReviewGroup}
+            onClearGroup={(tmdb, rows) => setDedupRowsSelected(tmdb, rows, false)}
+          />
+        </div>
+        <DedupExecuteBatchTaskBlock task={executeBatchTask} />
+        <DedupAutoAllResultBlock result={autoAllResult} />
+        <ReplaceResultBlock result={replaceResult} />
         <section className="readonlyBlock">
           <div className="sectionTitleRow">
             <h2>执行入口</h2>
@@ -1848,25 +1941,6 @@ export function DedupPanel() {
             <button className="btn danger" type="submit" disabled={acting || !replaceReady}>replace</button>
           </form>
         </section>
-        <DedupExecuteBatchTaskBlock task={executeBatchTask} />
-        <DedupAutoAllResultBlock result={autoAllResult} />
-        <ReplaceResultBlock result={replaceResult} />
-        <div className="readonlySplit">
-          <DedupAutoGroups
-            groups={autoGroups}
-            selectedKeys={selectedDedupKeys}
-            onToggle={toggleDedupRow}
-            onSelectGroup={(tmdb, rows) => setDedupRowsSelected(tmdb, rows, true)}
-            onClearGroup={(tmdb, rows) => setDedupRowsSelected(tmdb, rows, false)}
-          />
-          <DedupReviewGroups
-            groups={reviewGroups}
-            selectedKeys={selectedDedupKeys}
-            onToggle={toggleDedupRow}
-            onSmartGroup={smartSelectReviewGroup}
-            onClearGroup={(tmdb, rows) => setDedupRowsSelected(tmdb, rows, false)}
-          />
-        </div>
       </section>
     </>
   );
@@ -1911,6 +1985,160 @@ function CopyTextBlock({
         </button>
       </div>
       <div className="notice whitespaceNotice">{text.trim() || empty}</div>
+    </section>
+  );
+}
+
+function ZhuigengResourceCandidates({
+  plan,
+  onExecute,
+  busy
+}: {
+  plan?: ZhuigengResourcePlanResponse;
+  onExecute: (candidate: CatalogItem) => void;
+  busy: boolean;
+}) {
+  if (!plan) return null;
+  const items = plan.search.items || [];
+  const context = plan.search.context;
+  return (
+    <div className="zhuigengCandidates">
+      <div className="zhuigengContextLine">
+        <strong>找资源：{plan.query}</strong>
+        {plan.missing_hint && <span className="badge warn">{plan.missing_hint}</span>}
+        {context?.summary?.note && <span>{context.summary.note}</span>}
+      </div>
+      {(context?.items?.length || 0) > 0 && (
+        <div className="zhuigengLibraryMatches">
+          {(context?.items || []).slice(0, 3).map((item) => (
+            <span key={`${item.id || item.path || item.name}-${item.library || ''}`}>
+              {item.library || 'Emby'} · {item.name}
+              {item.episode_ranges.length ? ` · ${item.episode_ranges.join(' / ')}` : ''}
+              {item.missing_ranges.length ? ` · 缺 ${item.missing_ranges.join(' / ')}` : ''}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="zhuigengCandidateList">
+        {items.slice(0, 5).map((candidate) => (
+          <article key={`${candidate.link}-${candidate.name}`}>
+            <div>
+              <strong>{candidate.name}</strong>
+              <span className={`badge ${candidate.recommendation?.level || 'neutral'}`}>{recommendationLabel(candidate)}</span>
+              {candidate.is_pkg && <span className="badge packageBadge">整包</span>}
+              <span className={`badge linkType ${candidate.link_type}`}>{candidate.link_type}</span>
+            </div>
+            {(candidate.recommendation?.reasons?.length || 0) > 0 && (
+              <p>{(candidate.recommendation?.reasons || []).slice(0, 3).join(' · ')}</p>
+            )}
+            <button
+              className="btn compact"
+              onClick={() => onExecute(candidate)}
+              disabled={busy || !isTransferableCatalogItem(candidate)}
+              title={isTransferableCatalogItem(candidate) ? '转存后自动生成 STRM、刷新 Emby、修海报并去重' : '当前只支持 115 资源一条龙'}
+            >
+              <Wand2 size={14} />
+              一条龙更新
+            </button>
+          </article>
+        ))}
+        {items.length === 0 && <div className="empty inlineEmpty">没有找到可用 115 候选</div>}
+      </div>
+    </div>
+  );
+}
+
+function ZhuigengWorkbenchSection({
+  title,
+  rows,
+  selectedArchiveKeys,
+  onToggleArchive,
+  onPlan,
+  onExecute,
+  resourcePlans,
+  planningKey,
+  busy
+}: {
+  title: string;
+  rows: ZhuigengWorkbenchRow[];
+  selectedArchiveKeys: Set<string>;
+  onToggleArchive: (row: ZhuigengWorkbenchRow) => void;
+  onPlan: (row: ZhuigengWorkbenchRow) => void;
+  onExecute: (row: ZhuigengWorkbenchRow, candidate: CatalogItem) => void;
+  resourcePlans: Record<string, ZhuigengResourcePlanResponse>;
+  planningKey: string;
+  busy: boolean;
+}) {
+  return (
+    <section className="readonlyBlock zhuigengLaneBlock">
+      <div className="sectionTitleRow">
+        <h2>{title}</h2>
+        <span className="badge">{count(rows.length)}</span>
+      </div>
+      <div className="zhuigengWorkbenchList">
+        {rows.map((row) => {
+          const item = row.item;
+          const key = zhuigengRowKey(row);
+          const tone = zhuigengLaneTone(row.lane);
+          const lastEpisode = episodeSummaryText(item.last_episode_to_air);
+          const nextEpisode = episodeSummaryText(item.next_episode_to_air);
+          const plan = resourcePlans[key];
+          return (
+            <article key={key} className={`zhuigengWorkbenchCard ${tone}`}>
+              <div className="zhuigengCardHead">
+                <label>
+                  {row.archiveable && (
+                    <input
+                      type="checkbox"
+                      aria-label={`选择归档：${item.name}`}
+                      checked={selectedArchiveKeys.has(key)}
+                      onChange={() => onToggleArchive(row)}
+                    />
+                  )}
+                  <strong>{item.name}</strong>
+                </label>
+                <div className="inlineActions">
+                  <span className={`badge ${tone}`}>{zhuigengLaneLabel(row.lane)}</span>
+                  {item.behind > 0 && <span className="badge warn">缺 {count(item.behind)}</span>}
+                  {item.tmdb && <span className="badge">tmdb:{item.tmdb}</span>}
+                </div>
+              </div>
+              <div className="zhuigengCardMeta">
+                <span>{item.lib} · local {count(item.local_count)}</span>
+                {item.local_latest_episode && <span>本地 {item.local_latest_episode}</span>}
+                {lastEpisode && <span>TMDb 最新 {lastEpisode}</span>}
+                {nextEpisode && <span>下集 {nextEpisode}</span>}
+              </div>
+              <p>{item.resource_hint || item.behind_hint || row.action}</p>
+              {row.blockers.length > 0 && (
+                <div className="notice warn whitespaceNotice">
+                  {row.blockers.map((blocker) => <div key={blocker}>{blocker}</div>)}
+                </div>
+              )}
+              <div className="inlineActions zhuigengCardActions">
+                {row.updateable && (
+                  <button className="btn ghost compact" onClick={() => onPlan(row)} disabled={busy || planningKey === key}>
+                    <Search size={14} />
+                    {planningKey === key ? '搜索中' : '找资源'}
+                  </button>
+                )}
+                {plan?.recommended && (
+                  <button className="btn compact" onClick={() => onExecute(row, plan.recommended as CatalogItem)} disabled={busy || !isTransferableCatalogItem(plan.recommended as CatalogItem)}>
+                    <Wand2 size={14} />
+                    推荐一条龙
+                  </button>
+                )}
+              </div>
+              <ZhuigengResourceCandidates
+                plan={plan}
+                busy={busy}
+                onExecute={(candidate) => onExecute(row, candidate)}
+              />
+            </article>
+          );
+        })}
+        {rows.length === 0 && <div className="empty inlineEmpty">这一组暂时为空</div>}
+      </div>
     </section>
   );
 }
@@ -2149,10 +2377,14 @@ function GapsScanResultBlock({
 
 export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
   const [zhuigeng, setZhuigeng] = useState<ZhuigengStatusResponse | null>(null);
+  const [zhuigengWorkbench, setZhuigengWorkbench] = useState<ZhuigengWorkbenchResponse | null>(null);
   const [airingResult, setAiringResult] = useState<ZhuigengScanAiringResponse | null>(null);
   const [zhuigengGapResult, setZhuigengGapResult] = useState<ZhuigengGapsSummaryResponse | null>(null);
   const [airingTask, setAiringTask] = useState<TaskRun | null>(null);
   const [zhuigengGapTask, setZhuigengGapTask] = useState<TaskRun | null>(null);
+  const [zhuigengUpdateTask, setZhuigengUpdateTask] = useState<TaskRun | null>(null);
+  const [resourcePlans, setResourcePlans] = useState<Record<string, ZhuigengResourcePlanResponse>>({});
+  const [planningKey, setPlanningKey] = useState('');
   const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
   const [selectedLib, setSelectedLib] = useState('');
   const [libraryError, setLibraryError] = useState('');
@@ -2165,8 +2397,10 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
   const [selectedArchiveKeys, setSelectedArchiveKeys] = useState<Set<string>>(new Set());
   const [archiveTask, setArchiveTask] = useState<TaskRun | null>(null);
   const [confirmArchive, setConfirmArchive] = useState(false);
+  const [confirmBulkUpdate, setConfirmBulkUpdate] = useState(false);
+  const [zhuigengBulkTasks, setZhuigengBulkTasks] = useState<TaskRun[]>([]);
   const [startingScan, setStartingScan] = useState(false);
-  const [zhuigengAction, setZhuigengAction] = useState<'scan-airing' | 'gaps-summary' | 'archive' | ''>('');
+  const [zhuigengAction, setZhuigengAction] = useState<'scan-airing' | 'gaps-summary' | 'archive' | 'update' | 'bulk-plan' | 'bulk-update' | ''>('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const toast = useToast();
@@ -2209,13 +2443,18 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     setError('');
     try {
       if (isZhuigeng) {
-        const [status] = await Promise.all([
-          api<ZhuigengStatusResponse>('/api/v2/zhuigeng'),
+        const [workbench] = await Promise.all([
+          api<ZhuigengWorkbenchResponse>('/api/v2/zhuigeng/workbench'),
           loadLibraries()
         ]);
-        setZhuigeng(status);
+        setZhuigengWorkbench(workbench);
+        setZhuigeng(workbench.status);
         setSelectedArchiveKeys((previous) => {
-          const available = new Set((status.items || []).filter((item) => item.ended && item.folder && item.id).map(zhuigengArchiveKey));
+          const available = new Set(
+            (workbench.rows || [])
+              .filter((row) => row.archiveable)
+              .map(zhuigengRowKey)
+          );
           return new Set([...previous].filter((key) => available.has(key)));
         });
       } else {
@@ -2285,6 +2524,14 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
           setZhuigengGapResult(result);
           toast.push(`缺集汇总完成：${result.total} 条`, 'ok');
         }
+      } else if (task.kind === 'zhuigeng_update') {
+        setZhuigengUpdateTask(task);
+        toast.push(`追更一条龙完成：${task.label}`, task.status === 'done' ? 'ok' : 'warn');
+        load();
+      } else if (task.kind === 'zhuigeng_archive') {
+        setArchiveTask(task);
+        toast.push(`追更归档完成：${task.label}`, task.status === 'done' ? 'ok' : 'warn');
+        load();
       }
     };
     window.addEventListener(TASK_COMPLETED_EVENT, onTaskCompleted);
@@ -2373,11 +2620,109 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     }
   };
 
-  const archiveableItems = (zhuigeng?.items || []).filter((item) => item.ended && item.folder && item.id);
-  const selectedArchiveItems = archiveableItems.filter((item) => selectedArchiveKeys.has(zhuigengArchiveKey(item)));
+  const workbenchRows = zhuigengWorkbench?.rows || [];
+  const archiveableRows = workbenchRows.filter((row) => row.archiveable);
+  const selectedArchiveRows = archiveableRows.filter((row) => selectedArchiveKeys.has(zhuigengRowKey(row)));
+  const selectedArchiveItems = selectedArchiveRows.map((row) => row.item);
 
-  const toggleArchiveItem = (item: ZhuigengItem) => {
-    const key = zhuigengArchiveKey(item);
+  const planZhuigengResource = async (row: ZhuigengWorkbenchRow) => {
+    const key = zhuigengRowKey(row);
+    setPlanningKey(key);
+    try {
+      const plan = await api<ZhuigengResourcePlanResponse>('/api/v2/zhuigeng/resource-plan', {
+        method: 'POST',
+        body: JSON.stringify({ item: itemRefFromZhuigeng(row.item), limit: 16 })
+      });
+      setResourcePlans((current) => ({ ...current, [key]: plan }));
+      const found = plan.search.items.length;
+      toast.push(found ? `已找到 ${found} 个候选资源` : '没有找到可用 115 候选', found ? 'ok' : 'warn');
+    } catch (e) {
+      toast.push(`找资源失败：${errorMessage(e)}`, 'error');
+    } finally {
+      setPlanningKey('');
+    }
+  };
+
+  const executeZhuigengUpdate = async (row: ZhuigengWorkbenchRow, candidate: CatalogItem) => {
+    setZhuigengAction('update');
+    try {
+      const task = await api<TaskRun>('/api/v2/zhuigeng/update/execute', {
+        method: 'POST',
+        body: JSON.stringify({
+          item: itemRefFromZhuigeng(row.item),
+          candidate: catalogItemToPlanItem(candidate),
+          target: { lib: row.item.lib },
+          delay_ms: 500
+        })
+      });
+      setZhuigengUpdateTask(task);
+      toast.push(`已创建追更一条龙任务：${task.label || task.kind}`, 'ok');
+    } catch (e) {
+      toast.push(`创建一条龙更新失败：${errorMessage(e)}`, 'error');
+    } finally {
+      setZhuigengAction('');
+    }
+  };
+
+  const planZhuigengRows = async (rows: ZhuigengWorkbenchRow[]) => {
+    const candidates = rows.filter((row) => row.updateable && !resourcePlans[zhuigengRowKey(row)]);
+    if (candidates.length === 0) {
+      toast.push('需要更新的剧都已经有资源计划了', 'ok');
+      return;
+    }
+    setZhuigengAction('bulk-plan');
+    try {
+      const nextPlans: Record<string, ZhuigengResourcePlanResponse> = {};
+      for (const row of candidates) {
+        const key = zhuigengRowKey(row);
+        const plan = await api<ZhuigengResourcePlanResponse>('/api/v2/zhuigeng/resource-plan', {
+          method: 'POST',
+          body: JSON.stringify({ item: itemRefFromZhuigeng(row.item), limit: 16 })
+        });
+        nextPlans[key] = plan;
+        setResourcePlans((current) => ({ ...current, [key]: plan }));
+      }
+      const recommended = Object.values(nextPlans).filter((plan) => plan.recommended && isTransferableCatalogItem(plan.recommended)).length;
+      toast.push(`已完成 ${candidates.length} 个资源计划，推荐 ${recommended} 个`, recommended ? 'ok' : 'warn');
+    } catch (e) {
+      toast.push(`批量找资源失败：${errorMessage(e)}`, 'error');
+    } finally {
+      setZhuigengAction('');
+    }
+  };
+
+  const executeBulkZhuigengUpdates = async (rows: ZhuigengWorkbenchRow[]) => {
+    setConfirmBulkUpdate(false);
+    setZhuigengAction('bulk-update');
+    try {
+      const tasks: TaskRun[] = [];
+      for (const row of rows) {
+        const plan = resourcePlans[zhuigengRowKey(row)];
+        const candidate = plan?.recommended;
+        if (!candidate || !isTransferableCatalogItem(candidate)) continue;
+        const task = await api<TaskRun>('/api/v2/zhuigeng/update/execute', {
+          method: 'POST',
+          body: JSON.stringify({
+            item: itemRefFromZhuigeng(row.item),
+            candidate: catalogItemToPlanItem(candidate),
+            target: { lib: row.item.lib },
+            delay_ms: 500
+          })
+        });
+        tasks.push(task);
+      }
+      setZhuigengBulkTasks(tasks);
+      setZhuigengUpdateTask(tasks[tasks.length - 1] || null);
+      toast.push(`已创建 ${tasks.length} 个追更一条龙任务`, tasks.length ? 'ok' : 'warn');
+    } catch (e) {
+      toast.push(`批量创建一条龙任务失败：${errorMessage(e)}`, 'error');
+    } finally {
+      setZhuigengAction('');
+    }
+  };
+
+  const toggleArchiveRow = (row: ZhuigengWorkbenchRow) => {
+    const key = zhuigengRowKey(row);
     setSelectedArchiveKeys((current) => {
       const next = new Set(current);
       if (next.has(key)) next.delete(key);
@@ -2387,7 +2732,7 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
   };
 
   const toggleAllArchiveItems = () => {
-    const keys = archiveableItems.map(zhuigengArchiveKey);
+    const keys = archiveableRows.map(zhuigengRowKey);
     setSelectedArchiveKeys((current) => {
       if (keys.length > 0 && keys.every((key) => current.has(key))) return new Set();
       return new Set(keys);
@@ -2410,32 +2755,17 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
     setConfirmArchive(false);
     setZhuigengAction('archive');
     try {
-      const byLib = selectedArchiveItems.reduce<Record<string, ZhuigengItem[]>>((acc, item) => {
-        (acc[item.lib] ||= []).push(item);
-        return acc;
-      }, {});
-      const tasks: TaskRun[] = [];
-      for (const [fromLib, group] of Object.entries(byLib)) {
-        const payload: ManageMoveBatchRequest = {
-          from_lib: fromLib,
+      const response = await api<ZhuigengArchiveExecuteResponse>('/api/v2/zhuigeng/archive/execute', {
+        method: 'POST',
+        body: JSON.stringify({
           to_lib: archiveTargetLib,
-          items: group.map((item) => ({
-            folder: item.folder || '',
-            item_id: item.id || null,
-            to_folder: null
-          })),
-          on_conflict: 'smart',
-          reason: '追更完结剧智能归档'
-        };
-        const task = await api<TaskRun>('/api/v2/manage/move/batch/execute', {
-          method: 'POST',
-          body: JSON.stringify(payload)
-        });
-        tasks.push(task);
-      }
-      setArchiveTask(tasks[tasks.length - 1] || null);
+          items: selectedArchiveItems.map(itemRefFromZhuigeng),
+          on_conflict: 'smart'
+        })
+      });
+      setArchiveTask(response.tasks[response.tasks.length - 1] || null);
       setSelectedArchiveKeys(new Set());
-      toast.push(`已创建 ${tasks.length} 个归档任务`, 'ok');
+      toast.push(`已创建 ${response.tasks.length} 个归档任务`, 'ok');
     } catch (e) {
       toast.push(`归档任务创建失败：${errorMessage(e)}`, 'error');
     } finally {
@@ -2444,9 +2774,17 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
   };
 
   if (isZhuigeng) {
-    const items = zhuigeng?.items || [];
-    const behind = items.reduce((total, item) => total + item.behind, 0);
-    const errors = items.filter((item) => item.err).length;
+    const counts = zhuigengWorkbench?.counts;
+    const updateRows = workbenchRows.filter((row) => row.lane === 'update_needed');
+    const completeAfterUpdateRows = workbenchRows.filter((row) => row.lane === 'complete_after_update');
+    const updatableRows = [...updateRows, ...completeAfterUpdateRows];
+    const recommendedUpdateRows = updatableRows.filter((row) => {
+      const candidate = resourcePlans[zhuigengRowKey(row)]?.recommended;
+      return Boolean(candidate && isTransferableCatalogItem(candidate));
+    });
+    const issueRows = workbenchRows.filter((row) => ['metadata_error', 'target_error', 'unknown'].includes(row.lane));
+    const healthyRows = workbenchRows.filter((row) => row.lane === 'healthy_airing');
+    const errors = (counts?.metadata_error || 0) + (counts?.target_error || 0);
     const actionRunning = Boolean(zhuigengAction) || isActiveTask(airingTask) || isActiveTask(zhuigengGapTask);
     return (
       <section className="insightPanel">
@@ -2464,10 +2802,27 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
             )}
           />
         )}
+        {confirmBulkUpdate && (
+          <ConfirmDanger
+            title="确认批量一条龙更新"
+            confirmText="确认更新"
+            onCancel={() => setConfirmBulkUpdate(false)}
+            onConfirm={() => executeBulkZhuigengUpdates(recommendedUpdateRows)}
+            body={(
+              <div className="dangerCopy">
+                <p>将为这些剧创建 115 转存一条龙任务，任务会继续生成 STRM、刷新 Emby、修海报并做重复检查。</p>
+                <code>{recommendedUpdateRows.map((row) => {
+                  const candidate = resourcePlans[zhuigengRowKey(row)]?.recommended;
+                  return `${row.item.lib}/${row.item.name} <- ${candidate?.name || candidate?.link || '推荐资源'}`;
+                }).join('\n')}</code>
+              </div>
+            )}
+          />
+        )}
         <div className="insightToolbar">
           <div>
-            <strong>{title}</strong>
-            <span>{subtitle}</span>
+            <strong>追更工作台</strong>
+            <span>{zhuigengWorkbench?.note || subtitle}</span>
           </div>
           <button className="btn ghost" onClick={load} disabled={loading || actionRunning}>
             <RefreshCw size={16} />
@@ -2477,14 +2832,14 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
         <div className="notice warn scanNotice">{notice}</div>
         {error && <div className="notice warn whitespaceNotice">{error}</div>}
         <div className="statGrid">
-          <StatCard icon={<ListChecks />} label="总数" value={count(zhuigeng?.total)} hint={`错误 ${count(errors)}`} />
-          <StatCard icon={<Webhook />} label="continuing" value={count(zhuigeng?.continuing)} tone={zhuigeng?.continuing ? 'ok' : 'neutral'} hint="TMDb 在更" />
-          <StatCard icon={<CheckCircle2 />} label="ended" value={count(zhuigeng?.ended)} hint="TMDb 已完结" />
-          <StatCard icon={<AlertTriangle />} label="behind" value={count(behind)} tone={behind ? 'warn' : 'ok'} hint="落后集数" />
+          <StatCard icon={<Wand2 />} label="需更新" value={count(counts?.update_needed)} tone={counts?.update_needed ? 'warn' : 'ok'} hint={`落后 ${count(counts?.behind_total)} 集`} />
+          <StatCard icon={<Archive />} label="可归档" value={count(counts?.archive_ready)} tone={counts?.archive_ready ? 'ok' : 'neutral'} hint="完结且本地齐" />
+          <StatCard icon={<CheckCircle2 />} label="补齐后归档" value={count(counts?.complete_after_update)} tone={counts?.complete_after_update ? 'warn' : 'neutral'} hint="完结但缺集" />
+          <StatCard icon={<AlertTriangle />} label="异常" value={count(errors)} tone={errors ? 'error' : 'ok'} hint={`总数 ${count(counts?.total || zhuigeng?.total)}`} />
         </div>
-        <section className="readonlyBlock">
+        <section className="readonlyBlock zhuigengCommandBar">
           <div className="sectionTitleRow">
-            <h2>操作</h2>
+            <h2>批量动作</h2>
             <div className="inlineActions">
               <select className="input compactSelect" aria-label="归档目标库" value={archiveTargetLib} onChange={(event) => setArchiveTargetLib(event.target.value)}>
                 {libraries.length === 0 && <option value="">无目标库</option>}
@@ -2492,13 +2847,21 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
                   <option key={library.id || library.name} value={library.name}>{library.name}</option>
                 ))}
               </select>
-              <button className="btn ghost compact" onClick={toggleAllArchiveItems} disabled={archiveableItems.length === 0 || actionRunning}>
+              <button className="btn ghost compact" onClick={toggleAllArchiveItems} disabled={archiveableRows.length === 0 || actionRunning}>
                 <ListChecks size={14} />
-                {selectedArchiveItems.length === archiveableItems.length && archiveableItems.length > 0 ? '取消全选' : '全选完结'}
+                {selectedArchiveItems.length === archiveableRows.length && archiveableRows.length > 0 ? '取消全选' : '全选可归档'}
               </button>
               <button className="btn danger compact" onClick={requestArchiveSelected} disabled={selectedArchiveItems.length === 0 || !archiveTargetLib || actionRunning}>
-                <Trash2 size={14} />
-                {zhuigengAction === 'archive' ? '提交中' : `智能归档 ${count(selectedArchiveItems.length)}`}
+                <Archive size={14} />
+                {zhuigengAction === 'archive' ? '提交中' : `归档 ${count(selectedArchiveItems.length)}`}
+              </button>
+              <button className="btn ghost compact" onClick={() => planZhuigengRows(updatableRows)} disabled={updatableRows.length === 0 || actionRunning}>
+                <Search size={14} />
+                {zhuigengAction === 'bulk-plan' ? '搜索中' : `智能找资源 ${count(updatableRows.length)}`}
+              </button>
+              <button className="btn compact" onClick={() => setConfirmBulkUpdate(true)} disabled={recommendedUpdateRows.length === 0 || actionRunning}>
+                <Wand2 size={14} />
+                {zhuigengAction === 'bulk-update' ? '提交中' : `更新推荐 ${count(recommendedUpdateRows.length)}`}
               </button>
               <button className="btn compact" onClick={runScanAiring} disabled={loading || actionRunning}>
                 <Play size={14} />
@@ -2510,20 +2873,76 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
               </button>
             </div>
           </div>
-          <p className="mutedParagraph">scan-airing 和 gaps-summary 只读；智能归档只处理已完结且有 folder/id 的条目，并会创建真实移动任务。</p>
+          <p className="mutedParagraph">需要更新的剧先找 115 资源，再走一条龙更新；可归档的完结剧在这里批量移动到目标库。</p>
           {airingTask && <div className="notice">在更扫描任务：{airingTask.label} · {airingTask.status}</div>}
           {zhuigengGapTask && <div className="notice">缺集汇总任务：{zhuigengGapTask.label} · {zhuigengGapTask.status}</div>}
+          {zhuigengUpdateTask && <div className="notice">更新任务：{zhuigengUpdateTask.label} · {zhuigengUpdateTask.status}</div>}
+          {zhuigengBulkTasks.length > 1 && <div className="notice">批量更新任务：{zhuigengBulkTasks.length} 个任务已创建</div>}
           {archiveTask && <div className="notice">归档任务：{archiveTask.label} · {archiveTask.status}</div>}
         </section>
+        <ZhuigengWorkbenchSection
+          title="需要更新"
+          rows={updateRows}
+          selectedArchiveKeys={selectedArchiveKeys}
+          onToggleArchive={toggleArchiveRow}
+          onPlan={planZhuigengResource}
+          onExecute={executeZhuigengUpdate}
+          resourcePlans={resourcePlans}
+          planningKey={planningKey}
+          busy={actionRunning}
+        />
+        <ZhuigengWorkbenchSection
+          title="补齐后归档"
+          rows={completeAfterUpdateRows}
+          selectedArchiveKeys={selectedArchiveKeys}
+          onToggleArchive={toggleArchiveRow}
+          onPlan={planZhuigengResource}
+          onExecute={executeZhuigengUpdate}
+          resourcePlans={resourcePlans}
+          planningKey={planningKey}
+          busy={actionRunning}
+        />
+        <ZhuigengWorkbenchSection
+          title="可归档"
+          rows={archiveableRows}
+          selectedArchiveKeys={selectedArchiveKeys}
+          onToggleArchive={toggleArchiveRow}
+          onPlan={planZhuigengResource}
+          onExecute={executeZhuigengUpdate}
+          resourcePlans={resourcePlans}
+          planningKey={planningKey}
+          busy={actionRunning}
+        />
+        <ZhuigengWorkbenchSection
+          title="异常待处理"
+          rows={issueRows}
+          selectedArchiveKeys={selectedArchiveKeys}
+          onToggleArchive={toggleArchiveRow}
+          onPlan={planZhuigengResource}
+          onExecute={executeZhuigengUpdate}
+          resourcePlans={resourcePlans}
+          planningKey={planningKey}
+          busy={actionRunning}
+        />
         <CopyTextBlock
-          title="追更 copy_text"
+          title="求资源文本"
           text={zhuigeng?.copy_text || ''}
           empty="当前没有可复制的追更求资源文本"
           onCopy={copyText}
         />
         <ZhuigengScanAiringBlock result={airingResult} onCopy={copyText} />
         <ZhuigengGapsSummaryBlock result={zhuigengGapResult} onCopy={copyText} />
-        <ZhuigengItemList items={items} selectedArchiveKeys={selectedArchiveKeys} onToggleArchive={toggleArchiveItem} />
+        <ZhuigengWorkbenchSection
+          title="正常在更"
+          rows={healthyRows}
+          selectedArchiveKeys={selectedArchiveKeys}
+          onToggleArchive={toggleArchiveRow}
+          onPlan={planZhuigengResource}
+          onExecute={executeZhuigengUpdate}
+          resourcePlans={resourcePlans}
+          planningKey={planningKey}
+          busy={actionRunning}
+        />
       </section>
     );
   }

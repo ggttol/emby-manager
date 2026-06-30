@@ -109,8 +109,10 @@ pub struct DedupExecuteBatchItemResult {
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct DedupExecuteBatchResult {
+    pub ok: bool,
     pub results: Vec<DedupExecuteBatchItemResult>,
     pub ok_count: usize,
+    pub error_count: usize,
     pub total: usize,
 }
 
@@ -475,18 +477,32 @@ fn spawn_dedup_batch(state: AppState, task_id: Uuid, groups: Vec<DedupExecuteBat
 
         let ok_count = results.iter().filter(|item| item.ok).count();
         let total = results.len();
+        let error_count = total.saturating_sub(ok_count);
         let result = DedupExecuteBatchResult {
             results,
+            ok: error_count == 0,
             ok_count,
+            error_count,
             total,
         };
-        let _ = tasks::finish_done_with_message(
-            &state.pool,
-            task_id,
-            &format!("批量去重完成: {ok_count}/{total}"),
-            serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({})),
-        )
-        .await;
+        let result_value = serde_json::to_value(result).unwrap_or_else(|_| serde_json::json!({}));
+        if error_count > 0 {
+            let _ = tasks::finish_error(
+                &state.pool,
+                task_id,
+                &format!("批量去重失败: {error_count}/{total} 组失败"),
+                Some(result_value),
+            )
+            .await;
+        } else {
+            let _ = tasks::finish_done_with_message(
+                &state.pool,
+                task_id,
+                &format!("批量去重完成: {ok_count}/{total}"),
+                result_value,
+            )
+            .await;
+        }
     });
 }
 
@@ -989,31 +1005,65 @@ async fn delete_duplicate_folder(
 ) -> AppResult<DedupDeleteResult> {
     let lib = required_value(&item.lib, "lib")?;
     let folder = required_value(&item.folder, "folder")?;
-    let cd_lib = safe_under(&state.settings.cd_root, lib)?;
-    let strm_lib = safe_under(&state.settings.strm_root, lib)?;
-    let cd_target = safe_under(&cd_lib, folder)?;
-    let strm_target = safe_under(&strm_lib, folder)?;
-
-    if let Some(item_id) = item.item_id.as_deref().and_then(non_empty_trimmed)
-        && let Err(err) = emby_client.delete_item(item_id).await
-    {
-        tracing::warn!(
-            item_id,
-            error = %err,
-            "Emby item delete failed during dedup; continuing STRM cleanup"
-        );
+    let mut deleted_from = Vec::new();
+    if let Some(item_id) = item.item_id.as_deref().and_then(non_empty_trimmed) {
+        emby_client.delete_item(item_id).await.map_err(|err| {
+            AppError::Conflict(format!(
+                "Emby 删除 item_id={item_id} 失败，已停止本地/115 清理: {err}"
+            ))
+        })?;
+        deleted_from.push("emby".to_string());
     }
 
-    let mut deleted_from = Vec::new();
+    let cd_lib = match safe_under(&state.settings.cd_root, lib) {
+        Ok(path) => path,
+        Err(_err) if !deleted_from.is_empty() => {
+            return finish_duplicate_delete(state, emby_client, lib, folder, deleted_from).await;
+        }
+        Err(err) => return Err(err),
+    };
+    let strm_lib = match safe_under(&state.settings.strm_root, lib) {
+        Ok(path) => path,
+        Err(_err) if !deleted_from.is_empty() => {
+            return finish_duplicate_delete(state, emby_client, lib, folder, deleted_from).await;
+        }
+        Err(err) => return Err(err),
+    };
+    let cd_target = match safe_under(&cd_lib, folder) {
+        Ok(path) => path,
+        Err(_err) if !deleted_from.is_empty() => {
+            return finish_duplicate_delete(state, emby_client, lib, folder, deleted_from).await;
+        }
+        Err(err) => return Err(err),
+    };
+    let strm_target = match safe_under(&strm_lib, folder) {
+        Ok(path) => path,
+        Err(_err) if !deleted_from.is_empty() => {
+            return finish_duplicate_delete(state, emby_client, lib, folder, deleted_from).await;
+        }
+        Err(err) => return Err(err),
+    };
+
     if delete_c115_folder(c115_delete, lib, folder, &cd_target).await? {
         deleted_from.push("115".to_string());
     }
     if remove_path_if_exists(&strm_target).await? {
         deleted_from.push("strm".to_string());
     }
+
+    finish_duplicate_delete(state, emby_client, lib, folder, deleted_from).await
+}
+
+async fn finish_duplicate_delete(
+    state: &AppState,
+    emby_client: &EmbyClient,
+    lib: &str,
+    folder: &str,
+    deleted_from: Vec<String>,
+) -> AppResult<DedupDeleteResult> {
     if deleted_from.is_empty() {
         return Err(AppError::NotFound(format!(
-            "未找到可删除的 115/STRM 目录: {lib}/{folder}"
+            "未找到可删除的 Emby/115/STRM 资源: {lib}/{folder}"
         )));
     }
 
@@ -1029,13 +1079,16 @@ async fn delete_duplicate_folder(
         .execute(&state.pool)
         .await?;
 
-    let emby_updates = if deleted_from.is_empty() {
-        Vec::new()
-    } else {
+    let removed_media_folder = deleted_from
+        .iter()
+        .any(|source| source == "115" || source == "strm");
+    let emby_updates = if removed_media_folder {
         vec![EmbyUpdate {
             path: format!("/strm/{lib}/{folder}"),
             update_type: "Deleted".to_string(),
         }]
+    } else {
+        Vec::new()
     };
     let notified = notify_emby_updates(emby_client, &emby_updates).await?;
 

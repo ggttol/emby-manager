@@ -319,6 +319,18 @@ pub async fn add_new(
     State(state): State<AppState>,
     Json(req): Json<AddNewRequest>,
 ) -> AppResult<Json<TaskRun>> {
+    Ok(Json(
+        create_add_new_task(state, req, "manual", "add_new", None).await?,
+    ))
+}
+
+pub async fn create_add_new_task(
+    state: AppState,
+    req: AddNewRequest,
+    source: &str,
+    kind: &str,
+    label_prefix: Option<&str>,
+) -> AppResult<TaskRun> {
     validate_add_new_request(&req)?;
     let (target_cid, target_lib) = resolve_target_cid(&state.pool, &req).await?;
     let cookie =
@@ -331,11 +343,16 @@ pub async fn add_new(
         .unwrap_or(DEFAULT_STAGE_DELAY_MS)
         .min(MAX_STAGE_DELAY_MS);
     let total = (req.items.len() + 3).max(1) as i64;
-    let label = add_new_task_label(req.items.len(), &target_cid, target_lib.as_deref());
+    let label = match label_prefix.and_then(non_empty_trimmed) {
+        Some(prefix) => format!(
+            "{prefix}: {}",
+            add_new_task_label(req.items.len(), &target_cid, target_lib.as_deref())
+        ),
+        None => add_new_task_label(req.items.len(), &target_cid, target_lib.as_deref()),
+    };
     let params = serde_json::to_value(&req).unwrap_or_else(|_| json!({}));
     let task =
-        tasks::insert_task_with_meta(&state.pool, "add_new", &label, total, "manual", params)
-            .await?;
+        tasks::insert_task_with_meta(&state.pool, kind, &label, total, source, params).await?;
 
     spawn_add_new(
         state,
@@ -352,7 +369,7 @@ pub async fn add_new(
             delay_ms,
         },
     );
-    Ok(Json(task))
+    Ok(task)
 }
 
 fn spawn_add_new(state: AppState, id: Uuid, plan: AddNewPlan) {
@@ -366,6 +383,8 @@ fn spawn_add_new(state: AppState, id: Uuid, plan: AddNewPlan) {
                 let failed = report.transfer.failed;
                 let status_text = if failed > 0 {
                     format!("完成，{failed} 项转存/离线失败")
+                } else if !report.strm.ok {
+                    "完成，STRM 生成失败".to_string()
                 } else if !report.scan.ok {
                     "完成，扫描触发失败".to_string()
                 } else if !report.poster.ok {
@@ -558,6 +577,7 @@ async fn run_add_new_pipeline(
         &mut dedup,
         plan.target_lib.as_deref(),
         &emby_groups,
+        &strm,
     )
     .await;
 
@@ -580,11 +600,13 @@ async fn run_add_new_pipeline(
 
     Ok(AddNewReport {
         ok: transfer.ok
+            && strm.ok
             && auto_resolve.ok
             && poster_auto_fix.ok
             && scan.ok
             && poster.ok
-            && check.ok,
+            && check.item_error_count == 0
+            && check.stage_error_count == 0,
         target: AddNewTargetReport {
             cid: plan.target_cid,
             lib: plan.target_lib,
@@ -858,7 +880,7 @@ async fn auto_fix_new_posters(
     let Some(target_lib) = target_lib.and_then(non_empty_trimmed) else {
         return AddNewPosterAutoFixReport::not_triggered();
     };
-    if poster.items.is_empty() || strm.new_folders.is_empty() {
+    if poster.items.is_empty() {
         return AddNewPosterAutoFixReport::not_triggered();
     }
 
@@ -893,6 +915,7 @@ async fn auto_fix_new_posters(
         };
     };
     let aliases = collect_poster_tmdb_aliases(client, library).await;
+    let restrict_to_new_folders = !new_folders.is_empty();
 
     let mut items = Vec::new();
     for issue in poster
@@ -934,19 +957,37 @@ async fn auto_fix_new_posters(
             .and_then(|path| folder_from_emby_path(path, library))
             .or_else(|| current.name.clone())
             .unwrap_or_else(|| issue.name.clone());
-        if !new_folders.contains(folder.as_str()) {
+        if restrict_to_new_folders && !new_folders.contains(folder.as_str()) {
             continue;
         }
-        let Some((tmdb, reason)) = infer_poster_tmdb(&current, issue, &folder, &aliases) else {
-            items.push(poster_auto_fix_item(
-                issue,
-                None,
-                "skipped",
-                "新条目缺少 tmdbid，且没有找到同发布名的已绑定条目",
-                None,
-                None,
-            ));
-            continue;
+        let inferred = match infer_poster_tmdb(&current, issue, &folder, &aliases) {
+            Some(inferred) => Ok(Some(inferred)),
+            None => infer_poster_tmdb_from_remote(client, &current, issue, &folder).await,
+        };
+        let (tmdb, reason) = match inferred {
+            Ok(Some(inferred)) => inferred,
+            Ok(None) => {
+                items.push(poster_auto_fix_item(
+                    issue,
+                    None,
+                    "skipped",
+                    "条目缺少 tmdbid，RemoteSearch 未返回明确且带图的唯一候选",
+                    None,
+                    None,
+                ));
+                continue;
+            }
+            Err(err) => {
+                items.push(poster_auto_fix_item(
+                    issue,
+                    None,
+                    "error",
+                    "条目缺少 tmdbid，RemoteSearch 查询失败",
+                    None,
+                    Some(err.to_string()),
+                ));
+                continue;
+            }
         };
 
         match posters::apply_poster_match(
@@ -1064,6 +1105,171 @@ fn infer_poster_tmdb(
         tmdb,
         format!("匹配到同库已绑定条目「{source}」，复用其 TMDb 自动刷新海报"),
     ))
+}
+
+async fn infer_poster_tmdb_from_remote(
+    client: &EmbyClient,
+    item: &EmbyItem,
+    issue: &AddNewPosterIssueReport,
+    folder: &str,
+) -> anyhow::Result<Option<(String, String)>> {
+    let names = poster_remote_search_names(folder, item.name.as_deref(), &issue.name);
+    for search_name in names {
+        let candidates = client
+            .remote_search(&issue.id, &search_name, &issue.item_type, 8)
+            .await?;
+        if let Some((tmdb, candidate_name)) =
+            pick_remote_poster_candidate(&candidates, &search_name, folder, issue)
+        {
+            return Ok(Some((
+                tmdb,
+                format!(
+                    "RemoteSearch「{search_name}」匹配到「{candidate_name}」，自动绑定并刷新海报"
+                ),
+            )));
+        }
+    }
+    Ok(None)
+}
+
+fn poster_remote_search_names(
+    folder: &str,
+    item_name: Option<&str>,
+    issue_name: &str,
+) -> Vec<String> {
+    let mut names = Vec::<String>::new();
+    for value in [Some(folder), item_name, Some(issue_name)]
+        .into_iter()
+        .flatten()
+    {
+        for candidate in [
+            poster_search_title(value),
+            poster_search_title_without_year(value),
+        ] {
+            let candidate = candidate.trim();
+            if candidate.chars().count() >= 2
+                && !names
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(candidate))
+            {
+                names.push(candidate.to_string());
+            }
+        }
+    }
+    names.truncate(4);
+    names
+}
+
+fn poster_search_title(value: &str) -> String {
+    let value = trim_media_extension(duplicate_suffix_base(value).unwrap_or(value));
+    let mut parts = Vec::new();
+    for token in value.split(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '.' | '_' | '-' | '[' | ']' | '(' | ')' | '{' | '}')
+    }) {
+        let token = token.trim();
+        if token.is_empty() || token.eq_ignore_ascii_case("tmdbid") {
+            continue;
+        }
+        let lower = token.to_ascii_lowercase();
+        if lower.starts_with("tmdbid")
+            || is_season_release_token(&lower)
+            || is_quality_release_token(&lower)
+        {
+            break;
+        }
+        parts.push(token);
+    }
+    parts.join(" ").trim().to_string()
+}
+
+fn poster_search_title_without_year(value: &str) -> String {
+    poster_search_title(value)
+        .split_whitespace()
+        .filter(|part| !is_year_token(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_year_token(value: &str) -> bool {
+    value.len() == 4
+        && value.chars().all(|ch| ch.is_ascii_digit())
+        && value
+            .parse::<i32>()
+            .is_ok_and(|year| (1900..=2100).contains(&year))
+}
+
+fn pick_remote_poster_candidate(
+    candidates: &[crate::emby::EmbyRemoteSearchCandidate],
+    search_name: &str,
+    folder: &str,
+    issue: &AddNewPosterIssueReport,
+) -> Option<(String, String)> {
+    let valid = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let tmdb = remote_candidate_tmdb(candidate)?;
+            let image = candidate.image_url.as_deref().unwrap_or_default().trim();
+            if image.is_empty() {
+                return None;
+            }
+            let name = candidate.name.clone().unwrap_or_else(|| tmdb.clone());
+            Some((candidate, tmdb, name))
+        })
+        .collect::<Vec<_>>();
+    if valid.len() == 1 {
+        let (_, tmdb, name) = valid.into_iter().next()?;
+        return Some((tmdb, name));
+    }
+
+    let keys = poster_match_keys([Some(search_name), Some(folder), Some(issue.name.as_str())]);
+    let year = declared_year(folder).or_else(|| declared_year(&issue.name));
+    let matched = valid
+        .into_iter()
+        .filter(|(candidate, _tmdb, name)| {
+            let key_match = poster_match_key(name)
+                .as_ref()
+                .is_some_and(|key| keys.contains(key));
+            let year_match = year.is_some_and(|year| candidate.production_year == Some(year));
+            key_match || year_match
+        })
+        .collect::<Vec<_>>();
+    if matched.len() == 1 {
+        let (_, tmdb, name) = matched.into_iter().next()?;
+        return Some((tmdb, name));
+    }
+    None
+}
+
+fn remote_candidate_tmdb(candidate: &crate::emby::EmbyRemoteSearchCandidate) -> Option<String> {
+    candidate
+        .provider_ids
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("Tmdb"))
+        .and_then(|(_, value)| match value {
+            Value::String(value) => {
+                let value = value.trim();
+                (!value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit()))
+                    .then(|| value.to_string())
+            }
+            Value::Number(value) => Some(value.to_string())
+                .filter(|value| !value.is_empty() && value.chars().all(|ch| ch.is_ascii_digit())),
+            _ => None,
+        })
+}
+
+fn declared_year(value: &str) -> Option<i32> {
+    let mut digits = String::new();
+    for ch in value.chars().chain(std::iter::once(' ')) {
+        if ch.is_ascii_digit() {
+            digits.push(ch);
+            continue;
+        }
+        if is_year_token(&digits) {
+            return digits.parse().ok();
+        }
+        digits.clear();
+    }
+    None
 }
 
 fn poster_auto_fix_item(
@@ -1443,13 +1649,11 @@ async fn auto_resolve_emby_duplicates(
     dedup: &mut AddNewDedupReport,
     target_lib: Option<&str>,
     groups: &BTreeMap<String, Vec<EmbyDuplicateRow>>,
+    strm: &AddNewStrmReport,
 ) -> AddNewAutoResolveReport {
     let Some(target_lib) = target_lib.and_then(non_empty_trimmed) else {
         return AddNewAutoResolveReport::not_triggered();
     };
-    if is_followup_library(target_lib) {
-        return AddNewAutoResolveReport::not_triggered();
-    }
 
     let mut items = Vec::new();
     let mut resolved_tmdb = Vec::<String>::new();
@@ -1459,24 +1663,18 @@ async fn auto_resolve_emby_duplicates(
         if rows.len() < 2 {
             continue;
         }
-        let mut target_rows = rows
+        let target_rows = rows
             .iter()
             .filter(|row| row.lib == target_lib)
             .collect::<Vec<_>>();
         if target_rows.is_empty() {
             continue;
         }
-        target_rows.sort_by(|left, right| {
-            right
-                .episode_count
-                .cmp(&left.episode_count)
-                .then_with(|| left.folder.cmp(&right.folder))
-        });
-        let kept = target_rows[0];
-        let old_rows = rows
-            .iter()
-            .filter(|row| row.lib != target_lib && is_followup_library(&row.lib))
-            .collect::<Vec<_>>();
+        let Some(kept) = choose_auto_resolve_keep_row(&target_rows, &strm.new_folders) else {
+            continue;
+        };
+        let keep_is_new = strm.new_folders.contains_key(&kept.folder);
+        let old_rows = auto_resolve_old_rows(target_lib, kept, rows, keep_is_new);
         if old_rows.is_empty() {
             continue;
         }
@@ -1484,10 +1682,8 @@ async fn auto_resolve_emby_duplicates(
         let mut unresolved = false;
 
         for old in old_rows {
-            let reason = format!(
-                "同 TMDb {tmdb} 已入库到「{}」，且目标库集数 {} >= 旧追更库集数 {}，自动清理旧追更版本",
-                kept.lib, kept.episode_count, old.episode_count
-            );
+            let same_lib = old.lib == kept.lib;
+            let reason = auto_resolve_reason(tmdb, kept, old, same_lib);
             if kept.episode_count == 0 {
                 unresolved = true;
                 items.push(auto_resolve_skipped(
@@ -1508,6 +1704,16 @@ async fn auto_resolve_emby_duplicates(
                         "目标库集数 {} 少于旧追更库集数 {}，跳过自动删除",
                         kept.episode_count, old.episode_count
                     ),
+                ));
+                continue;
+            }
+            if same_lib && !keep_is_new && kept.episode_count == old.episode_count {
+                unresolved = true;
+                items.push(auto_resolve_skipped(
+                    tmdb,
+                    kept,
+                    old,
+                    "同库版本集数相同，但本次新目录未明确命中，跳过自动删除".to_string(),
                 ));
                 continue;
             }
@@ -1594,15 +1800,11 @@ async fn auto_resolve_emby_duplicates(
 }
 
 fn should_wait_for_emby_dedup(
-    target_lib: &str,
+    _target_lib: &str,
     strm: &AddNewStrmReport,
     transfer_ok: bool,
 ) -> bool {
-    transfer_ok
-        && !is_followup_library(target_lib)
-        && strm.ok
-        && strm.new_count > 0
-        && !strm.new_folders.is_empty()
+    transfer_ok && strm.ok && strm.new_count > 0 && !strm.new_folders.is_empty()
 }
 
 fn emby_groups_have_target_new_folder(
@@ -1626,11 +1828,82 @@ fn emby_groups_have_auto_resolve_candidate(
     groups: &BTreeMap<String, Vec<EmbyDuplicateRow>>,
 ) -> bool {
     groups.values().any(|rows| {
-        rows.iter().any(|row| row.lib == target_lib)
-            && rows
-                .iter()
-                .any(|row| row.lib != target_lib && is_followup_library(&row.lib))
+        let target_count = rows.iter().filter(|row| row.lib == target_lib).count();
+        if target_count == 0 {
+            return false;
+        }
+        if is_followup_library(target_lib) && target_count >= 2 {
+            return true;
+        }
+        rows.iter()
+            .any(|row| row.lib != target_lib && is_followup_library(&row.lib))
     })
+}
+
+fn choose_auto_resolve_keep_row<'a>(
+    target_rows: &[&'a EmbyDuplicateRow],
+    new_folders: &BTreeMap<String, usize>,
+) -> Option<&'a EmbyDuplicateRow> {
+    let mut candidates = target_rows
+        .iter()
+        .copied()
+        .filter(|row| new_folders.contains_key(&row.folder))
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        candidates = target_rows.to_vec();
+    }
+    candidates.sort_by(|left, right| compare_auto_resolve_keep_row(left, right, new_folders));
+    candidates.into_iter().next()
+}
+
+fn compare_auto_resolve_keep_row(
+    left: &EmbyDuplicateRow,
+    right: &EmbyDuplicateRow,
+    new_folders: &BTreeMap<String, usize>,
+) -> std::cmp::Ordering {
+    let left_new = new_folders.contains_key(&left.folder);
+    let right_new = new_folders.contains_key(&right.folder);
+    right_new
+        .cmp(&left_new)
+        .then_with(|| right.episode_count.cmp(&left.episode_count))
+        .then_with(|| left.folder.cmp(&right.folder))
+}
+
+fn auto_resolve_old_rows<'a>(
+    target_lib: &str,
+    kept: &EmbyDuplicateRow,
+    rows: &'a [EmbyDuplicateRow],
+    keep_is_new: bool,
+) -> Vec<&'a EmbyDuplicateRow> {
+    if is_followup_library(target_lib) {
+        return rows
+            .iter()
+            .filter(|row| row.lib == target_lib)
+            .filter(|row| row.folder != kept.folder)
+            .filter(|row| keep_is_new || row.episode_count < kept.episode_count)
+            .collect();
+    }
+    rows.iter()
+        .filter(|row| row.lib != target_lib && is_followup_library(&row.lib))
+        .collect()
+}
+
+fn auto_resolve_reason(
+    tmdb: &str,
+    kept: &EmbyDuplicateRow,
+    old: &EmbyDuplicateRow,
+    same_lib: bool,
+) -> String {
+    if same_lib {
+        return format!(
+            "同 TMDb {tmdb} 在「{}」已更新到「{}」({} 集)，旧目录「{}」({} 集) 自动清理",
+            kept.lib, kept.folder, kept.episode_count, old.folder, old.episode_count
+        );
+    }
+    format!(
+        "同 TMDb {tmdb} 已入库到「{}」，且目标库集数 {} >= 旧追更库集数 {}，自动清理旧追更版本",
+        kept.lib, kept.episode_count, old.episode_count
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -1894,11 +2167,11 @@ fn build_post_add_check(
     }
 
     if !strm.ok {
-        suspicious.push(AddNewCheckSuspiciousReport {
+        stage_error_count += 1;
+        errors.push(AddNewCheckErrorReport {
             stage: "strm".to_string(),
-            severity: "warn".to_string(),
-            id: None,
-            label: strm.lib.clone().unwrap_or_else(|| "strm".to_string()),
+            index: None,
+            label: strm.lib.clone(),
             message: strm
                 .error
                 .clone()
@@ -2102,7 +2375,7 @@ fn build_post_add_check(
     );
 
     AddNewCheckReport {
-        ok: error_count == 0 && suspicious_count == 0,
+        ok: error_count == 0,
         status: status.to_string(),
         item_success_count,
         item_error_count,
@@ -2265,9 +2538,13 @@ fn truncate(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AddNewPosterIssueReport, PosterTmdbAlias, infer_poster_tmdb, is_already_received_message,
-        poster_match_key,
+        AddNewAutoResolveReport, AddNewDedupReport, AddNewPosterAutoFixReport,
+        AddNewPosterIssueReport, AddNewPosterReport, AddNewScanReport, AddNewStrmReport,
+        AddNewTransferAction, AddNewTransferItemReport, AddNewTransferSummary, EmbyDuplicateRow,
+        PosterTmdbAlias, auto_resolve_old_rows, build_post_add_check, choose_auto_resolve_keep_row,
+        infer_poster_tmdb, is_already_received_message, poster_match_key,
     };
+    use crate::dedup::DedupRow;
     use crate::emby::EmbyItem;
     use std::collections::BTreeMap;
 
@@ -2324,5 +2601,197 @@ mod tests {
         );
 
         assert_eq!(inferred.map(|(tmdb, _)| tmdb), Some("292696".to_string()));
+    }
+
+    #[test]
+    fn post_add_check_keeps_suspicious_only_as_success_with_warning() {
+        let transfer = ok_transfer();
+        let mut strm = ok_strm();
+        strm.warnings
+            .push("STRM 生成结果为 0 new，请确认是否已有文件".to_string());
+        let dedup = ok_dedup();
+        let auto_resolve = AddNewAutoResolveReport::not_triggered();
+        let scan = ok_scan();
+        let poster = ok_poster();
+        let poster_auto_fix = AddNewPosterAutoFixReport::not_triggered();
+
+        let check = build_post_add_check(
+            &transfer,
+            &strm,
+            &dedup,
+            &auto_resolve,
+            &scan,
+            &poster,
+            &poster_auto_fix,
+        );
+
+        assert!(check.ok);
+        assert_eq!(check.status, "suspicious");
+        assert_eq!(check.item_error_count, 0);
+        assert_eq!(check.stage_error_count, 0);
+        assert_eq!(check.suspicious_count, 1);
+    }
+
+    #[test]
+    fn post_add_check_treats_strm_failure_as_stage_error() {
+        let transfer = ok_transfer();
+        let mut strm = ok_strm();
+        strm.ok = false;
+        strm.error = Some("permission denied".to_string());
+        let dedup = ok_dedup();
+        let auto_resolve = AddNewAutoResolveReport::not_triggered();
+        let scan = ok_scan();
+        let poster = ok_poster();
+        let poster_auto_fix = AddNewPosterAutoFixReport::not_triggered();
+
+        let check = build_post_add_check(
+            &transfer,
+            &strm,
+            &dedup,
+            &auto_resolve,
+            &scan,
+            &poster,
+            &poster_auto_fix,
+        );
+
+        assert!(!check.ok);
+        assert_eq!(check.status, "errors");
+        assert_eq!(check.item_error_count, 0);
+        assert_eq!(check.stage_error_count, 1);
+        assert_eq!(check.errors[0].stage, "strm");
+    }
+
+    #[test]
+    fn followup_update_prefers_new_folder_and_selects_same_library_old_versions() {
+        let rows = vec![
+            duplicate_row("电视剧追更", "旧版 [tmdbid-100]", "old-id", 24),
+            duplicate_row("电视剧追更", "新版 {tmdb-100}", "new-id", 30),
+            duplicate_row("2026完结剧集", "完结版 [tmdbid-100]", "archive-id", 30),
+        ];
+        let target_rows = rows
+            .iter()
+            .filter(|row| row.lib == "电视剧追更")
+            .collect::<Vec<_>>();
+        let mut new_folders = BTreeMap::new();
+        new_folders.insert("新版 {tmdb-100}".to_string(), 30usize);
+
+        let kept = choose_auto_resolve_keep_row(&target_rows, &new_folders).unwrap();
+        assert_eq!(kept.folder, "新版 {tmdb-100}");
+        let old = auto_resolve_old_rows("电视剧追更", kept, &rows, true);
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].folder, "旧版 [tmdbid-100]");
+    }
+
+    #[test]
+    fn followup_update_does_not_delete_equal_count_without_new_folder_signal() {
+        let rows = vec![
+            duplicate_row("电视剧追更", "A [tmdbid-100]", "a-id", 30),
+            duplicate_row("电视剧追更", "B [tmdbid-100]", "b-id", 30),
+        ];
+        let target_rows = rows.iter().collect::<Vec<_>>();
+        let new_folders = BTreeMap::new();
+
+        let kept = choose_auto_resolve_keep_row(&target_rows, &new_folders).unwrap();
+        let old = auto_resolve_old_rows("电视剧追更", kept, &rows, false);
+        assert!(old.is_empty());
+    }
+
+    fn duplicate_row(
+        lib: &str,
+        folder: &str,
+        item_id: &str,
+        episode_count: usize,
+    ) -> EmbyDuplicateRow {
+        EmbyDuplicateRow {
+            lib: lib.to_string(),
+            folder: folder.to_string(),
+            item_id: Some(item_id.to_string()),
+            episode_count,
+            public_row: DedupRow {
+                lib: lib.to_string(),
+                folder: folder.to_string(),
+                score: 0,
+                n: episode_count,
+                item_id: Some(item_id.to_string()),
+            },
+        }
+    }
+
+    fn ok_transfer() -> AddNewTransferSummary {
+        AddNewTransferSummary {
+            ok: true,
+            total: 1,
+            succeeded: 1,
+            failed: 0,
+            items: vec![AddNewTransferItemReport {
+                index: 0,
+                ok: true,
+                action: AddNewTransferAction::SaveShare,
+                label: Some("示例剧 S01E01".to_string()),
+                url: "https://115.com/s/example".to_string(),
+                response: None,
+                error: None,
+            }],
+        }
+    }
+
+    fn ok_strm() -> AddNewStrmReport {
+        AddNewStrmReport {
+            ok: true,
+            triggered: true,
+            lib: Some("电视剧追更".to_string()),
+            matched: 1,
+            new_count: 1,
+            new_folders: BTreeMap::new(),
+            attention: Vec::new(),
+            retried: false,
+            warnings: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn ok_dedup() -> AddNewDedupReport {
+        AddNewDedupReport {
+            ok: true,
+            triggered: true,
+            lib: Some("电视剧追更".to_string()),
+            dups_count: 0,
+            review_count: 0,
+            dups: Vec::new(),
+            review: Vec::new(),
+            warnings: Vec::new(),
+            error: None,
+        }
+    }
+
+    fn ok_scan() -> AddNewScanReport {
+        AddNewScanReport {
+            ok: true,
+            triggered: true,
+            mode: "library".to_string(),
+            lib: Some("电视剧追更".to_string()),
+            item_id: Some("lib-tv".to_string()),
+            code: Some(204),
+            delay_ms: 0,
+            warning: None,
+            error: None,
+        }
+    }
+
+    fn ok_poster() -> AddNewPosterReport {
+        AddNewPosterReport {
+            ok: true,
+            triggered: true,
+            status: "ok".to_string(),
+            scanned_libraries: 1,
+            scanned_items: 1,
+            issue_count: 0,
+            missing_primary_count: 0,
+            mismatch_count: 0,
+            truncated: false,
+            warnings: Vec::new(),
+            items: Vec::new(),
+            error: None,
+        }
     }
 }

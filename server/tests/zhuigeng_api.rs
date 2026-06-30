@@ -3,9 +3,10 @@ use emby_manager::{
     settings::Settings,
     state::AppState,
     zhuigeng::{
-        ZhuigengConfig, ZhuigengScanAiringResponse, ZhuigengScanAiringRow, execute_scan_airing_row,
-        zhuigeng_gaps_summary_with_config, zhuigeng_scan_airing_with_config,
-        zhuigeng_status_with_config,
+        ZhuigengConfig, ZhuigengItem, ZhuigengScanAiringResponse, ZhuigengScanAiringRow,
+        ZhuigengStatusResponse, ZhuigengWorkbenchLane, build_zhuigeng_workbench,
+        execute_scan_airing_row, zhuigeng_gaps_summary_with_config,
+        zhuigeng_scan_airing_with_config, zhuigeng_status_with_config,
     },
 };
 use sqlx::postgres::PgPoolOptions;
@@ -332,6 +333,74 @@ fn scheduler_scan_airing_detail_reports_real_execution_not_dry_run_preview() {
     assert!(detail.get("dry_run").is_none(), "{detail}");
 }
 
+#[test]
+fn workbench_groups_airing_archive_and_metadata_actions() {
+    let status = ZhuigengStatusResponse {
+        ok: true,
+        items: vec![
+            zhuigeng_item("追更库", "在更缺集", true, false, 2, "100", "在更缺集"),
+            zhuigeng_item("追更库", "完结可归档", false, true, 0, "200", "完结可归档"),
+            zhuigeng_item("追更库", "完结还缺", false, true, 1, "300", "完结还缺"),
+            zhuigeng_item("追更库", "缺元数据", true, false, 1, "", "缺元数据"),
+        ],
+        continuing: 2,
+        ended: 2,
+        total: 4,
+        copy_text: "求 在更缺集".to_string(),
+    };
+
+    let workbench = build_zhuigeng_workbench(status);
+
+    assert!(workbench.ok);
+    assert_eq!(workbench.counts.update_needed, 1);
+    assert_eq!(workbench.counts.archive_ready, 1);
+    assert_eq!(workbench.counts.complete_after_update, 1);
+    assert_eq!(workbench.counts.metadata_error, 1);
+    assert_eq!(workbench.counts.behind_total, 4);
+    assert!(workbench.note.contains("需更新 1"));
+
+    let update = workbench
+        .rows
+        .iter()
+        .find(|row| row.item.name == "在更缺集")
+        .unwrap();
+    assert_eq!(update.lane, ZhuigengWorkbenchLane::UpdateNeeded);
+    assert!(update.updateable);
+    assert_eq!(update.resource_query.as_deref(), Some("在更缺集 S01 E1-2"));
+
+    let archive = workbench
+        .rows
+        .iter()
+        .find(|row| row.item.name == "完结可归档")
+        .unwrap();
+    assert_eq!(archive.lane, ZhuigengWorkbenchLane::ArchiveReady);
+    assert!(archive.archiveable);
+
+    let complete_after_update = workbench
+        .rows
+        .iter()
+        .find(|row| row.item.name == "完结还缺")
+        .unwrap();
+    assert_eq!(
+        complete_after_update.lane,
+        ZhuigengWorkbenchLane::CompleteAfterUpdate
+    );
+
+    let metadata = workbench
+        .rows
+        .iter()
+        .find(|row| row.item.name == "缺元数据")
+        .unwrap();
+    assert_eq!(metadata.lane, ZhuigengWorkbenchLane::MetadataError);
+    assert!(
+        metadata
+            .blockers
+            .iter()
+            .any(|item| item.contains("缺少 TMDb Id")),
+        "{metadata:?}"
+    );
+}
+
 #[tokio::test]
 async fn missing_tmdb_key_falls_back_to_emby_status_and_virtual_episodes() {
     let libraries = r#"[{"ItemId":"lib-airing","Name":"追更库","CollectionType":"tvshows","Locations":["/strm/追更库"]}]"#;
@@ -448,6 +517,54 @@ fn scan_row(lib: &str, name: &str) -> ZhuigengScanAiringRow {
         new_count: 0,
         attention: Vec::new(),
         error: None,
+        err: None,
+    }
+}
+
+fn zhuigeng_item(
+    lib: &str,
+    name: &str,
+    continuing: bool,
+    ended: bool,
+    behind: usize,
+    tmdb: &str,
+    folder: &str,
+) -> ZhuigengItem {
+    ZhuigengItem {
+        lib: lib.to_string(),
+        name: name.to_string(),
+        id: Some(format!("id-{name}")),
+        folder: folder.to_string(),
+        tmdb: tmdb.to_string(),
+        tmdb_status: if ended {
+            "Ended".to_string()
+        } else {
+            "Returning Series".to_string()
+        },
+        state: if ended {
+            "ended".to_string()
+        } else {
+            "continuing".to_string()
+        },
+        continuing,
+        ended,
+        local_count: 1,
+        local_latest: None,
+        local_latest_episode: Some("S01E01".to_string()),
+        last_episode_to_air: None,
+        next_episode_to_air: None,
+        behind,
+        behind_hint: (behind > 0).then(|| format!("落后 {behind} 集")),
+        resource_hint: (behind > 0).then(|| {
+            format!(
+                "S01 E{}",
+                if behind == 1 {
+                    "1".to_string()
+                } else {
+                    format!("1-{behind}")
+                }
+            )
+        }),
         err: None,
     }
 }

@@ -284,6 +284,7 @@ export function ScanPanel() {
           recursive,
           full,
           generate_strm: true,
+          force_refresh: true,
           keyword: keyword.trim() || null,
           fullauto,
           cleanup_orphans: cleanupOrphans
@@ -364,7 +365,7 @@ export function ScanPanel() {
       <div className="scanToolbar">
         <div>
           <strong>扫描工作台</strong>
-          <span>可触发 Emby Refresh，也可生成缺失 strm；清孤儿会真实删除 STRM 文件，执行前需确认。</span>
+          <span>扫描入库会补缺失 STRM 并刷新 Emby；仅 Emby 刷新不会读取 115，也不会生成 STRM。</span>
         </div>
         <button className="btn ghost" onClick={() => loadLibraries()} disabled={loading}>
           <RefreshCw size={16} />
@@ -477,13 +478,13 @@ export function ScanPanel() {
       {error && <div className="notice warn whitespaceNotice">{error}</div>}
 
       <div className="scanActions">
-        <button className="btn" onClick={() => startScan('lib')} disabled={starting !== null || !selectedLib}>
-          <ScanLine size={16} />
-          {starting === 'lib' ? '创建中' : '刷新选中库'}
-        </button>
         <button className="btn" onClick={() => startScan('strm')} disabled={starting !== null || !selectedLib}>
           <FolderSync size={16} />
-          {starting === 'strm' ? '创建中' : '生成缺失 STRM'}
+          {starting === 'strm' ? '创建中' : '扫描入库'}
+        </button>
+        <button className="btn ghost" onClick={() => startScan('lib')} disabled={starting !== null || !selectedLib}>
+          <ScanLine size={16} />
+          {starting === 'lib' ? '创建中' : '仅 Emby 刷新'}
         </button>
         <button className="btn ghost" onClick={() => startScan('all')} disabled={starting !== null}>
           <FolderSync size={16} />
@@ -582,12 +583,6 @@ export function ScanPanel() {
           <span>目录 / 文件</span>
           <strong>{count(overview?.directories)} / {count(overview?.files)}</strong>
           <small>深度 {count(overview?.max_depth)}</small>
-        </article>
-        <article className={`statCard ${overview?.subtitle_files ? 'ok' : 'neutral'}`}>
-          <div><Database /></div>
-          <span>字幕</span>
-          <strong>{count(overview?.subtitle_files)}</strong>
-          <small>{bytes(overview?.subtitle_bytes)}</small>
         </article>
         <article className={`statCard ${overview?.warnings.length || overview?.truncated ? 'warn' : 'ok'}`}>
           <div><RefreshCw /></div>

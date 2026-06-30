@@ -3,31 +3,33 @@
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
-  color: #20231f;
-  background: #f3f5f2;
+  color: #17201d;
+  background: #f5f7f8;
   font-synthesis: none;
   line-height: 1.45;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  --bg: #f3f5f2;
+  --bg: #f5f7f8;
   --surface: #ffffff;
-  --surface-soft: #f7f8f4;
-  --line: #d8ded4;
-  --line-strong: #b7c0b0;
-  --text: #20231f;
-  --muted: #687063;
-  --muted-strong: #495145;
+  --surface-soft: #f8fafb;
+  --surface-raised: #ffffff;
+  --line: #d9e0e4;
+  --line-strong: #b9c5cb;
+  --text: #17201d;
+  --muted: #647077;
+  --muted-strong: #3f4b52;
   --accent: #087f73;
-  --accent-strong: #06675f;
-  --accent-soft: #dff3ef;
+  --accent-strong: #05675f;
+  --accent-soft: #dff4f0;
   --amber: #b66b00;
   --amber-soft: #fff1d6;
   --danger: #ba2d2d;
   --danger-soft: #ffe3e0;
-  --info: #3367b0;
+  --info: #315f9f;
   --info-soft: #e3eeff;
-  --shadow: 0 18px 45px rgba(21, 29, 20, 0.14);
-  --sidebar-width: 244px;
+  --shadow: 0 16px 38px rgba(22, 34, 39, 0.12);
+  --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --sidebar-width: 252px;
 }
 
 * {
@@ -44,9 +46,7 @@ body {
   min-height: 100vh;
   margin: 0;
   color: var(--text);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0) 320px),
-    var(--bg);
+  background: var(--bg);
 }
 
 button,
@@ -2628,6 +2628,148 @@ main {
   font-size: 12px;
 }
 
+.zhuigengCommandBar .sectionTitleRow {
+  align-items: flex-start;
+}
+
+.zhuigengLaneBlock {
+  gap: 12px;
+}
+
+.zhuigengWorkbenchList {
+  display: grid;
+  gap: 10px;
+}
+
+.zhuigengWorkbenchCard {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.zhuigengWorkbenchCard.warn {
+  border-color: #edcf95;
+  background: #fffaf0;
+}
+
+.zhuigengWorkbenchCard.ok {
+  border-color: #b9d7a7;
+  background: #f7fbf3;
+}
+
+.zhuigengWorkbenchCard.error {
+  border-color: #efb3ad;
+  background: var(--danger-soft);
+}
+
+.zhuigengCardHead,
+.zhuigengCardMeta,
+.zhuigengContextLine,
+.zhuigengCandidateList article > div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.zhuigengCardHead {
+  justify-content: space-between;
+}
+
+.zhuigengCardHead label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.zhuigengCardHead strong,
+.zhuigengWorkbenchCard p,
+.zhuigengContextLine strong,
+.zhuigengCandidateList strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.zhuigengCardMeta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.zhuigengWorkbenchCard p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.zhuigengCardActions {
+  justify-content: flex-start;
+}
+
+.zhuigengCandidates {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.zhuigengContextLine span,
+.zhuigengLibraryMatches span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.zhuigengLibraryMatches {
+  display: grid;
+  gap: 4px;
+}
+
+.zhuigengCandidateList {
+  display: grid;
+  gap: 8px;
+}
+
+.zhuigengCandidateList article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.zhuigengCandidateList article p {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.badge.best {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.badge.good {
+  background: #edf7df;
+  color: #53711f;
+}
+
+.badge.skip,
+.badge.neutral {
+  background: #edf0ea;
+  color: var(--muted-strong);
+}
+
 .insightList,
 .undoMiniList {
   display: grid;
@@ -3316,6 +3458,8 @@ main {
   .catalogTargetBar,
   .catalogContextHead,
   .catalogContextSummary,
+  .zhuigengCardHead,
+  .zhuigengCandidateList article,
   .c115Meta,
   .c115MetaActions,
   .c115TargetBar,
@@ -3391,5 +3535,806 @@ main {
     right: 10px;
     bottom: 10px;
     width: calc(100vw - 20px);
+  }
+}
+
+/* 2026 UI redesign: operational workspace shell + shared page primitives. */
+.app {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  background: var(--bg);
+}
+
+.sidebar {
+  padding: 14px 12px;
+  background: #fbfcfd;
+  border-right-color: #dbe2e6;
+  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.72) inset;
+}
+
+.brand {
+  min-height: 54px;
+  padding: 6px 8px 14px;
+}
+
+.brand strong {
+  font-size: 14px;
+}
+
+.sidebar nav {
+  display: grid;
+  gap: 14px;
+  padding: 14px 2px 8px;
+}
+
+.navSection {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.navGroupLabel {
+  padding: 0 9px 4px;
+  color: #7b878d;
+  font-size: 11px;
+  font-weight: 780;
+  line-height: 1.2;
+}
+
+.sidebar nav .navButton {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  color: #425057;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.navButton svg {
+  color: #74828a;
+}
+
+.sidebar nav .navButton:hover {
+  background: #eef3f5;
+  color: var(--text);
+}
+
+.sidebar nav .navButton:hover svg {
+  color: var(--accent);
+}
+
+.sidebar nav .navButton.active {
+  border-color: #a9d7ce;
+  background: #e7f6f3;
+  color: var(--accent-strong);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.navButton.active svg {
+  color: var(--accent-strong);
+}
+
+.navButton span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+main {
+  padding: 0 0 38px;
+  overflow-x: hidden;
+}
+
+.topbar {
+  min-height: 78px;
+  padding: 14px 30px 13px;
+  border-bottom-color: #dbe2e6;
+  background: rgba(245, 247, 248, 0.94);
+}
+
+.topbarTitle {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.topbarTitle > span {
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.topbar h1 {
+  font-size: 24px;
+}
+
+.topbar p {
+  margin-top: 1px;
+  font-size: 13px;
+}
+
+.topbarActions {
+  padding-top: 2px;
+}
+
+.userPill,
+.bell,
+.iconBtn {
+  border-color: #ccd6dc;
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.globalProgress {
+  right: 30px;
+  bottom: 6px;
+}
+
+.panel {
+  width: 100%;
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 22px 30px 44px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.btn {
+  min-height: 36px;
+  border-radius: 6px;
+  box-shadow: none;
+}
+
+.btn:hover:not(:disabled) {
+  transform: none;
+}
+
+.btn.ghost {
+  background: #fff;
+}
+
+.btn.danger:hover:not(:disabled) {
+  border-color: #9f2222;
+  background: #9f2222;
+}
+
+.input {
+  min-height: 36px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.notice {
+  margin-top: 12px;
+  border-radius: 6px;
+}
+
+.catalogPanel,
+.c115Panel,
+.scanPanel,
+.insightPanel,
+.managePanel,
+.settingsPanel,
+.schedulesPanel,
+.logsPanel,
+.usersPanel,
+.postersPanel,
+.readonlyPanel {
+  gap: 16px;
+}
+
+.catalogMeta,
+.c115Meta,
+.scanToolbar,
+.insightToolbar,
+.manageToolbar,
+.settingsToolbar,
+.schedulesToolbar,
+.logsToolbar,
+.postersToolbar,
+.readonlyToolbar,
+.usersToolbar {
+  min-height: 46px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.catalogMeta strong,
+.c115Meta strong,
+.scanToolbar strong,
+.insightToolbar strong,
+.manageToolbar strong,
+.settingsToolbar strong,
+.schedulesToolbar strong,
+.logsToolbar strong,
+.postersToolbar strong,
+.readonlyToolbar strong {
+  font-size: 16px;
+}
+
+.catalogSearchBar,
+.catalogTargetBar,
+.c115TargetBar,
+.c115ShareGrid,
+.c115OfflineBox,
+.logsFilters,
+.postersFilterBar,
+.readonlyFilter,
+.scanGrid,
+.cleanupControls,
+.scheduleEditor,
+.settingsBlock,
+.manageForm,
+.readonlyBlock,
+.scanLibraryCard,
+.c115SnapBox,
+.c115AutoCid {
+  border-color: #d8e1e6;
+  border-radius: 7px;
+  background: var(--surface);
+  box-shadow: 0 1px 0 rgba(21, 32, 39, 0.03);
+}
+
+.catalogSearchBar,
+.catalogTargetBar,
+.c115TargetBar,
+.c115ShareGrid,
+.c115OfflineBox,
+.logsFilters,
+.postersFilterBar,
+.readonlyFilter,
+.scanGrid,
+.cleanupControls {
+  padding: 14px;
+}
+
+.catalogSearchBar,
+.logsFilters {
+  grid-template-columns: minmax(320px, 1fr) minmax(150px, 190px) minmax(150px, 190px) auto;
+}
+
+.catalogTargetBar {
+  grid-template-columns: minmax(240px, 320px) minmax(170px, 220px) minmax(0, 1fr) auto;
+}
+
+.catalogAutoScan {
+  justify-self: start;
+  align-self: center;
+  min-width: max-content;
+  white-space: normal;
+}
+
+.catalogAutoScan span {
+  display: inline;
+}
+
+.catalogResultHead,
+.dedupBulkBar {
+  position: sticky;
+  top: 78px;
+  z-index: 6;
+  min-height: 50px;
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid #d1dbe1;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 8px 18px rgba(25, 36, 42, 0.07);
+}
+
+.catalogResultHead {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.catalogResultHead > span {
+  align-self: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.catalogResultActions,
+.inlineActions,
+.compactActions,
+.postersToolbarActions,
+.readonlyToolbarActions,
+.settingsActionRow,
+.userActions,
+.c115MetaActions {
+  gap: 8px;
+}
+
+.catalogTableWrap,
+.logsTableWrap,
+.usersTableWrap,
+.postersTableWrap {
+  border: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.dataTable {
+  border: 0;
+  border-radius: 0;
+}
+
+.dataTable th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: #f3f6f8;
+  color: #45535b;
+  letter-spacing: 0;
+}
+
+.dataTable tr:hover td {
+  background: #fbfdfe;
+}
+
+.catalogTable td {
+  vertical-align: middle;
+}
+
+.catalogTable th:nth-child(3),
+.catalogTable td:nth-child(3) {
+  width: 240px;
+}
+
+.catalogLink {
+  max-width: 340px;
+}
+
+.catalogLibraryContext {
+  border-radius: 7px;
+  background: #effaf7;
+}
+
+.catalogContextSummary div,
+.catalogContextItem,
+.catalogConfirm dl div,
+.miniStats span,
+.systemKeyValueGrid span,
+.pathCard,
+.todoItem,
+.issueList article,
+.sampleList article,
+.coverageList article,
+.libraryBars article,
+.statCard,
+.taskCard,
+.c115WizardDup,
+.scanList article,
+.insightList article,
+.undoMiniList article,
+.containerItem,
+.scheduleItem {
+  border-color: #dbe3e7;
+  background: #fff;
+}
+
+.statCard {
+  min-height: 96px;
+}
+
+.statCard strong {
+  font-size: 20px;
+}
+
+.c115TargetBar {
+  display: grid;
+  grid-template-columns: minmax(260px, 340px) minmax(170px, 220px) auto;
+}
+
+.c115ShareGrid {
+  grid-template-columns: minmax(360px, 1fr) minmax(140px, 180px) minmax(148px, auto);
+}
+
+.c115ActionStack {
+  align-self: stretch;
+  align-content: end;
+}
+
+.c115OfflineBox {
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) auto;
+}
+
+.c115SnapBox {
+  padding: 0;
+  overflow: hidden;
+}
+
+.c115SnapHead,
+.c115FileTools {
+  padding: 12px 14px;
+}
+
+.c115FileTools {
+  border-top: 1px solid var(--line);
+}
+
+.c115FileList {
+  max-height: 360px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+}
+
+.c115FileRow:hover {
+  background: #f8fbfc;
+}
+
+.c115AutoCid {
+  padding: 14px;
+}
+
+.scanGrid {
+  grid-template-columns: minmax(210px, 280px) minmax(170px, 1fr) minmax(190px, 1fr) repeat(4, auto) auto;
+}
+
+.createLibraryForm {
+  grid-template-columns: minmax(240px, 1fr) minmax(160px, 220px) auto;
+}
+
+.scanActions {
+  position: sticky;
+  top: 78px;
+  z-index: 5;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 18px rgba(25, 36, 42, 0.06);
+}
+
+.readonlySplit,
+.scanSplit {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.manageForms {
+  grid-template-columns: minmax(360px, 0.95fr) minmax(0, 1.25fr);
+}
+
+.manageForms > .manageForm:nth-child(3) {
+  order: -1;
+  grid-column: 1 / -1;
+}
+
+.manageForms > .manageForm:nth-child(3) label:has(select[size]) {
+  grid-column: 1 / -1;
+}
+
+.manageForms > .manageForm:nth-child(3) select[size] {
+  min-height: 132px;
+}
+
+.manageForm {
+  align-content: start;
+  padding: 14px;
+}
+
+.manageFormHead {
+  justify-content: space-between;
+  min-height: 34px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.manageTaskMeta {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.cleanupControls {
+  display: grid;
+  grid-template-columns: minmax(170px, 230px) minmax(86px, 112px) minmax(98px, 124px) minmax(230px, 1fr) minmax(170px, 220px) minmax(170px, 220px);
+}
+
+.cleanupControls label {
+  min-width: 0;
+}
+
+.cleanupControls > .btn {
+  justify-self: start;
+  min-width: 136px;
+  white-space: nowrap;
+}
+
+.cleanupDimensionGroup {
+  align-self: end;
+}
+
+.insightList.compact,
+.scanList,
+.sampleList,
+.containerList {
+  scrollbar-width: thin;
+}
+
+.dedupGroupCard {
+  transition: border-color 140ms ease, background 140ms ease;
+}
+
+.dedupGroupCard:has(.dedupPickRow.selected) {
+  border-color: #9bd0c7 !important;
+  background: #f5fcfa !important;
+}
+
+.dedupReviewSplit {
+  align-items: start;
+}
+
+.dedupReviewSplit .readonlyBlock {
+  min-height: 260px;
+}
+
+.dedupPickRow {
+  cursor: pointer;
+}
+
+.dedupPickRow.selected {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.taskList {
+  gap: 8px;
+  padding: 12px 14px 18px;
+}
+
+.taskCard {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 7px;
+}
+
+.taskMeta {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.drawer {
+  width: min(560px, 100vw);
+}
+
+.taskFilters {
+  padding-top: 14px;
+}
+
+.settingsGrid {
+  grid-template-columns: repeat(2, minmax(320px, 1fr));
+}
+
+.scheduleItem {
+  grid-template-columns: minmax(260px, 1fr) minmax(220px, auto) auto;
+}
+
+.postersFilterBar {
+  grid-template-columns: minmax(220px, 320px) minmax(130px, 170px) auto auto;
+}
+
+.logsTable,
+.undoTable,
+.usersTable,
+.postersTable,
+.catalogTable {
+  font-size: 13px;
+}
+
+.switchRow {
+  min-height: 36px;
+}
+
+@media (max-width: 1200px) {
+  .catalogSearchBar,
+  .catalogTargetBar,
+  .c115TargetBar,
+  .c115ShareGrid,
+  .c115OfflineBox,
+  .scanGrid,
+  .cleanupControls,
+  .manageForms,
+  .settingsGrid,
+  .scheduleFormGrid,
+  .scheduleItem,
+  .postersFilterBar,
+  .logsFilters {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .catalogSearchBar .btn,
+  .c115ShareGrid .c115ActionStack,
+  .cleanupControls .btn,
+  .scanGrid .btn {
+    align-self: end;
+  }
+
+  .catalogResultHead {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .catalogResultActions {
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 980px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+    max-width: 100vw;
+    overflow-x: hidden;
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 12;
+    width: 100%;
+    min-width: 0;
+    max-width: 100vw;
+    height: auto;
+    padding: 9px 12px;
+    overflow: hidden;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .brand {
+    min-height: 42px;
+    padding: 1px 4px 8px;
+  }
+
+  .sidebar nav {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    padding: 8px 0 0;
+    overflow-x: auto;
+  }
+
+  .navSection {
+    display: contents;
+  }
+
+  .navGroupLabel {
+    display: none;
+  }
+
+  .sidebar nav .navButton {
+    display: inline-flex;
+    flex: 0 0 auto;
+    width: auto;
+    min-width: max-content;
+    padding: 8px 10px;
+  }
+
+  .topbar {
+    position: static;
+    top: auto;
+    padding-inline: 18px;
+  }
+
+  main,
+  .topbar,
+  .panel {
+    width: 100%;
+    min-width: 0;
+    max-width: 100vw;
+  }
+
+  .panel {
+    padding: 18px 18px 36px;
+  }
+
+  .catalogResultHead,
+  .dedupBulkBar,
+  .scanActions {
+    top: 176px;
+  }
+}
+
+@media (max-width: 720px) {
+  .topbar {
+    top: auto;
+    flex-wrap: wrap;
+    padding: 12px 12px 14px;
+  }
+
+  .topbarActions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .panel {
+    padding: 14px 10px 30px;
+  }
+
+  .catalogSearchBar,
+  .catalogTargetBar,
+  .c115TargetBar,
+  .c115ShareGrid,
+  .c115OfflineBox,
+  .scanGrid,
+  .cleanupControls,
+  .readonlySplit,
+  .scanSplit,
+  .settingsGrid,
+  .scheduleFormGrid,
+  .scheduleItem,
+  .postersFilterBar,
+  .logsFilters,
+  .manageForms,
+  .statGrid,
+  .miniStats,
+  .metaColumns,
+  .sampleColumns,
+  .pathGrid,
+  .systemDetailGrid,
+  .systemKeyValueGrid,
+  .catalogContextSummary {
+    grid-template-columns: 1fr;
+  }
+
+  .catalogMeta,
+  .c115Meta,
+  .scanToolbar,
+  .insightToolbar,
+  .manageToolbar,
+  .settingsToolbar,
+  .schedulesToolbar,
+  .logsToolbar,
+  .postersToolbar,
+  .readonlyToolbar,
+  .usersToolbar,
+  .catalogResultHead,
+  .dedupBulkBar,
+  .scanActions,
+  .catalogResultActions,
+  .c115MetaActions,
+  .c115SnapHead,
+  .c115FileTools,
+  .logsTabs,
+  .readonlyToolbarActions,
+  .settingsBlockHead,
+  .scheduleEditorHead,
+  .postersResultHead,
+  .postersToolbarActions,
+  .modalActions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .catalogResultHead,
+  .dedupBulkBar,
+  .scanActions {
+    position: static;
+  }
+
+  .btn {
+    width: 100%;
+  }
+
+  .c115FileRow {
+    grid-template-columns: 24px 42px minmax(0, 1fr);
+  }
+
+  .c115FileRow em {
+    grid-column: 3;
+    text-align: left;
+  }
+
+  .taskMeta,
+  .manageTaskMeta {
+    grid-template-columns: 1fr 1fr;
   }
 }

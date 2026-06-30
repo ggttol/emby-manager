@@ -10,10 +10,9 @@ import {
   ListChecks,
   RefreshCw,
   Server,
-  Subtitles,
   Webhook
 } from 'lucide-react';
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from 'react';
+import { ReactNode, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
 import { useToast } from './Toast';
@@ -25,8 +24,6 @@ type GapsSummaryResponse = components['schemas']['GapsSummaryResponse'];
 type InsightMeta = components['schemas']['InsightMeta'];
 type InsightTodo = components['schemas']['InsightTodo'];
 type PathStatus = components['schemas']['PathStatus'];
-type StrmListResponse = components['schemas']['StrmListResponse'];
-type StrmOverview = components['schemas']['StrmOverview'];
 type SystemSummary = components['schemas']['SystemSummary'];
 type TaskHistorySummary = components['schemas']['TaskHistorySummary'];
 type DockerContainerSummary = components['schemas']['DockerContainerSummary'];
@@ -379,56 +376,15 @@ export function DashboardPanel() {
         <StatCard icon={<CheckCircle2 />} label="自动去重" value={count(dashboardTodo.dups_auto)} tone={dashboardTodo.dups_auto ? 'warn' : 'ok'} hint="可自动处理组" />
         <StatCard icon={<AlertTriangle />} label="人工重复" value={count(dashboardTodo.dups_review)} tone={dashboardTodo.dups_review ? 'warn' : 'ok'} hint="需人工 review" />
         <StatCard icon={<Webhook />} label="在更剧" value={count(dashboardTodo.airing_count)} tone={dashboardTodo.airing_count ? 'warn' : 'ok'} hint="追更 continuing" />
-        <StatCard icon={<FileText />} label="strm / 字幕" value={`${count(cleanup?.strm?.strm_files)} / ${count(cleanup?.strm?.subtitle_files)}`} hint={cleanup?.strm?.root || system?.strm_root} />
+        <StatCard icon={<FileText />} label="strm" value={count(cleanup?.strm?.strm_files)} hint={cleanup?.strm?.root || system?.strm_root} />
         <StatCard icon={<Webhook />} label="Autostrm unmatched" value={count(autostrm?.unmatched?.total)} tone={autostrm?.unmatched?.total ? 'warn' : 'ok'} hint={`${count(autostrm?.seen?.total)} seen`} />
       </div>
       <WarningList warnings={warnings} />
-      <DashboardTodoParityBlock todo={dashboardTodo} />
       <section className="readonlyBlock">
         <h2>待处理信号</h2>
         <TodoList items={todos} empty="当前只读预检没有发现待处理信号" />
       </section>
       <TaskHistory task={cleanup?.task_history} />
-    </section>
-  );
-}
-
-function DashboardTodoParityBlock({ todo }: { todo: DashboardTodoParity }) {
-  const libs = Object.entries(todo.noposter_by_lib).sort((left, right) => right[1] - left[1]);
-  const noRatingLibs = Object.entries(todo.no_rating_by_lib).sort((left, right) => right[1] - left[1]);
-  if (!todo.noposter && !todo.no_rating && !todo.dups_auto && !todo.dups_review && !todo.airing_count && libs.length === 0 && noRatingLibs.length === 0) {
-    return null;
-  }
-  return (
-    <section className="readonlyBlock">
-      <h2>旧版待办计数</h2>
-      <div className="miniStats">
-        <span><strong>{count(todo.noposter)}</strong>无海报</span>
-        <span><strong>{count(todo.no_rating)}</strong>无评分</span>
-        <span><strong>{count(todo.dups_auto)}</strong>自动去重</span>
-        <span><strong>{count(todo.dups_review)}</strong>人工重复</span>
-        <span><strong>{count(todo.airing_count)}</strong>在更剧</span>
-      </div>
-      {libs.length > 0 && (
-        <div className="libraryBars">
-          {libs.slice(0, 6).map(([lib, total]) => (
-            <article key={lib}>
-              <strong>{lib}</strong>
-              <span>无海报 {count(total)}</span>
-            </article>
-          ))}
-        </div>
-      )}
-      {noRatingLibs.length > 0 && (
-        <div className="libraryBars">
-          {noRatingLibs.slice(0, 6).map(([lib, total]) => (
-            <article key={`rating-${lib}`}>
-              <strong>{lib}</strong>
-              <span>无评分 {count(total)}</span>
-            </article>
-          ))}
-        </div>
-      )}
     </section>
   );
 }
@@ -670,142 +626,6 @@ function PathCard({ path }: { path: PathStatus }) {
       )}
       {path.warnings.map((warning) => <p key={warning}>{warning}</p>)}
     </article>
-  );
-}
-
-export function SubtitlesPanel() {
-  const [lib, setLib] = useState('');
-  const [response, setResponse] = useState<StrmListResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const toast = useToast();
-
-  const overview = response?.overview || null;
-
-  const load = async (nextLib = lib) => {
-    setLoading(true);
-    setError('');
-    try {
-      const params = new URLSearchParams({ overview: 'true', overview_depth: '8', sample_limit: '40', limit: '1' });
-      if (nextLib.trim()) params.set('lib', nextLib.trim());
-      setResponse(await api<StrmListResponse>(`/api/v2/libraries/strm?${params.toString()}`));
-    } catch (e) {
-      const message = errorMessage(e);
-      setError(message);
-      toast.push(`字幕概览加载失败：${message}`, 'error');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    load('');
-  }, []);
-
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    load(lib);
-  };
-
-  return (
-    <section className="readonlyPanel">
-      <div className="readonlyToolbar">
-        <div>
-          <strong>外挂字幕概览</strong>
-          <span>只统计文件名、扩展名和大小，不读取 .strm 内容。</span>
-        </div>
-        <button className="btn ghost" onClick={() => load(lib)} disabled={loading}>
-          <RefreshCw size={16} />
-          {loading ? '加载中' : '刷新'}
-        </button>
-      </div>
-      <form className="readonlyFilter" onSubmit={submit}>
-        <label>
-          <span>库名</span>
-          <input className="input" aria-label="字幕库名" value={lib} onChange={(event) => setLib(event.target.value)} placeholder="留空统计全部 strm 根" />
-        </label>
-        <button className="btn" disabled={loading}>查看概览</button>
-      </form>
-      {error && <div className="notice warn">{error}</div>}
-      <div className="statGrid">
-        <StatCard icon={<FileText />} label=".strm" value={count(overview?.strm_files)} hint={bytes(overview?.strm_bytes)} />
-        <StatCard icon={<Subtitles />} label="字幕文件" value={count(overview?.subtitle_files)} tone={overview?.subtitle_files ? 'ok' : 'warn'} hint={bytes(overview?.subtitle_bytes)} />
-        <StatCard icon={<CheckCircle2 />} label="覆盖率" value={percent(overview?.subtitle_coverage_percent)} tone={overview?.strm_without_subtitles ? 'warn' : 'ok'} hint={`${count(overview?.strm_with_subtitles)} 有字幕 / ${count(overview?.strm_without_subtitles)} 缺字幕`} />
-        <StatCard icon={<HardDrive />} label="其他文件" value={count(overview?.other_files)} hint={`${count(overview?.directories)} 目录`} />
-        <StatCard icon={<AlertTriangle />} label="截断" value={overview?.truncated ? '是' : '否'} tone={overview?.truncated ? 'warn' : 'ok'} hint={`上限 ${count(overview?.entry_limit)}`} />
-      </div>
-      <WarningList warnings={overview?.warnings || []} />
-      <SubtitleDetails overview={overview} />
-    </section>
-  );
-}
-
-function SubtitleDetails({ overview }: { overview: StrmOverview | null }) {
-  if (!overview) return <div className="empty inlineEmpty">等待字幕统计数据</div>;
-  const subtitleExtensions = overview.subtitle_extensions || [];
-  const subtitleLanguages = overview.subtitle_languages || [];
-  const libraryCoverage = overview.library_coverage || [];
-  const missingSubtitleSamples = overview.missing_subtitle_samples || [];
-  const samples = overview.samples || [];
-  return (
-    <div className="readonlySplit">
-      <section className="readonlyBlock">
-        <h2>字幕扩展</h2>
-        <div className="extensionList">
-          {subtitleExtensions.map((item) => (
-            <span key={item.extension}><strong>.{item.extension}</strong>{count(item.count)}</span>
-          ))}
-          {subtitleExtensions.length === 0 && <div className="empty inlineEmpty">没有发现外挂字幕扩展</div>}
-        </div>
-      </section>
-      <section className="readonlyBlock">
-        <h2>语言</h2>
-        <div className="extensionList">
-          {subtitleLanguages.map((item) => (
-            <span key={item.language}><strong>{item.language}</strong>{count(item.count)}</span>
-          ))}
-          {subtitleLanguages.length === 0 && <div className="empty inlineEmpty">没有语言标签</div>}
-        </div>
-      </section>
-      <section className="readonlyBlock">
-        <h2>按库覆盖</h2>
-        <div className="coverageList">
-          {libraryCoverage.map((item) => (
-            <article key={item.library}>
-              <strong>{item.library}</strong>
-              <span>{percent(item.coverage_percent)}</span>
-              <small>{count(item.with_subtitles)} / {count(item.strm_files)} 有字幕，缺 {count(item.missing_subtitles)}</small>
-            </article>
-          ))}
-          {libraryCoverage.length === 0 && <div className="empty inlineEmpty">没有 .strm 可统计</div>}
-        </div>
-      </section>
-      <section className="readonlyBlock">
-        <h2>样例</h2>
-        <div className="sampleList">
-          {samples.map((sample) => (
-            <article key={`${sample.kind}-${sample.rel_path}`}>
-              <span className="badge">{sample.kind}</span>
-              <strong>{sample.rel_path}</strong>
-              <small>.{sample.extension || 'unknown'} · {bytes(sample.size)}</small>
-            </article>
-          ))}
-          {samples.length === 0 && <div className="empty inlineEmpty">没有样例</div>}
-        </div>
-      </section>
-      <section className="readonlyBlock">
-        <h2>缺字幕样例</h2>
-        <div className="sampleList">
-          {missingSubtitleSamples.map((sample) => (
-            <article key={sample}>
-              <span className="badge warn">missing</span>
-              <strong>{sample}</strong>
-            </article>
-          ))}
-          {missingSubtitleSamples.length === 0 && <div className="empty inlineEmpty">没有缺字幕样例</div>}
-        </div>
-      </section>
-    </div>
   );
 }
 

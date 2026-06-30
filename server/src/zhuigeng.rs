@@ -1,9 +1,14 @@
 use crate::{
+    catalog::{
+        self, CatalogItem, CatalogRemoteSearchQuery, CatalogRemoteSearchResponse,
+        CatalogTransferPlanItem, extract_episode_spans,
+    },
     config_store,
     error::{AppError, AppResult},
     media_fs,
     state::AppState,
     tasks::{self, TaskRun},
+    wizard::{self, AddNewItem, AddNewRequest, AddNewTarget},
 };
 use axum::{
     Json, Router,
@@ -14,7 +19,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sqlx::PgPool;
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use tokio::{sync::Semaphore, task::JoinSet};
 use uuid::Uuid;
 
 const DEFAULT_EMBY_URL: &str = "http://127.0.0.1:8096/emby";
@@ -129,6 +135,105 @@ pub struct ZhuigengGapRow {
     pub behind: usize,
 }
 
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ZhuigengWorkbenchResponse {
+    pub ok: bool,
+    pub status: ZhuigengStatusResponse,
+    pub rows: Vec<ZhuigengWorkbenchRow>,
+    pub counts: ZhuigengWorkbenchCounts,
+    pub copy_text: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, utoipa::ToSchema)]
+pub struct ZhuigengWorkbenchCounts {
+    pub total: usize,
+    pub healthy_airing: usize,
+    pub update_needed: usize,
+    pub archive_ready: usize,
+    pub complete_after_update: usize,
+    pub metadata_error: usize,
+    pub target_error: usize,
+    pub unknown: usize,
+    pub behind_total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ZhuigengWorkbenchRow {
+    pub item: ZhuigengItem,
+    pub lane: ZhuigengWorkbenchLane,
+    pub priority: i32,
+    pub action: String,
+    pub resource_query: Option<String>,
+    pub archiveable: bool,
+    pub updateable: bool,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ZhuigengWorkbenchLane {
+    HealthyAiring,
+    UpdateNeeded,
+    ArchiveReady,
+    CompleteAfterUpdate,
+    MetadataError,
+    TargetError,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ZhuigengItemRef {
+    pub lib: String,
+    pub name: String,
+    pub id: Option<String>,
+    pub folder: Option<String>,
+    pub tmdb: Option<String>,
+    pub behind: Option<usize>,
+    pub resource_hint: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ZhuigengResourcePlanRequest {
+    pub item: ZhuigengItemRef,
+    pub limit: Option<i64>,
+    pub exact: Option<bool>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ZhuigengResourcePlanResponse {
+    pub ok: bool,
+    pub item: ZhuigengItemRef,
+    pub query: String,
+    pub missing_hint: Option<String>,
+    pub fallback_queries: Vec<String>,
+    pub search: CatalogRemoteSearchResponse,
+    pub recommended: Option<CatalogItem>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ZhuigengUpdateExecuteRequest {
+    pub item: ZhuigengItemRef,
+    pub candidate: CatalogTransferPlanItem,
+    pub target: Option<AddNewTarget>,
+    pub delay_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ZhuigengArchiveExecuteRequest {
+    pub to_lib: String,
+    #[serde(default)]
+    pub items: Vec<ZhuigengItemRef>,
+    pub on_conflict: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ZhuigengArchiveExecuteResponse {
+    pub ok: bool,
+    pub total: usize,
+    pub tasks: Vec<TaskRun>,
+}
+
 #[derive(Debug, Deserialize)]
 struct EmbyVirtualFolderLite {
     #[serde(rename = "ItemId")]
@@ -220,6 +325,10 @@ struct LocalEpisodeSummary {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v2/zhuigeng", get(status))
+        .route("/api/v2/zhuigeng/workbench", get(workbench))
+        .route("/api/v2/zhuigeng/resource-plan", post(resource_plan))
+        .route("/api/v2/zhuigeng/update/execute", post(update_execute))
+        .route("/api/v2/zhuigeng/archive/execute", post(archive_execute))
         .route("/api/v2/zhuigeng/scan-airing", post(scan_airing))
         .route("/api/v2/zhuigeng/scan_airing", post(scan_airing))
         .route("/api/v2/zhuigeng/gaps-summary", post(gaps_summary))
@@ -232,6 +341,41 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<ZhuigengSta
     Ok(Json(
         zhuigeng_status_with_config(config, state.http.clone()).await?,
     ))
+}
+
+#[utoipa::path(get, path = "/api/v2/zhuigeng/workbench", tag = "zhuigeng", responses((status = 200, body = ZhuigengWorkbenchResponse)))]
+pub async fn workbench(
+    State(state): State<AppState>,
+) -> AppResult<Json<ZhuigengWorkbenchResponse>> {
+    let config = zhuigeng_config_from_state(&state).await?;
+    let status = zhuigeng_status_with_config(config, state.http.clone()).await?;
+    let status = enrich_zhuigeng_status_with_catalog(&state, status).await;
+    Ok(Json(build_zhuigeng_workbench(status)))
+}
+
+#[utoipa::path(post, path = "/api/v2/zhuigeng/resource-plan", tag = "zhuigeng", request_body = ZhuigengResourcePlanRequest, responses((status = 200, body = ZhuigengResourcePlanResponse)))]
+pub async fn resource_plan(
+    State(state): State<AppState>,
+    Json(req): Json<ZhuigengResourcePlanRequest>,
+) -> AppResult<Json<ZhuigengResourcePlanResponse>> {
+    Ok(Json(zhuigeng_resource_plan_for_state(&state, req).await?))
+}
+
+#[utoipa::path(post, path = "/api/v2/zhuigeng/update/execute", tag = "zhuigeng", request_body = ZhuigengUpdateExecuteRequest, responses((status = 200, body = TaskRun)))]
+pub async fn update_execute(
+    State(state): State<AppState>,
+    Json(req): Json<ZhuigengUpdateExecuteRequest>,
+) -> AppResult<Json<TaskRun>> {
+    let task = zhuigeng_update_execute_for_state(state, req).await?;
+    Ok(Json(task))
+}
+
+#[utoipa::path(post, path = "/api/v2/zhuigeng/archive/execute", tag = "zhuigeng", request_body = ZhuigengArchiveExecuteRequest, responses((status = 200, body = ZhuigengArchiveExecuteResponse)))]
+pub async fn archive_execute(
+    State(state): State<AppState>,
+    Json(req): Json<ZhuigengArchiveExecuteRequest>,
+) -> AppResult<Json<ZhuigengArchiveExecuteResponse>> {
+    Ok(Json(zhuigeng_archive_execute_for_state(state, req).await?))
 }
 
 #[utoipa::path(post, path = "/api/v2/zhuigeng/scan-airing", tag = "zhuigeng", responses((status = 200, body = TaskRun)))]
@@ -615,6 +759,583 @@ pub async fn zhuigeng_gaps_summary_for_state(
         total: response.total,
         copy_text: response.copy_text,
     })
+}
+
+async fn enrich_zhuigeng_status_with_catalog(
+    state: &AppState,
+    mut status: ZhuigengStatusResponse,
+) -> ZhuigengStatusResponse {
+    let semaphore = Arc::new(Semaphore::new(4));
+    let mut jobs = JoinSet::new();
+    for (index, item) in status.items.iter().enumerate() {
+        if !should_probe_resource_catalog(item) {
+            continue;
+        }
+        let item_ref = ZhuigengItemRef {
+            lib: item.lib.clone(),
+            name: item.name.clone(),
+            id: item.id.clone(),
+            folder: non_empty_trimmed(&item.folder).map(ToString::to_string),
+            tmdb: non_empty_trimmed(&item.tmdb).map(ToString::to_string),
+            behind: Some(item.behind),
+            resource_hint: item.resource_hint.clone(),
+        };
+        let query = build_zhuigeng_resource_query(&item_ref);
+        if query.trim().is_empty() {
+            continue;
+        }
+        let state = state.clone();
+        let series = item.name.clone();
+        let semaphore = semaphore.clone();
+        jobs.spawn(async move {
+            let Ok(_permit) = semaphore.acquire_owned().await else {
+                return (index, series, None);
+            };
+            match run_zhuigeng_catalog_search(&state, &query, 12, Some(false)).await {
+                Ok(search) => (index, series, Some(search.items)),
+                Err(err) => {
+                    tracing::warn!(
+                        series = %series,
+                        error = %err,
+                        "zhuigeng resource inference failed; keeping tmdb status"
+                    );
+                    (index, series, None)
+                }
+            }
+        });
+    }
+    while let Some(joined) = jobs.join_next().await {
+        if let Ok((index, _series, Some(items))) = joined
+            && let Some(item) = status.items.get_mut(index)
+        {
+            apply_resource_episode_inference(item, &items);
+        }
+    }
+    refresh_zhuigeng_status_counts(&mut status);
+    status
+}
+
+fn should_probe_resource_catalog(item: &ZhuigengItem) -> bool {
+    item.err.is_none()
+        && item.local_count > 0
+        && !item.name.trim().is_empty()
+        && !item.lib.trim().is_empty()
+        && (item.continuing || item.behind == 0 || item.last_episode_to_air.is_none())
+}
+
+fn refresh_zhuigeng_status_counts(status: &mut ZhuigengStatusResponse) {
+    status.continuing = status.items.iter().filter(|item| item.continuing).count();
+    status.ended = status.items.iter().filter(|item| item.ended).count();
+    status.total = status.items.len();
+    status.copy_text = build_copy_text(&status.items, false);
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResourceEpisodeInference {
+    remote_max: i32,
+    remote_title: Option<String>,
+    complete_max: Option<i32>,
+    complete_title: Option<String>,
+}
+
+fn apply_resource_episode_inference(item: &mut ZhuigengItem, resources: &[CatalogItem]) {
+    let Some(inference) = infer_resource_episodes(resources) else {
+        return;
+    };
+    let Some(local_max) = local_latest_episode_number(item) else {
+        return;
+    };
+    if local_max <= 0 {
+        return;
+    }
+
+    if inference.remote_max > local_max {
+        let missing = ((local_max + 1)..=inference.remote_max)
+            .map(|number| (Some(1), number))
+            .collect::<Vec<_>>();
+        let resource_hint = format_episode_segments(&missing);
+        item.behind = missing.len();
+        item.behind_hint = Some(format!(
+            "资源侧发现更新到 E{}，本地到 E{} · {}",
+            inference.remote_max, local_max, resource_hint
+        ));
+        item.resource_hint = Some(resource_hint);
+        if inference.complete_max == Some(inference.remote_max) {
+            mark_resource_inferred_ended(
+                item,
+                format!(
+                    "资源侧检测到全 {} 集，本地还差 {} 集，补齐后可归档",
+                    inference.remote_max, item.behind
+                ),
+            );
+        } else {
+            item.continuing = true;
+            item.ended = false;
+            item.state = "continuing".to_string();
+        }
+        return;
+    }
+
+    if let Some(complete_max) = inference.complete_max
+        && complete_max <= local_max
+    {
+        let title = inference
+            .complete_title
+            .or(inference.remote_title)
+            .unwrap_or_else(|| "资源标题".to_string());
+        mark_resource_inferred_ended(
+            item,
+            format!("资源侧检测到全 {complete_max} 集，本地已到 E{local_max}，建议归档 · {title}"),
+        );
+        item.behind = 0;
+        item.resource_hint = None;
+    }
+}
+
+fn mark_resource_inferred_ended(item: &mut ZhuigengItem, hint: String) {
+    item.continuing = false;
+    item.ended = true;
+    item.state = "ended_by_resource".to_string();
+    item.behind_hint = Some(hint);
+    if !item.tmdb_status.contains("资源推断完结") {
+        item.tmdb_status = format!("{} · 资源推断完结", item.tmdb_status);
+    }
+}
+
+fn infer_resource_episodes(resources: &[CatalogItem]) -> Option<ResourceEpisodeInference> {
+    let mut inference = ResourceEpisodeInference::default();
+    for resource in resources.iter().filter(|resource| resource.transfer) {
+        let spans = extract_episode_spans(&resource.name);
+        let Some(max_episode) = spans.iter().map(|span| span.end).max() else {
+            continue;
+        };
+        if max_episode <= 0 {
+            continue;
+        }
+        if max_episode > inference.remote_max {
+            inference.remote_max = max_episode;
+            inference.remote_title = Some(resource.name.clone());
+        }
+        let covers_from_start = spans
+            .iter()
+            .any(|span| span.start <= 1 && span.end == max_episode);
+        if covers_from_start
+            && resource_title_confirms_complete(&resource.name)
+            && inference
+                .complete_max
+                .is_none_or(|current| max_episode > current)
+        {
+            inference.complete_max = Some(max_episode);
+            inference.complete_title = Some(resource.name.clone());
+        }
+    }
+    (inference.remote_max > 0 || inference.complete_max.is_some()).then_some(inference)
+}
+
+fn resource_title_confirms_complete(title: &str) -> bool {
+    title.contains("完结")
+        || title.contains("全集")
+        || title.contains("全剧终")
+        || title.contains("已完结")
+        || ((title.contains('全') || title.contains('共')) && title.contains('集'))
+}
+
+fn local_latest_episode_number(item: &ZhuigengItem) -> Option<i32> {
+    item.local_latest_episode
+        .as_deref()
+        .and_then(episode_number_from_label)
+        .or_else(|| (item.local_count > 0).then_some(item.local_count as i32))
+}
+
+fn episode_number_from_label(label: &str) -> Option<i32> {
+    let lower = label.to_ascii_lowercase();
+    if let Some((_, tail)) = lower.rsplit_once('e') {
+        let digits = tail
+            .chars()
+            .take_while(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        if !digits.is_empty() {
+            return digits.parse().ok();
+        }
+    }
+    let digits = lower
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+pub fn build_zhuigeng_workbench(status: ZhuigengStatusResponse) -> ZhuigengWorkbenchResponse {
+    let mut rows = status
+        .items
+        .iter()
+        .cloned()
+        .map(build_zhuigeng_workbench_row)
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .priority
+            .cmp(&left.priority)
+            .then_with(|| left.item.lib.cmp(&right.item.lib))
+            .then_with(|| left.item.name.cmp(&right.item.name))
+    });
+    let counts = summarize_workbench_counts(&rows);
+    let copy_text = status.copy_text.clone();
+    let note = format!(
+        "已按追更运营流分组: 需更新 {}，补齐后归档 {}，可归档 {}，异常 {}",
+        counts.update_needed,
+        counts.complete_after_update,
+        counts.archive_ready,
+        counts.metadata_error + counts.target_error
+    );
+    ZhuigengWorkbenchResponse {
+        ok: status.ok,
+        status,
+        rows,
+        counts,
+        copy_text,
+        note,
+    }
+}
+
+fn build_zhuigeng_workbench_row(item: ZhuigengItem) -> ZhuigengWorkbenchRow {
+    let mut blockers = Vec::new();
+    if let Some(err) = item.err.as_deref().and_then(non_empty_trimmed) {
+        blockers.push(err.to_string());
+    }
+    if item.tmdb.trim().is_empty() {
+        blockers.push("缺少 TMDb Id，转存后可能无法自动刮削海报".to_string());
+    }
+    if item.lib.trim().is_empty() {
+        blockers.push("缺少来源库，无法确定更新或归档目标".to_string());
+    }
+    if item.name.trim().is_empty() {
+        blockers.push("缺少剧名，无法找资源".to_string());
+    }
+
+    let has_archive_target = item.id.as_deref().and_then(non_empty_trimmed).is_some()
+        && !item.folder.as_str().trim().is_empty();
+    let updateable = item.behind > 0
+        && !item.name.as_str().trim().is_empty()
+        && !item.lib.as_str().trim().is_empty();
+    let lane = if item.err.is_some() {
+        ZhuigengWorkbenchLane::MetadataError
+    } else if item.lib.trim().is_empty() || item.name.trim().is_empty() {
+        ZhuigengWorkbenchLane::TargetError
+    } else if item.tmdb.trim().is_empty() {
+        ZhuigengWorkbenchLane::MetadataError
+    } else if item.ended && item.behind == 0 {
+        if has_archive_target {
+            ZhuigengWorkbenchLane::ArchiveReady
+        } else {
+            ZhuigengWorkbenchLane::TargetError
+        }
+    } else if item.ended && item.behind > 0 {
+        ZhuigengWorkbenchLane::CompleteAfterUpdate
+    } else if item.continuing && item.behind > 0 {
+        ZhuigengWorkbenchLane::UpdateNeeded
+    } else if item.continuing {
+        ZhuigengWorkbenchLane::HealthyAiring
+    } else {
+        ZhuigengWorkbenchLane::Unknown
+    };
+
+    if matches!(lane, ZhuigengWorkbenchLane::TargetError) && !has_archive_target && item.ended {
+        blockers.push("完结归档需要 Emby item id 和媒体文件夹名".to_string());
+    }
+
+    let resource_query = updateable.then(|| {
+        build_zhuigeng_resource_query(&ZhuigengItemRef {
+            lib: item.lib.clone(),
+            name: item.name.clone(),
+            id: item.id.clone(),
+            folder: non_empty_trimmed(&item.folder).map(ToString::to_string),
+            tmdb: non_empty_trimmed(&item.tmdb).map(ToString::to_string),
+            behind: Some(item.behind),
+            resource_hint: item.resource_hint.clone(),
+        })
+    });
+    let archiveable = matches!(lane, ZhuigengWorkbenchLane::ArchiveReady);
+    let priority = workbench_lane_priority(&lane) + (item.behind.min(99) as i32);
+    let action = match lane {
+        ZhuigengWorkbenchLane::HealthyAiring => "等待下一集".to_string(),
+        ZhuigengWorkbenchLane::UpdateNeeded => "找资源并一条龙更新".to_string(),
+        ZhuigengWorkbenchLane::ArchiveReady => "一键归档到完结库".to_string(),
+        ZhuigengWorkbenchLane::CompleteAfterUpdate => "先补齐缺集，完成后归档".to_string(),
+        ZhuigengWorkbenchLane::MetadataError => "先修复 TMDb/元数据".to_string(),
+        ZhuigengWorkbenchLane::TargetError => "补齐路径或库配置".to_string(),
+        ZhuigengWorkbenchLane::Unknown => "人工确认状态".to_string(),
+    };
+
+    ZhuigengWorkbenchRow {
+        item,
+        lane,
+        priority,
+        action,
+        resource_query,
+        archiveable,
+        updateable,
+        blockers,
+    }
+}
+
+fn workbench_lane_priority(lane: &ZhuigengWorkbenchLane) -> i32 {
+    match lane {
+        ZhuigengWorkbenchLane::MetadataError => 900,
+        ZhuigengWorkbenchLane::TargetError => 850,
+        ZhuigengWorkbenchLane::CompleteAfterUpdate => 760,
+        ZhuigengWorkbenchLane::UpdateNeeded => 720,
+        ZhuigengWorkbenchLane::ArchiveReady => 640,
+        ZhuigengWorkbenchLane::HealthyAiring => 200,
+        ZhuigengWorkbenchLane::Unknown => 100,
+    }
+}
+
+fn summarize_workbench_counts(rows: &[ZhuigengWorkbenchRow]) -> ZhuigengWorkbenchCounts {
+    let mut counts = ZhuigengWorkbenchCounts {
+        total: rows.len(),
+        ..ZhuigengWorkbenchCounts::default()
+    };
+    for row in rows {
+        counts.behind_total += row.item.behind;
+        match row.lane {
+            ZhuigengWorkbenchLane::HealthyAiring => counts.healthy_airing += 1,
+            ZhuigengWorkbenchLane::UpdateNeeded => counts.update_needed += 1,
+            ZhuigengWorkbenchLane::ArchiveReady => counts.archive_ready += 1,
+            ZhuigengWorkbenchLane::CompleteAfterUpdate => counts.complete_after_update += 1,
+            ZhuigengWorkbenchLane::MetadataError => counts.metadata_error += 1,
+            ZhuigengWorkbenchLane::TargetError => counts.target_error += 1,
+            ZhuigengWorkbenchLane::Unknown => counts.unknown += 1,
+        }
+    }
+    counts
+}
+
+pub async fn zhuigeng_resource_plan_for_state(
+    state: &AppState,
+    req: ZhuigengResourcePlanRequest,
+) -> AppResult<ZhuigengResourcePlanResponse> {
+    let query = build_zhuigeng_resource_query(&req.item);
+    if query.trim().is_empty() {
+        return Err(AppError::BadRequest("剧名为空，无法找资源".to_string()));
+    }
+    let limit = req.limit.unwrap_or(24).clamp(1, 80);
+    let mut fallback_queries = Vec::new();
+    let mut search = run_zhuigeng_catalog_search(state, &query, limit, req.exact).await?;
+    let name_query = req.item.name.trim().to_string();
+    if search.items.is_empty() && !name_query.is_empty() && name_query != query {
+        fallback_queries.push(name_query.clone());
+        search = run_zhuigeng_catalog_search(state, &name_query, limit, req.exact).await?;
+    }
+    let recommended = choose_zhuigeng_resource_candidate(&search.items).cloned();
+    Ok(ZhuigengResourcePlanResponse {
+        ok: true,
+        missing_hint: req
+            .item
+            .resource_hint
+            .as_deref()
+            .and_then(non_empty_trimmed)
+            .map(ToString::to_string),
+        item: req.item,
+        query: search.query.clone(),
+        fallback_queries,
+        search,
+        recommended,
+    })
+}
+
+async fn run_zhuigeng_catalog_search(
+    state: &AppState,
+    q: &str,
+    limit: i64,
+    exact: Option<bool>,
+) -> AppResult<CatalogRemoteSearchResponse> {
+    catalog::catalog_remote_search_for_state(
+        state,
+        CatalogRemoteSearchQuery {
+            q: q.to_string(),
+            limit: Some(limit),
+            offset: Some(0),
+            disk_type: Some("115".to_string()),
+            exact,
+            sort: Some("resource".to_string()),
+        },
+    )
+    .await
+}
+
+fn choose_zhuigeng_resource_candidate(items: &[CatalogItem]) -> Option<&CatalogItem> {
+    items
+        .iter()
+        .find(|item| {
+            item.transfer
+                && item
+                    .recommendation
+                    .as_ref()
+                    .is_some_and(|rec| matches!(rec.level.as_str(), "best" | "good"))
+        })
+        .or_else(|| {
+            items.iter().find(|item| {
+                item.transfer
+                    && item
+                        .recommendation
+                        .as_ref()
+                        .is_some_and(|rec| rec.level.as_str() == "warn" && !rec.already_have)
+            })
+        })
+        .or_else(|| items.iter().find(|item| item.transfer))
+}
+
+pub async fn zhuigeng_update_execute_for_state(
+    state: AppState,
+    req: ZhuigengUpdateExecuteRequest,
+) -> AppResult<TaskRun> {
+    let target = zhuigeng_update_target(&req)?;
+    let item = AddNewItem {
+        url: candidate_transfer_url(&req.candidate)?,
+        pwd: req.candidate.rc.clone(),
+        label: req
+            .candidate
+            .name
+            .clone()
+            .or_else(|| non_empty_trimmed(&req.item.name).map(ToString::to_string)),
+        file_ids: None,
+        kind: req.candidate.link_type.clone(),
+    };
+    let add_req = AddNewRequest {
+        items: vec![item],
+        target: Some(target),
+        lib: None,
+        cid: None,
+        delay_ms: req.delay_ms,
+    };
+    wizard::create_add_new_task(
+        state,
+        add_req,
+        "zhuigeng",
+        "zhuigeng_update",
+        Some("追更一条龙更新"),
+    )
+    .await
+}
+
+fn zhuigeng_update_target(req: &ZhuigengUpdateExecuteRequest) -> AppResult<AddNewTarget> {
+    let requested = req.target.clone().unwrap_or(AddNewTarget {
+        lib: None,
+        cid: None,
+    });
+    let lib = requested
+        .lib
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .map(ToString::to_string)
+        .or_else(|| non_empty_trimmed(&req.item.lib).map(ToString::to_string));
+    let cid = requested
+        .cid
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .map(ToString::to_string);
+    if lib.is_none() && cid.is_none() {
+        return Err(AppError::BadRequest(
+            "缺少更新目标库或 115 cid，无法一条龙转存".to_string(),
+        ));
+    }
+    Ok(AddNewTarget { lib, cid })
+}
+
+fn candidate_transfer_url(candidate: &CatalogTransferPlanItem) -> AppResult<String> {
+    candidate
+        .share
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .or_else(|| non_empty_trimmed(&candidate.link))
+        .map(ToString::to_string)
+        .ok_or_else(|| AppError::BadRequest("候选资源缺少链接".to_string()))
+}
+
+pub async fn zhuigeng_archive_execute_for_state(
+    state: AppState,
+    req: ZhuigengArchiveExecuteRequest,
+) -> AppResult<ZhuigengArchiveExecuteResponse> {
+    let to_lib = non_empty_trimmed(&req.to_lib)
+        .ok_or_else(|| AppError::BadRequest("归档目标库不能为空".to_string()))?
+        .to_string();
+    if req.items.is_empty() {
+        return Err(AppError::BadRequest("items 不能为空".to_string()));
+    }
+    let mut by_lib = BTreeMap::<String, Vec<media_fs::ManageMoveBatchItem>>::new();
+    for item in req.items {
+        let from_lib = non_empty_trimmed(&item.lib)
+            .ok_or_else(|| AppError::BadRequest(format!("{} 缺少来源库", item.name)))?
+            .to_string();
+        let folder = item
+            .folder
+            .as_deref()
+            .and_then(non_empty_trimmed)
+            .ok_or_else(|| AppError::BadRequest(format!("{} 缺少媒体文件夹", item.name)))?
+            .to_string();
+        by_lib
+            .entry(from_lib)
+            .or_default()
+            .push(media_fs::ManageMoveBatchItem {
+                folder,
+                item_id: item
+                    .id
+                    .and_then(|id| non_empty_trimmed(&id).map(ToString::to_string)),
+                to_folder: None,
+            });
+    }
+
+    let total = by_lib.values().map(Vec::len).sum::<usize>();
+    let mut tasks = Vec::new();
+    for (from_lib, items) in by_lib {
+        let move_req = media_fs::ManageMoveBatchRequest {
+            from_lib,
+            to_lib: to_lib.clone(),
+            items,
+            on_conflict: req
+                .on_conflict
+                .clone()
+                .or_else(|| Some("smart".to_string())),
+            reason: Some("追更完结剧一键归档".to_string()),
+        };
+        let task = media_fs::create_move_batch_task(
+            state.clone(),
+            move_req,
+            "zhuigeng",
+            "zhuigeng_archive",
+            Some("追更完结归档"),
+        )
+        .await?;
+        tasks.push(task);
+    }
+
+    Ok(ZhuigengArchiveExecuteResponse {
+        ok: true,
+        total,
+        tasks,
+    })
+}
+
+fn build_zhuigeng_resource_query(item: &ZhuigengItemRef) -> String {
+    let name = item.name.trim();
+    let hint = item
+        .resource_hint
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .unwrap_or_default();
+    if name.is_empty() {
+        return String::new();
+    }
+    if hint.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name} {hint}")
+    }
 }
 
 impl ZhuigengConfig {
@@ -1294,6 +2015,11 @@ fn provider_id(provider_ids: &BTreeMap<String, Value>, key: &str) -> Option<Stri
         })
 }
 
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
 fn validate_tmdb_id(tmdb: &str) -> AppResult<()> {
     let value = tmdb.trim();
     if value.is_empty() {
@@ -1357,7 +2083,11 @@ fn push_path(paths: &mut Vec<String>, path: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_ints, tmdb_state};
+    use super::{
+        ZhuigengItem, ZhuigengWorkbenchLane, apply_resource_episode_inference,
+        build_zhuigeng_workbench_row, compact_ints, tmdb_state,
+    };
+    use crate::catalog::CatalogItem;
 
     #[test]
     fn compacts_episode_ranges() {
@@ -1374,5 +2104,89 @@ mod tests {
             tmdb_state("Returning Series", None),
             ("continuing".to_string(), true, false)
         );
+    }
+
+    #[test]
+    fn resource_complete_title_promotes_healthy_airing_to_archive_ready() {
+        let mut item = test_item(25, "S01E25");
+        apply_resource_episode_inference(&mut item, &[catalog_item("大唐迷雾 全25集 4K SDR")]);
+
+        assert!(item.ended);
+        assert!(!item.continuing);
+        assert_eq!(item.behind, 0);
+        assert!(
+            item.behind_hint
+                .as_deref()
+                .is_some_and(|hint| hint.contains("建议归档"))
+        );
+        let row = build_zhuigeng_workbench_row(item);
+        assert_eq!(row.lane, ZhuigengWorkbenchLane::ArchiveReady);
+        assert!(row.archiveable);
+    }
+
+    #[test]
+    fn resource_new_episode_keeps_airing_update_needed() {
+        let mut item = test_item(25, "S01E25");
+        apply_resource_episode_inference(&mut item, &[catalog_item("大唐迷雾 (2026) S01E26")]);
+
+        assert!(item.continuing);
+        assert!(!item.ended);
+        assert_eq!(item.behind, 1);
+        assert_eq!(item.resource_hint.as_deref(), Some("S01 E26"));
+        let row = build_zhuigeng_workbench_row(item);
+        assert_eq!(row.lane, ZhuigengWorkbenchLane::UpdateNeeded);
+        assert!(row.updateable);
+    }
+
+    #[test]
+    fn resource_complete_package_with_missing_episodes_requires_update_then_archive() {
+        let mut item = test_item(25, "S01E25");
+        apply_resource_episode_inference(&mut item, &[catalog_item("大唐迷雾 完结 全40集")]);
+
+        assert!(item.ended);
+        assert!(!item.continuing);
+        assert_eq!(item.behind, 15);
+        assert_eq!(item.resource_hint.as_deref(), Some("S01 E26-40"));
+        let row = build_zhuigeng_workbench_row(item);
+        assert_eq!(row.lane, ZhuigengWorkbenchLane::CompleteAfterUpdate);
+        assert!(row.updateable);
+        assert!(!row.archiveable);
+    }
+
+    fn test_item(local_count: usize, latest: &str) -> ZhuigengItem {
+        ZhuigengItem {
+            lib: "电视剧追更".to_string(),
+            name: "大唐迷雾".to_string(),
+            id: Some("series-id".to_string()),
+            folder: "大唐迷雾(2026)[tmdbid-289209]".to_string(),
+            tmdb: "289209".to_string(),
+            tmdb_status: "Continuing".to_string(),
+            state: "continuing".to_string(),
+            continuing: true,
+            ended: false,
+            local_count,
+            local_latest: None,
+            local_latest_episode: Some(latest.to_string()),
+            last_episode_to_air: None,
+            next_episode_to_air: None,
+            behind: 0,
+            behind_hint: None,
+            resource_hint: None,
+            err: None,
+        }
+    }
+
+    fn catalog_item(name: &str) -> CatalogItem {
+        CatalogItem {
+            name: name.to_string(),
+            sheet: "test".to_string(),
+            link: "https://115cdn.com/s/example".to_string(),
+            is_pkg: true,
+            link_type: "share115".to_string(),
+            transfer: true,
+            share: Some("example".to_string()),
+            rc: Some("abcd".to_string()),
+            recommendation: None,
+        }
     }
 }

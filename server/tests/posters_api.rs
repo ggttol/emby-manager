@@ -363,6 +363,7 @@ fn openapi_registers_poster_detection() {
     assert!(paths.contains_key("/api/v2/posters/detect-mismatch"));
     assert!(paths.contains_key("/api/v2/posters/search"));
     assert!(paths.contains_key("/api/v2/posters/apply"));
+    assert!(paths.contains_key("/api/v2/posters/image-proxy"));
     assert!(paths.contains_key("/api/v2/posters/fix-batch"));
 
     let schemas = doc["components"]["schemas"].as_object().unwrap();
@@ -370,6 +371,7 @@ fn openapi_registers_poster_detection() {
     assert!(schemas.contains_key("PosterDetectResponse"));
     assert!(schemas.contains_key("PosterSignalItem"));
     assert!(schemas.contains_key("PosterSearchRequest"));
+    assert!(schemas.contains_key("PosterImageProxyQuery"));
     assert!(schemas.contains_key("PosterSearchResponse"));
     assert!(schemas.contains_key("PosterSearchCandidate"));
     assert!(schemas.contains_key("PosterApplyRequest"));

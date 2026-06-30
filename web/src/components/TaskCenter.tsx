@@ -41,6 +41,77 @@ function statusLabel(status: string) {
   return statusLabels[status] || status;
 }
 
+function plainObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function numberLike(value: unknown) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+function falseLike(value: unknown) {
+  return value === false || value === 'false';
+}
+
+function nestedNumber(parent: Record<string, unknown> | null, key: string) {
+  return numberLike(parent?.[key]) ?? 0;
+}
+
+function hasAddNewBlockingFailure(result: Record<string, unknown>) {
+  const check = plainObject(result.check);
+  if (!check) return null;
+
+  const itemErrors = nestedNumber(check, 'item_error_count');
+  const stageErrors = nestedNumber(check, 'stage_error_count');
+  if (String(check.status || '') === 'errors' || itemErrors > 0 || stageErrors > 0) return true;
+
+  const transfer = plainObject(result.transfer);
+  if (falseLike(transfer?.ok) || nestedNumber(transfer, 'failed') > 0) return true;
+
+  for (const key of ['strm', 'scan', 'poster']) {
+    const section = plainObject(result[key]);
+    if (falseLike(section?.ok)) return true;
+  }
+
+  for (const key of ['auto_resolve', 'poster_auto_fix']) {
+    const section = plainObject(result[key]);
+    if (falseLike(section?.ok) || nestedNumber(section, 'error_count') > 0) return true;
+  }
+
+  return false;
+}
+
+function hasFailedResult(task: TaskRun) {
+  if (task.status !== 'done') return false;
+  const result = plainObject(task.result);
+  if (!result) return false;
+  const addNewFailure = hasAddNewBlockingFailure(result);
+  if (addNewFailure !== null) return addNewFailure;
+  const errorCount = numberLike(result.error_count);
+  if (errorCount !== null && errorCount > 0) return true;
+  if (falseLike(result.ok)) return true;
+  return false;
+}
+
+function effectiveStatus(task: TaskRun) {
+  return hasFailedResult(task) ? 'error' : task.status;
+}
+
+function failedResultSummary(task: TaskRun) {
+  if (!hasFailedResult(task)) return '';
+  const result = plainObject(task.result);
+  const errorCount = numberLike(result?.error_count);
+  const total = numberLike(result?.total);
+  if (errorCount !== null && total !== null) return `结果失败：${errorCount}/${total} 项失败`;
+  if (errorCount !== null) return `结果失败：${errorCount} 项失败`;
+  return '结果失败：任务返回 ok:false';
+}
+
 function formatTime(value?: string | null) {
   if (!value) return '未记录';
   const date = new Date(value);
@@ -68,14 +139,61 @@ function formatDuration(start?: string | null, end?: string | null) {
   return minuteRest ? `${hours} 小时 ${minuteRest} 分` : `${hours} 小时`;
 }
 
-function resultPreview(result: unknown) {
-  if (result === null || result === undefined) return '';
-  if (typeof result === 'string') return result;
+function compactJson(value: unknown) {
   try {
-    return JSON.stringify(result);
+    return JSON.stringify(value) ?? '';
   } catch {
-    return String(result);
+    return String(value);
   }
+}
+
+function resultPreview(task: TaskRun) {
+  const result = plainObject(task.result);
+  if (!result) {
+    if (task.result === null || task.result === undefined) return '';
+    return typeof task.result === 'string' ? task.result : String(task.result);
+  }
+
+  if (task.kind === 'add_new' || task.kind === 'zhuigeng_update') {
+    const transfer = plainObject(result.transfer);
+    const strm = plainObject(result.strm);
+    const autoResolve = plainObject(result.auto_resolve);
+    const posterFix = plainObject(result.poster_auto_fix);
+    const check = plainObject(result.check);
+    const parts = [
+      `转存 ${nestedNumber(transfer, 'succeeded')}/${nestedNumber(transfer, 'total')}`,
+      `新增 STRM ${nestedNumber(strm, 'new_count')}`,
+      nestedNumber(autoResolve, 'resolved_count') > 0 ? `清理旧版本 ${nestedNumber(autoResolve, 'resolved_count')}` : '',
+      nestedNumber(posterFix, 'fixed_count') > 0 ? `修海报 ${nestedNumber(posterFix, 'fixed_count')}` : '',
+      nestedNumber(check, 'suspicious_count') > 0 ? `可疑项 ${nestedNumber(check, 'suspicious_count')}` : ''
+    ].filter(Boolean);
+    return parts.join(' · ');
+  }
+
+  if (task.kind === 'zhuigeng_archive' || task.kind.includes('batch')) {
+    const total = numberLike(result.total);
+    const okCount = numberLike(result.ok_count);
+    const errorCount = numberLike(result.error_count);
+    const fromLib = typeof result.from_lib === 'string' ? result.from_lib : '';
+    const toLib = typeof result.to_lib === 'string' ? result.to_lib : '';
+    const route = fromLib && toLib ? `${fromLib} -> ${toLib}` : '';
+    const parts = [
+      okCount !== null && total !== null ? `成功 ${okCount}/${total}` : '',
+      errorCount !== null && errorCount > 0 ? `失败 ${errorCount}` : '',
+      route
+    ].filter(Boolean);
+    if (parts.length > 0) return parts.join(' · ');
+  }
+
+  const total = numberLike(result.total);
+  const okCount = numberLike(result.ok_count);
+  const errorCount = numberLike(result.error_count);
+  if (okCount !== null && total !== null) {
+    return [`成功 ${okCount}/${total}`, errorCount !== null && errorCount > 0 ? `失败 ${errorCount}` : ''].filter(Boolean).join(' · ');
+  }
+  const imported = numberLike(result.imported);
+  if (imported !== null) return `导入 ${imported} 项`;
+  return '';
 }
 
 function prettyJson(value: unknown) {
@@ -96,7 +214,7 @@ function hasJsonPayload(value: unknown) {
 }
 
 function searchText(value: unknown) {
-  return resultPreview(value).toLocaleLowerCase('zh-CN');
+  return compactJson(value).toLocaleLowerCase('zh-CN');
 }
 
 function taskMatchesQuery(task: TaskRun, tokens: string[]) {
@@ -106,6 +224,7 @@ function taskMatchesQuery(task: TaskRun, tokens: string[]) {
     task.kind,
     task.label,
     task.status,
+    effectiveStatus(task),
     task.status_text,
     task.source,
     task.error,
@@ -209,16 +328,17 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
   const counts = useMemo(() => ({
     all: tasks.length,
     active: tasks.filter((task) => active.has(task.status)).length,
-    done: tasks.filter((task) => task.status === 'done').length,
-    issue: tasks.filter((task) => ['error', 'cancelled', 'interrupted'].includes(task.status)).length
+    done: tasks.filter((task) => effectiveStatus(task) === 'done').length,
+    issue: tasks.filter((task) => ['error', 'cancelled', 'interrupted'].includes(effectiveStatus(task))).length
   }), [tasks]);
 
   const visibleTasks = useMemo(() => {
     const tokens = query.trim().toLocaleLowerCase('zh-CN').split(/\s+/).filter(Boolean);
     return tasks.filter((task) => {
+      const status = effectiveStatus(task);
       if (filter === 'active' && !active.has(task.status)) return false;
-      if (filter === 'done' && task.status !== 'done') return false;
-      if (filter === 'issue' && !['error', 'cancelled', 'interrupted'].includes(task.status)) return false;
+      if (filter === 'done' && status !== 'done') return false;
+      if (filter === 'issue' && !['error', 'cancelled', 'interrupted'].includes(status)) return false;
       return taskMatchesQuery(task, tokens);
     });
   }, [filter, query, tasks]);
@@ -336,17 +456,19 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
             {visibleTasks.map((task) => {
               const taskPct = task.total ? Math.min(100, Math.round((task.progress / task.total) * 100)) : 0;
               const canCancel = active.has(task.status) && !task.cancel_requested;
-              const preview = resultPreview(task.result);
+              const preview = resultPreview(task);
               const expanded = expandedIds.has(task.id);
               const taskName = task.label || task.kind;
               const duration = formatDuration(task.started_at || task.queued_at, task.ended_at || task.updated_at);
               const showParams = hasJsonPayload(task.params);
               const showResult = hasJsonPayload(task.result);
+              const displayStatus = effectiveStatus(task);
+              const resultFailure = failedResultSummary(task);
               return (
                 <article className="taskCard" key={task.id}>
                   <div>
                     <strong>{taskName}</strong>
-                    <span className={`badge ${task.status}`}>{statusLabel(task.status)}</span>
+                    <span className={`badge ${displayStatus}`}>{statusLabel(displayStatus)}</span>
                     <button
                       className="iconBtn taskDetailToggle"
                       onClick={() => toggleExpanded(task.id)}
@@ -365,7 +487,7 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
                     {task.started_at && <div><dt>开始</dt><dd>{formatTime(task.started_at)}</dd></div>}
                     {task.ended_at && <div><dt>结束</dt><dd>{formatTime(task.ended_at)}</dd></div>}
                   </dl>
-                  <p>{task.status_text || task.kind}</p>
+                  <p>{resultFailure || task.status_text || task.kind}</p>
                   {active.has(task.status) && (
                     <>
                       <div className="miniProgress"><i style={{ width: `${task.total ? taskPct : 5}%` }} /></div>
@@ -376,7 +498,7 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
                     </>
                   )}
                   {preview && <p className="resultText">{preview}</p>}
-                  {task.error && <p className="errorText">{task.error}</p>}
+                  {(task.error || resultFailure) && <p className="errorText">{task.error || resultFailure}</p>}
                   {expanded && (
                     <div className="taskDetails">
                       <div className="taskIdLine">

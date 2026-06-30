@@ -37,6 +37,39 @@ function tmdbText(value?: string | null) {
   return value && value.trim() ? value : '未绑定';
 }
 
+function posterPreviewSrc(value?: string | null) {
+  const src = value?.trim();
+  if (!src) return '';
+  if (/^https?:\/\//i.test(src)) {
+    return `/api/v2/posters/image-proxy?url=${encodeURIComponent(src)}`;
+  }
+  if (src.startsWith('/')) return src;
+  return '';
+}
+
+function PosterCandidatePreview({ candidate }: { candidate: PosterSearchCandidate }) {
+  const src = posterPreviewSrc(candidate.img);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
+  if (!src || failed) {
+    return <span className="posterCandidatePlaceholder" aria-hidden="true" />;
+  }
+
+  return (
+    <img
+      src={src}
+      alt={`${candidate.name || '候选'} 海报`}
+      loading="lazy"
+      referrerPolicy="no-referrer"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 export function PostersPanel() {
   const [libraries, setLibraries] = useState<EmbyLibrary[]>([]);
   const [selectedLib, setSelectedLib] = useState('');
@@ -418,7 +451,7 @@ export function PostersPanel() {
                               onClick={() => applyItem(item, candidate.tmdb)}
                               disabled={rowLoading === item.id || !candidate.tmdb}
                             >
-                              {candidate.img ? <img src={candidate.img} alt="" loading="lazy" /> : <span />}
+                              <PosterCandidatePreview candidate={candidate} />
                               <strong>{candidate.name || '未命名'} {candidate.year || ''}</strong>
                               <small>tmdb:{candidate.tmdb || '无'} · {candidate.img ? '有图' : '无图'}</small>
                             </button>
