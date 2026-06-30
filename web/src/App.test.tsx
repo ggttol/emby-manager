@@ -691,7 +691,7 @@ describe('App shell', () => {
   it('renders the dashboard read-only overview with csrf protected insight calls', async () => {
     let cleanupCalled = false;
     let gapsCalled = false;
-    let dashboardTodoCalled = false;
+    let dashboardSmartCalled = false;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/system/summary') {
         return jsonResponse(systemSummary);
@@ -713,22 +713,49 @@ describe('App shell', () => {
       if (url.pathname === '/api/v2/autostrm/status') {
         return jsonResponse(autostrmStatus);
       }
-      if (url.pathname === '/api/v2/dashboard/todo') {
-        dashboardTodoCalled = true;
+      if (url.pathname === '/api/v2/dashboard/smart-actions') {
+        dashboardSmartCalled = true;
         expect(init?.method || 'GET').toBe('GET');
         return jsonResponse({
-          noposter: 2,
-          no_rating: 3,
-          dups_auto: 1,
-          dups_review: 1,
-          airing_count: 1,
-          airing_low_count: 1,
-          noposter_by_lib: { '剧集': 1, '电影': 1 },
-          no_rating_by_lib: { '剧集': 2, '电影': 1 },
-          noposter_err: null,
-          no_rating_err: null,
-          dups_err: null,
-          airing_err: null
+          ok: true,
+          total: 2,
+          warnings: [],
+          todo: {
+            noposter: 2,
+            no_rating: 3,
+            dups_auto: 1,
+            dups_review: 1,
+            airing_count: 1,
+            airing_low_count: 1,
+            noposter_by_lib: { '剧集': 1, '电影': 1 },
+            no_rating_by_lib: { '剧集': 2, '电影': 1 },
+            noposter_err: null,
+            no_rating_err: null,
+            dups_err: null,
+            airing_err: null
+          },
+          actions: [
+            {
+              severity: 'high',
+              area: 'zhuigeng',
+              title: '追更剧有新集可更新',
+              message: '1 部在更剧落后，可智能找资源并一条龙更新。',
+              count: 1,
+              tab: 'zhuigeng',
+              action: '智能找资源',
+              source: 'zhuigeng.update_needed'
+            },
+            {
+              severity: 'medium',
+              area: 'dedup',
+              title: '复核人工去重组',
+              message: '1 个重复组需要人工确认。',
+              count: 1,
+              tab: 'dedup',
+              action: '复核重复资源',
+              source: 'dedup.review_groups'
+            }
+          ]
         });
       }
       return undefined;
@@ -744,13 +771,15 @@ describe('App shell', () => {
     expect(screen.queryByText('字幕')).not.toBeInTheDocument();
     expect(screen.getByText('无海报')).toBeInTheDocument();
     expect(screen.getByText('无评分')).toBeInTheDocument();
+    expect(screen.getByText('智能下一步')).toBeInTheDocument();
+    expect(screen.getByText('追更剧有新集可更新')).toBeInTheDocument();
     expect(screen.queryByText('旧版待办计数')).not.toBeInTheDocument();
     expect(screen.queryByText('无海报 1')).not.toBeInTheDocument();
     expect(screen.queryByText('无评分 2')).not.toBeInTheDocument();
     await waitFor(() => {
       expect(cleanupCalled).toBe(true);
       expect(gapsCalled).toBe(true);
-      expect(dashboardTodoCalled).toBe(true);
+      expect(dashboardSmartCalled).toBe(true);
     });
   });
 

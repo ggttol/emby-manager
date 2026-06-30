@@ -484,6 +484,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/dashboard/smart-actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["dashboard_smart_actions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/dashboard/todo": {
         parameters: {
             query?: never;
@@ -2003,6 +2019,24 @@ export interface components {
         CreateUserResponse: {
             ok: boolean;
             user: components["schemas"]["UserSummary"];
+        };
+        DashboardSmartAction: {
+            action: string;
+            area: string;
+            /** Format: int64 */
+            count: number;
+            message: string;
+            severity: string;
+            source: string;
+            tab: string;
+            title: string;
+        };
+        DashboardSmartActionsResponse: {
+            actions: components["schemas"]["DashboardSmartAction"][];
+            ok: boolean;
+            todo: components["schemas"]["DashboardTodoResponse"];
+            total: number;
+            warnings: string[];
         };
         DashboardTodoResponse: {
             airing_count: number;
@@ -3870,6 +3904,25 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConfigImportReport"];
+                };
+            };
+        };
+    };
+    dashboard_smart_actions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DashboardSmartActionsResponse"];
                 };
             };
         };

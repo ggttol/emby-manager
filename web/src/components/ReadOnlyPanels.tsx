@@ -10,6 +10,7 @@ import {
   ListChecks,
   RefreshCw,
   Server,
+  Sparkles,
   Webhook
 } from 'lucide-react';
 import { ReactNode, useEffect, useMemo, useState } from 'react';
@@ -19,6 +20,8 @@ import { useToast } from './Toast';
 
 type AutostrmStatusResponse = components['schemas']['AutostrmStatusResponse'];
 type CleanupSummaryResponse = components['schemas']['CleanupSummaryResponse'];
+type DashboardSmartAction = components['schemas']['DashboardSmartAction'];
+type DashboardSmartActionsResponse = components['schemas']['DashboardSmartActionsResponse'];
 type DashboardTodoResponse = components['schemas']['DashboardTodoResponse'];
 type GapsSummaryResponse = components['schemas']['GapsSummaryResponse'];
 type InsightMeta = components['schemas']['InsightMeta'];
@@ -233,6 +236,42 @@ function TodoList({ items, empty }: { items: InsightTodo[]; empty: string }) {
   );
 }
 
+function smartActionTone(severity: string) {
+  if (severity === 'high') return 'error';
+  if (severity === 'medium') return 'warn';
+  return 'info';
+}
+
+function SmartActionList({
+  actions,
+  empty,
+  onNavigate
+}: {
+  actions: DashboardSmartAction[];
+  empty: string;
+  onNavigate?: (tabId: string) => void;
+}) {
+  if (!actions.length) return <div className="empty inlineEmpty">{empty}</div>;
+  return (
+    <div className="smartActionList">
+      {actions.map((item, index) => (
+        <article className={`smartActionItem ${smartActionTone(item.severity)}`} key={`${item.area}-${item.source}-${index}`}>
+          <div>
+            <span className={`badge ${smartActionTone(item.severity)}`}>{item.severity}</span>
+            <strong>{item.title}</strong>
+            <small>{item.area} · {item.source} · {count(item.count)}</small>
+          </div>
+          <p>{item.message}</p>
+          <button className="btn ghost compact" onClick={() => onNavigate?.(item.tab)} disabled={!onNavigate}>
+            <Sparkles size={14} />
+            {item.action}
+          </button>
+        </article>
+      ))}
+    </div>
+  );
+}
+
 function WarningList({ warnings }: { warnings: string[] }) {
   if (!warnings.length) return null;
   return (
@@ -292,12 +331,13 @@ function TaskHistory({ task }: { task?: TaskHistorySummary }) {
   );
 }
 
-export function DashboardPanel() {
+export function DashboardPanel({ onNavigate }: { onNavigate?: (tabId: string) => void } = {}) {
   const [system, setSystem] = useState<SystemSummary | null>(null);
   const [cleanup, setCleanup] = useState<CleanupSummaryResponse | null>(null);
   const [gaps, setGaps] = useState<GapsSummaryResponse | null>(null);
   const [autostrm, setAutostrm] = useState<AutostrmStatusResponse | null>(null);
   const [dashboardTodo, setDashboardTodo] = useState<DashboardTodoParity>(EMPTY_DASHBOARD_TODO);
+  const [smartActions, setSmartActions] = useState<DashboardSmartActionsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const toast = useToast();
@@ -306,18 +346,21 @@ export function DashboardPanel() {
     setLoading(true);
     setError('');
     setDashboardTodo(EMPTY_DASHBOARD_TODO);
+    setSmartActions(null);
     try {
-      const [systemData, cleanupData, gapsData, autostrmData, todoData] = await Promise.all([
+      const [systemData, cleanupData, gapsData, autostrmData, smartData] = await Promise.all([
         api<SystemSummary>('/api/v2/system/summary'),
         api<CleanupSummaryResponse>('/api/v2/cleanup/suggest', { method: 'POST', body: JSON.stringify({}) }),
         api<GapsSummaryResponse>('/api/v2/gaps/scan', { method: 'POST', body: JSON.stringify({}) }),
         api<AutostrmStatusResponse>('/api/v2/autostrm/status'),
-        api<DashboardTodoResponse>('/api/v2/dashboard/todo')
+        api<DashboardSmartActionsResponse>('/api/v2/dashboard/smart-actions')
       ]);
+      const todoData = smartData.todo;
       setSystem(systemData);
       setCleanup(cleanupData);
       setGaps(gapsData);
       setAutostrm(autostrmData);
+      setSmartActions(smartData);
       setDashboardTodo({
         noposter: todoData.noposter || 0,
         no_rating: todoData.no_rating || 0,
@@ -350,6 +393,7 @@ export function DashboardPanel() {
     ...(cleanup?.warnings || []),
     ...(gaps?.warnings || []),
     ...(autostrm?.warnings || []),
+    ...(smartActions?.warnings || []),
     ...dashboardTodo.errors
   ];
 
@@ -369,9 +413,9 @@ export function DashboardPanel() {
       <div className="statGrid">
         <StatCard icon={<Server />} label="服务状态" value={system?.ok ? '正常' : '需检查'} tone={system?.ok ? 'ok' : 'warn'} hint={system?.version || '等待数据'} />
         <StatCard icon={<Database />} label="数据库" value={system?.database?.status || '未知'} tone={system?.database?.status === 'ok' ? 'ok' : 'warn'} hint={system?.database?.current_database || system?.database?.url} />
-        <StatCard icon={<ListChecks />} label="待办" value={count(todos.length)} tone={todos.length ? 'warn' : 'ok'} hint="只读预检聚合" />
+        <StatCard icon={<ListChecks />} label="智能建议" value={count(smartActions?.total || todos.length)} tone={(smartActions?.total || todos.length) ? 'warn' : 'ok'} hint="可直接跳转处理" />
         <StatCard icon={<Activity />} label="异常任务" value={count(taskProblemCount(cleanup?.task_history))} tone={taskProblemCount(cleanup?.task_history) ? 'warn' : 'ok'} hint={`运行中 ${count(cleanup?.task_history?.running)}`} />
-        <StatCard icon={<AlertTriangle />} label="无海报" value={count(dashboardTodo.noposter)} tone={dashboardTodo.noposter ? 'warn' : 'ok'} hint="旧版 dash/todo" />
+        <StatCard icon={<AlertTriangle />} label="无海报" value={count(dashboardTodo.noposter)} tone={dashboardTodo.noposter ? 'warn' : 'ok'} hint="海报修复入口" />
         <StatCard icon={<Gauge />} label="无评分" value={count(dashboardTodo.no_rating)} tone={dashboardTodo.no_rating ? 'warn' : 'ok'} hint="可刷新元数据" />
         <StatCard icon={<CheckCircle2 />} label="自动去重" value={count(dashboardTodo.dups_auto)} tone={dashboardTodo.dups_auto ? 'warn' : 'ok'} hint="可自动处理组" />
         <StatCard icon={<AlertTriangle />} label="人工重复" value={count(dashboardTodo.dups_review)} tone={dashboardTodo.dups_review ? 'warn' : 'ok'} hint="需人工 review" />
@@ -381,7 +425,15 @@ export function DashboardPanel() {
       </div>
       <WarningList warnings={warnings} />
       <section className="readonlyBlock">
-        <h2>待处理信号</h2>
+        <h2>智能下一步</h2>
+        <SmartActionList
+          actions={smartActions?.actions || []}
+          empty="当前没有需要立即处理的智能建议"
+          onNavigate={onNavigate}
+        />
+      </section>
+      <section className="readonlyBlock">
+        <h2>只读预检信号</h2>
         <TodoList items={todos} empty="当前只读预检没有发现待处理信号" />
       </section>
       <TaskHistory task={cleanup?.task_history} />

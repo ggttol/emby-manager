@@ -196,6 +196,187 @@ function resultPreview(task: TaskRun) {
   return '';
 }
 
+type ResultFactTone = 'neutral' | 'ok' | 'warn' | 'error';
+
+type ResultFact = {
+  label: string;
+  value: string;
+  tone?: ResultFactTone;
+};
+
+type ResultStage = {
+  title: string;
+  tone: ResultFactTone;
+  facts: ResultFact[];
+  notes: string[];
+};
+
+function stringField(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : '';
+}
+
+function booleanField(value: unknown) {
+  return typeof value === 'boolean' ? value : null;
+}
+
+function fact(label: string, value: unknown, tone: ResultFactTone = 'neutral'): ResultFact | null {
+  if (value === null || value === undefined || value === '') return null;
+  return { label, value: String(value), tone };
+}
+
+function compactCount(value: unknown) {
+  const number = numberLike(value);
+  return number === null ? '0' : number.toLocaleString('zh-CN');
+}
+
+function okTone(value: unknown, fallback: ResultFactTone = 'neutral'): ResultFactTone {
+  const bool = booleanField(value);
+  if (bool === true) return 'ok';
+  if (bool === false) return 'error';
+  return fallback;
+}
+
+function stage(title: string, tone: ResultFactTone, facts: Array<ResultFact | null>, notes: string[] = []): ResultStage {
+  return {
+    title,
+    tone,
+    facts: facts.filter(Boolean) as ResultFact[],
+    notes: notes.filter(Boolean)
+  };
+}
+
+function listMessages(value: unknown, max = 3) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === 'string') return item;
+      const row = plainObject(item);
+      if (!row) return '';
+      return [
+        stringField(row.name) || stringField(row.label) || stringField(row.stage) || stringField(row.tmdb),
+        stringField(row.status),
+        stringField(row.reason) || stringField(row.message) || stringField(row.error) || stringField(row.err)
+      ].filter(Boolean).join(' · ');
+    })
+    .filter(Boolean)
+    .slice(0, max);
+}
+
+function addNewStages(result: Record<string, unknown>): ResultStage[] {
+  const transfer = plainObject(result.transfer);
+  const strm = plainObject(result.strm);
+  const scan = plainObject(result.scan);
+  const poster = plainObject(result.poster);
+  const posterFix = plainObject(result.poster_auto_fix);
+  const autoResolve = plainObject(result.auto_resolve);
+  const check = plainObject(result.check);
+  const dedup = plainObject(result.dedup);
+
+  return [
+    stage('转存', okTone(transfer?.ok), [
+      fact('成功', `${compactCount(transfer?.succeeded)} / ${compactCount(transfer?.total)}`, okTone(transfer?.ok)),
+      nestedNumber(transfer, 'failed') > 0 ? fact('失败', compactCount(transfer?.failed), 'error') : null
+    ], listMessages(transfer?.items)),
+    stage('STRM', okTone(strm?.ok), [
+      fact('新增', compactCount(strm?.new_count), nestedNumber(strm, 'new_count') > 0 ? 'ok' : 'neutral'),
+      fact('匹配', compactCount(strm?.matched)),
+      nestedNumber(strm, 'new_folders') > 0 ? fact('新目录', compactCount(strm?.new_folders)) : null
+    ], [
+      ...listMessages(strm?.attention),
+      ...listMessages(strm?.warnings),
+      stringField(strm?.error)
+    ]),
+    stage('Emby 刷新', okTone(scan?.ok), [
+      fact('模式', stringField(scan?.mode)),
+      fact('库', stringField(scan?.lib)),
+      fact('HTTP', scan?.code)
+    ], [stringField(scan?.warning), stringField(scan?.error)]),
+    stage('海报', okTone(poster?.ok), [
+      fact('问题', compactCount(poster?.issue_count), nestedNumber(poster, 'issue_count') > 0 ? 'warn' : 'ok'),
+      fact('缺主图', compactCount(poster?.missing_primary_count), nestedNumber(poster, 'missing_primary_count') > 0 ? 'warn' : 'neutral'),
+      fact('错绑', compactCount(poster?.mismatch_count), nestedNumber(poster, 'mismatch_count') > 0 ? 'warn' : 'neutral')
+    ], listMessages(poster?.items)),
+    stage('海报自动修复', okTone(posterFix?.ok, nestedNumber(posterFix, 'fixed_count') > 0 ? 'ok' : 'neutral'), [
+      fact('修复', compactCount(posterFix?.fixed_count), nestedNumber(posterFix, 'fixed_count') > 0 ? 'ok' : 'neutral'),
+      nestedNumber(posterFix, 'skipped_count') > 0 ? fact('跳过', compactCount(posterFix?.skipped_count), 'warn') : null,
+      nestedNumber(posterFix, 'error_count') > 0 ? fact('失败', compactCount(posterFix?.error_count), 'error') : null
+    ], listMessages(posterFix?.items)),
+    stage('重复旧版本', okTone(autoResolve?.ok, nestedNumber(autoResolve, 'resolved_count') > 0 ? 'ok' : 'neutral'), [
+      fact('清理', compactCount(autoResolve?.resolved_count), nestedNumber(autoResolve, 'resolved_count') > 0 ? 'ok' : 'neutral'),
+      nestedNumber(autoResolve, 'skipped_count') > 0 ? fact('跳过', compactCount(autoResolve?.skipped_count), 'warn') : null,
+      nestedNumber(autoResolve, 'error_count') > 0 ? fact('失败', compactCount(autoResolve?.error_count), 'error') : null,
+      dedup ? fact('待复核', compactCount(dedup.review_count), nestedNumber(dedup, 'review_count') > 0 ? 'warn' : 'neutral') : null
+    ], listMessages(autoResolve?.items)),
+    stage('结果检查', okTone(check?.ok, nestedNumber(check, 'suspicious_count') > 0 ? 'warn' : 'ok'), [
+      fact('状态', stringField(check?.status)),
+      nestedNumber(check, 'suspicious_count') > 0 ? fact('可疑项', compactCount(check?.suspicious_count), 'warn') : null,
+      nestedNumber(check, 'stage_error_count') > 0 ? fact('阶段错误', compactCount(check?.stage_error_count), 'error') : null
+    ], [
+      stringField(check?.message),
+      ...listMessages(check?.errors),
+      ...listMessages(check?.suspicious)
+    ])
+  ];
+}
+
+function genericResultStages(result: Record<string, unknown>): ResultStage[] {
+  const stages: ResultStage[] = [];
+  const total = numberLike(result.total);
+  const okCount = numberLike(result.ok_count);
+  const errorCount = numberLike(result.error_count);
+  if (total !== null || okCount !== null || errorCount !== null) {
+    stages.push(stage('执行结果', errorCount && errorCount > 0 ? 'error' : 'ok', [
+      okCount !== null && total !== null ? fact('成功', `${compactCount(okCount)} / ${compactCount(total)}`, errorCount && errorCount > 0 ? 'warn' : 'ok') : null,
+      errorCount && errorCount > 0 ? fact('失败', compactCount(errorCount), 'error') : null,
+      fact('总数', total !== null ? compactCount(total) : null)
+    ], listMessages(result.results || result.items)));
+  }
+  if (typeof result.ok === 'boolean') {
+    stages.push(stage('状态', result.ok ? 'ok' : 'error', [
+      fact('ok', result.ok ? 'true' : 'false', result.ok ? 'ok' : 'error'),
+      fact('message', stringField(result.message) || stringField(result.msg))
+    ], listMessages(result.warnings)));
+  }
+  return stages;
+}
+
+function resultStages(task: TaskRun): ResultStage[] {
+  const result = plainObject(task.result);
+  if (!result) return [];
+  if (task.kind === 'add_new' || task.kind === 'zhuigeng_update') {
+    return addNewStages(result);
+  }
+  return genericResultStages(result);
+}
+
+function TaskResultPanel({ task }: { task: TaskRun }) {
+  const stages = resultStages(task).filter((item) => item.facts.length > 0 || item.notes.length > 0);
+  if (!stages.length) return null;
+  return (
+    <section className="taskResultPanel">
+      <h4>结果摘要</h4>
+      <div className="taskResultStages">
+        {stages.map((item) => (
+          <article className={`taskResultStage ${item.tone}`} key={item.title}>
+            <strong>{item.title}</strong>
+            {item.facts.length > 0 && (
+              <dl>
+                {item.facts.map((entry) => (
+                  <div key={`${item.title}-${entry.label}`}>
+                    <dt>{entry.label}</dt>
+                    <dd className={entry.tone || ''}>{entry.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+            {item.notes.map((note) => <p key={`${item.title}-${note}`}>{note}</p>)}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function prettyJson(value: unknown) {
   if (value === null || value === undefined) return '';
   if (typeof value === 'string') return value;
@@ -512,6 +693,7 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
                           <Copy size={14} />
                         </button>
                       </div>
+                      <TaskResultPanel task={task} />
                       {showParams && (
                         <section>
                           <h4>参数</h4>
@@ -519,10 +701,10 @@ export function TaskCenter({ onTaskComplete }: TaskCenterProps = {}) {
                         </section>
                       )}
                       {showResult && (
-                        <section>
-                          <h4>结果</h4>
+                        <details className="taskJsonDetails">
+                          <summary>技术详情 JSON</summary>
                           <pre>{prettyJson(task.result)}</pre>
-                        </section>
+                        </details>
                       )}
                       {task.error && (
                         <section>

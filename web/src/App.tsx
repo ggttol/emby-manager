@@ -140,17 +140,17 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
             </button>
           </div>
         </header>
-        <TabPanel tab={tab} />
+        <TabPanel tab={tab} onNavigate={setActive} />
       </main>
     </div>
   );
 }
 
-function TabPanel({ tab }: { tab: Tab }) {
+function TabPanel({ tab, onNavigate }: { tab: Tab; onNavigate: (tabId: string) => void }) {
   if (tab.id === 'dashboard') {
     return (
       <section className="panel">
-        <DashboardPanel />
+        <DashboardPanel onNavigate={onNavigate} />
       </section>
     );
   }

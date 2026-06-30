@@ -815,6 +815,97 @@ main {
   overflow-wrap: anywhere;
 }
 
+.taskResultPanel {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.taskResultStages {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.taskResultStage {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.taskResultStage.ok {
+  border-color: #b7dba5;
+  background: #f0f8ed;
+}
+
+.taskResultStage.warn {
+  border-color: #edcf95;
+  background: var(--amber-soft);
+}
+
+.taskResultStage.error {
+  border-color: #efb3ad;
+  background: var(--danger-soft);
+}
+
+.taskResultStage > strong {
+  display: block;
+  margin-bottom: 7px;
+  font-size: 12px;
+}
+
+.taskResultStage dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 8px;
+  margin: 0;
+}
+
+.taskResultStage dt {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.taskResultStage dd {
+  margin: 1px 0 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taskResultStage dd.ok {
+  color: #3a7430;
+}
+
+.taskResultStage dd.warn {
+  color: #8a630e;
+}
+
+.taskResultStage dd.error {
+  color: var(--danger);
+}
+
+.taskResultStage p {
+  margin: 7px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.taskJsonDetails {
+  min-width: 0;
+}
+
+.taskJsonDetails summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 760;
+}
+
 .toastStack {
   position: fixed;
   right: 18px;
@@ -1959,6 +2050,64 @@ main {
 .todoItem.warn {
   border-color: #edcf95;
   background: var(--amber-soft);
+}
+
+.smartActionList {
+  display: grid;
+  gap: 9px;
+}
+
+.smartActionItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px 12px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.smartActionItem.error {
+  border-color: #efb3ad;
+  background: var(--danger-soft);
+}
+
+.smartActionItem.warn {
+  border-color: #edcf95;
+  background: var(--amber-soft);
+}
+
+.smartActionItem > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 5px 8px;
+  min-width: 0;
+}
+
+.smartActionItem strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.smartActionItem small {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.smartActionItem p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.smartActionItem .btn {
+  align-self: start;
+  white-space: nowrap;
 }
 
 .miniStats {
@@ -4318,6 +4467,15 @@ main {
   .dedupBulkBar,
   .scanActions {
     position: static;
+  }
+
+  .taskResultStages,
+  .smartActionItem {
+    grid-template-columns: 1fr;
+  }
+
+  .smartActionItem .btn {
+    justify-self: stretch;
   }
 
   .btn {
