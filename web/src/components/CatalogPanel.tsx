@@ -5,6 +5,7 @@ import {
   Package,
   RefreshCw,
   Search,
+  Sparkles,
   Square
 } from 'lucide-react';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
@@ -15,6 +16,9 @@ import { Modal } from './Modal';
 import { useToast } from './Toast';
 
 type CatalogItem = components['schemas']['CatalogItem'];
+type CatalogLibraryContextResponse = components['schemas']['CatalogLibraryContextResponse'];
+type CatalogResourceRecommendation = components['schemas']['CatalogResourceRecommendation'];
+type CatalogRemoteSearchResponse = components['schemas']['CatalogRemoteSearchResponse'];
 type CatalogSearchResponse = components['schemas']['CatalogSearchResponse'];
 type CatalogStatsResponse = components['schemas']['CatalogStatsResponse'];
 type CatalogTransferPlanItem = components['schemas']['CatalogTransferPlanItem'];
@@ -24,7 +28,8 @@ type CatalogTransferTarget = components['schemas']['CatalogTransferTarget'];
 type ConfigResponse = components['schemas']['ConfigResponse'];
 type TaskRun = components['schemas']['TaskRun'];
 
-type LinkFilter = '' | 'share115' | 'magnet' | 'ed2k';
+type CatalogSource = 'local' | 'remote';
+type LinkFilter = string;
 
 type TransferTarget = {
   lib?: string;
@@ -37,6 +42,7 @@ type PendingTransfer = {
   mode: 'single' | 'batch';
   target: TransferTarget;
   plans: CatalogTransferPlanResponse[];
+  context?: CatalogLibraryContextResponse | null;
 };
 
 type CatalogTransferExecuteRequest = {
@@ -44,11 +50,23 @@ type CatalogTransferExecuteRequest = {
   target: CatalogTransferTarget;
 };
 
-const linkTypeOptions: Array<{ value: LinkFilter; label: string }> = [
+const localLinkTypeOptions: Array<{ value: LinkFilter; label: string }> = [
   { value: '', label: '全部类型' },
   { value: 'share115', label: '115 秒传' },
   { value: 'magnet', label: '磁力' },
   { value: 'ed2k', label: 'ed2k' }
+];
+
+const remoteDiskTypeOptions: Array<{ value: LinkFilter; label: string }> = [
+  { value: '', label: '全部网盘' },
+  { value: '115', label: '115' },
+  { value: 'quark', label: '夸克' },
+  { value: 'baidu', label: '百度' },
+  { value: 'aliyun', label: '阿里云' },
+  { value: 'xunlei', label: '迅雷' },
+  { value: 'uc', label: 'UC' },
+  { value: '123', label: '123' },
+  { value: 'guangya', label: '光亚' }
 ];
 
 function errorMessage(error: unknown) {
@@ -87,6 +105,14 @@ function itemToPlanItem(item: CatalogItem): CatalogTransferPlanItem {
 
 function linkTypeLabel(type: string) {
   if (type === 'share115') return '115 秒传';
+  if (type === '115') return '115';
+  if (type === 'quark') return '夸克';
+  if (type === 'baidu') return '百度';
+  if (type === 'aliyun') return '阿里云';
+  if (type === 'xunlei') return '迅雷';
+  if (type === 'uc') return 'UC';
+  if (type === '123') return '123';
+  if (type === 'guangya') return '光亚';
   if (type === 'magnet') return '磁力';
   if (type === 'ed2k') return 'ed2k';
   return type || '未知';
@@ -114,6 +140,122 @@ function planActionLabel(action: CatalogTransferPlanResponse['action']) {
   return '不支持';
 }
 
+function recommendationClass(level?: string | null) {
+  if (level === 'best' || level === 'good' || level === 'warn' || level === 'skip') return level;
+  return 'neutral';
+}
+
+function isSmartSelectable(item: CatalogItem) {
+  const recommendation = item.recommendation;
+  return (
+    item.link_type === 'share115'
+    && !recommendation?.already_have
+    && (recommendation?.level === 'best' || recommendation?.level === 'good')
+  );
+}
+
+function compactText(values: Array<string | number>, fallback = '无') {
+  return values.length ? values.join('、') : fallback;
+}
+
+function itemTypeLabel(type: string) {
+  if (type.toLowerCase() === 'series') return '剧集';
+  if (type.toLowerCase() === 'movie') return '电影';
+  return type || '条目';
+}
+
+function RecommendationCell({ recommendation }: { recommendation?: CatalogResourceRecommendation | null }) {
+  if (!recommendation) {
+    return <span className="catalogRecommendation mutedText">待判断</span>;
+  }
+  const level = recommendationClass(recommendation.level);
+  return (
+    <div className="catalogRecommendation">
+      <span className={`catalogRecommendationBadge ${level}`}>
+        {recommendation.action}
+        <small>{recommendation.score}</small>
+      </span>
+      {recommendation.episode_ranges.length > 0 && (
+        <span className="catalogRecommendationRanges">{recommendation.episode_ranges.join('、')}</span>
+      )}
+      <ul className="catalogRecommendationReasons">
+        {recommendation.reasons.slice(0, 2).map((reason) => (
+          <li key={reason}>{reason}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function CatalogLibraryContextPanel({ context }: { context: CatalogLibraryContextResponse }) {
+  const summary = context.summary;
+  const episodeText = summary.episode_ranges.length
+    ? summary.episode_ranges.join('、')
+    : summary.max_episode > 0
+      ? `到 E${summary.max_episode}`
+      : '无';
+  const missingText = summary.missing_ranges.length ? summary.missing_ranges.join('、') : '无';
+
+  return (
+    <div className={`catalogLibraryContext ${context.ok ? '' : 'warn'}`}>
+      <div className="catalogContextHead">
+        <div>
+          <span>本库情况</span>
+          <strong>{summary.note}</strong>
+          <small>
+            {context.total_matches.toLocaleString('zh-CN')} 个匹配
+            {context.truncated ? ' · 结果已截断' : ''}
+          </small>
+        </div>
+        <div className="catalogContextBadges">
+          <span className={`badge ${summary.matched ? 'done' : 'pending'}`}>{summary.matched ? '已入库' : '未入库'}</span>
+          {summary.duplicate && <span className="badge warn">重复 {summary.duplicate_groups}</span>}
+          {summary.missing_ranges.length > 0 && <span className="badge warn">缺集 {summary.missing_ranges.length}</span>}
+        </div>
+      </div>
+
+      <div className="catalogContextSummary">
+        <div><span>媒体库</span><strong>{compactText(summary.libraries)}</strong></div>
+        <div><span>年份</span><strong>{compactText(summary.years)}</strong></div>
+        <div><span>TMDb</span><strong>{compactText(summary.tmdb_ids)}</strong></div>
+        <div><span>已有集数</span><strong>{episodeText}</strong></div>
+        <div><span>缺口</span><strong>{missingText}</strong></div>
+      </div>
+
+      {context.warnings.length > 0 && (
+        <div className="catalogContextWarning">
+          {context.warnings.map((warning) => (
+            <span key={warning}>{warning}</span>
+          ))}
+        </div>
+      )}
+
+      {context.items.length > 0 && (
+        <div className="catalogContextList">
+          {context.items.slice(0, 4).map((item, index) => (
+            <div className="catalogContextItem" key={item.id || `${item.name}-${index}`}>
+              <strong>{item.name}</strong>
+              <span>
+                {itemTypeLabel(item.item_type)}
+                {item.library ? ` · ${item.library}` : ''}
+                {item.year ? ` · ${item.year}` : ''}
+                {item.tmdb ? ` · TMDb ${item.tmdb}` : ''}
+              </span>
+              <small>
+                {item.episode_ranges.length ? `已有 ${item.episode_ranges.join('、')}` : '未读取到集数'}
+                {item.missing_ranges.length ? ` · 缺 ${item.missing_ranges.join('、')}` : ''}
+                {item.duplicate ? ' · 重复条目' : ''}
+                {!item.has_primary_image ? ' · 无主海报' : ''}
+                {item.error ? ` · ${item.error}` : ''}
+              </small>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
@@ -133,9 +275,13 @@ export function CatalogPanel() {
   const [cidMap, setCidMap] = useState<Record<string, string>>({});
   const [targetLib, setTargetLib] = useState('');
   const [customCid, setCustomCid] = useState('');
+  const [source, setSource] = useState<CatalogSource>('remote');
   const [query, setQuery] = useState('');
   const [linkFilter, setLinkFilter] = useState<LinkFilter>('');
   const [items, setItems] = useState<CatalogItem[]>([]);
+  const [resultTotal, setResultTotal] = useState(0);
+  const [remoteDiskTypes, setRemoteDiskTypes] = useState<Array<{ disk_type: string; count: number }>>([]);
+  const [libraryContext, setLibraryContext] = useState<CatalogLibraryContextResponse | null>(null);
   const [selected, setSelected] = useState<Set<number>>(() => new Set());
   const [searched, setSearched] = useState(false);
   const [truncated, setTruncated] = useState(false);
@@ -153,7 +299,9 @@ export function CatalogPanel() {
 
   const cidEntries = useMemo(() => Object.entries(cidMap).sort(([a], [b]) => a.localeCompare(b, 'zh-CN')), [cidMap]);
   const selectedItems = useMemo(() => items.filter((_, index) => selected.has(index)), [items, selected]);
+  const smartSelectableCount = useMemo(() => items.filter(isSmartSelectable).length, [items]);
   const allSelected = items.length > 0 && selected.size === items.length;
+  const filterOptions = source === 'remote' ? remoteDiskTypeOptions : localLinkTypeOptions;
 
   const trackTask = (task: TaskRun) => {
     setTrackedTaskIds((prev) => (prev.includes(task.id) ? prev : [task.id, ...prev].slice(0, 20)));
@@ -222,12 +370,25 @@ export function CatalogPanel() {
     setError('');
     try {
       const params = new URLSearchParams({ q, limit: '80' });
-      if (linkFilter) params.set('link_type', linkFilter);
-      const data = await api<CatalogSearchResponse>(`/api/v2/catalog/search?${params.toString()}`);
-      setItems(data.items);
+      if (source === 'remote') {
+        if (linkFilter) params.set('disk_type', linkFilter);
+        const data = await api<CatalogRemoteSearchResponse>(`/api/v2/catalog/remote-search?${params.toString()}`);
+        setItems(data.items);
+        setResultTotal(data.total);
+        setRemoteDiskTypes(data.disk_types);
+        setLibraryContext(data.context ?? null);
+        setTruncated(data.truncated);
+      } else {
+        if (linkFilter) params.set('link_type', linkFilter);
+        const data = await api<CatalogSearchResponse>(`/api/v2/catalog/search?${params.toString()}`);
+        setItems(data.items);
+        setResultTotal(data.total);
+        setRemoteDiskTypes([]);
+        setLibraryContext(null);
+        setTruncated(data.truncated);
+      }
       setSelected(new Set());
       setSearched(true);
-      setTruncated(data.truncated);
     } catch (e) {
       const message = errorMessage(e);
       setError(message);
@@ -240,6 +401,13 @@ export function CatalogPanel() {
   const submitSearch = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     search();
+  };
+
+  const changeSource = (next: CatalogSource) => {
+    setSource(next);
+    setLinkFilter('');
+    setRemoteDiskTypes([]);
+    setLibraryContext(null);
   };
 
   const parseTarget = (): TransferTarget | null => {
@@ -276,7 +444,7 @@ export function CatalogPanel() {
     try {
       const plans = await Promise.all(transferItems.map((item) => planTransferItem(item, target)));
       setPackageAck('');
-      setPending({ items: transferItems, mode, target, plans });
+      setPending({ items: transferItems, mode, target, plans, context: source === 'remote' ? libraryContext : null });
       setError('');
     } catch (e) {
       const message = errorMessage(e);
@@ -333,6 +501,19 @@ export function CatalogPanel() {
     });
   };
 
+  const selectSmart = () => {
+    const next = new Set<number>();
+    items.forEach((item, index) => {
+      if (isSmartSelectable(item)) next.add(index);
+    });
+    if (!next.size) {
+      toast.push('当前结果里没有可智能选择的 115 推荐项', 'warn');
+      return;
+    }
+    setSelected(next);
+    toast.push(`已智能选择 ${next.size} 条推荐资源`, 'ok');
+  };
+
   const packageCount = pending?.plans.filter((plan) => plan.is_pkg).length || 0;
   const offlineCount = pending?.plans.filter((plan) => plan.action === 'offline_download').length || 0;
   const shareCount = pending?.plans.filter((plan) => plan.action === 'save_share').length || 0;
@@ -343,8 +524,8 @@ export function CatalogPanel() {
     <section className="catalogPanel">
       <div className="catalogMeta">
         <div>
-          <strong>115 资源目录</strong>
-          <span>{statText(stats)}</span>
+          <strong>资源搜索</strong>
+          <span>{source === 'remote' ? 'TG Resource API · 115 结果可直接转存到目标库' : statText(stats)}</span>
         </div>
         <button className="btn ghost" onClick={loadMeta} disabled={loadingMeta}>
           <RefreshCw size={16} />
@@ -364,14 +545,26 @@ export function CatalogPanel() {
           />
         </label>
         <label>
-          <span>链接类型</span>
+          <span>数据源</span>
           <select
             className="input"
-            aria-label="链接类型"
+            aria-label="资源数据源"
+            value={source}
+            onChange={(event) => changeSource(event.target.value as CatalogSource)}
+          >
+            <option value="remote">TG Resource API</option>
+            <option value="local">本地 catalog</option>
+          </select>
+        </label>
+        <label>
+          <span>{source === 'remote' ? '网盘类型' : '链接类型'}</span>
+          <select
+            className="input"
+            aria-label={source === 'remote' ? '网盘类型' : '链接类型'}
             value={linkFilter}
             onChange={(event) => setLinkFilter(event.target.value as LinkFilter)}
           >
-            {linkTypeOptions.map((option) => (
+            {filterOptions.map((option) => (
               <option key={option.value || 'all'} value={option.value}>{option.label}</option>
             ))}
           </select>
@@ -421,6 +614,16 @@ export function CatalogPanel() {
         </label>
       </div>
 
+      {source === 'remote' && remoteDiskTypes.length > 0 && (
+        <div className="catalogRemoteTypes" aria-label="远程网盘类型分布">
+          {remoteDiskTypes.map((item) => (
+            <span className="badge" key={item.disk_type}>{linkTypeLabel(item.disk_type)} {item.count.toLocaleString('zh-CN')}</span>
+          ))}
+        </div>
+      )}
+
+      {source === 'remote' && libraryContext && <CatalogLibraryContextPanel context={libraryContext} />}
+
       {error && <div className="notice warn whitespaceNotice">{error}</div>}
 
       <div className="catalogResultHead">
@@ -429,16 +632,28 @@ export function CatalogPanel() {
           全选
         </button>
         <span>
-          {searched ? `${items.length} 条结果${truncated ? ' · 已截断，请缩小关键词' : ''}` : '等待搜索'}
+          {searched
+            ? `${items.length}${resultTotal && resultTotal !== items.length ? ` / ${resultTotal.toLocaleString('zh-CN')}` : ''} 条结果${truncated ? ' · 还有更多，请缩小关键词或翻页后续再补' : ''}`
+            : '等待搜索'}
         </span>
-        <button
-          className="btn compact"
-          onClick={() => requestTransfer(selectedItems, 'batch')}
-          disabled={!selectedItems.length || transferring}
-        >
-          <DownloadCloud size={15} />
-          转存选中
-        </button>
+        <div className="catalogResultActions">
+          <button
+            className="btn ghost compact"
+            onClick={selectSmart}
+            disabled={!smartSelectableCount || transferring}
+          >
+            <Sparkles size={15} />
+            智能选择{smartSelectableCount ? ` ${smartSelectableCount}` : ''}
+          </button>
+          <button
+            className="btn compact"
+            onClick={() => requestTransfer(selectedItems, 'batch')}
+            disabled={!selectedItems.length || transferring}
+          >
+            <DownloadCloud size={15} />
+            转存选中
+          </button>
+        </div>
       </div>
 
       <div className="catalogTableWrap">
@@ -447,6 +662,7 @@ export function CatalogPanel() {
             <tr>
               <th>选择</th>
               <th>资源</th>
+              <th>建议</th>
               <th>类型</th>
               <th>来源</th>
               <th>链接</th>
@@ -473,6 +689,7 @@ export function CatalogPanel() {
                     </span>
                   )}
                 </td>
+                <td><RecommendationCell recommendation={item.recommendation} /></td>
                 <td><span className={`badge linkType ${item.link_type}`}>{linkTypeLabel(item.link_type)}</span></td>
                 <td>{item.sheet}</td>
                 <td><span className="catalogLink" title={item.link}>{item.link}</span></td>
@@ -486,7 +703,7 @@ export function CatalogPanel() {
             ))}
             {!items.length && (
               <tr>
-                <td colSpan={6} className="emptyCell">
+                <td colSpan={7} className="emptyCell">
                   {searched ? '没有搜到资源，换几个关键词试试' : '输入关键词后搜索资源目录'}
                 </td>
               </tr>
@@ -513,6 +730,16 @@ export function CatalogPanel() {
             <p>
               确认后会创建一个可取消任务，交给任务中心处理 <strong>{pending.items.length}</strong> 条到 <strong>{pending.target.label}</strong>
             </p>
+            {pending.context && (
+              <div className="notice catalogPlanContext">
+                <strong>本库情况：{pending.context.summary.note}</strong>
+                {pending.context.summary.duplicate && <span>已有重复组 {pending.context.summary.duplicate_groups} 个</span>}
+                {pending.context.summary.missing_ranges.length > 0 && <span>缺口 {pending.context.summary.missing_ranges.join('、')}</span>}
+                {pending.context.warnings.map((warning) => (
+                  <span key={warning}>{warning}</span>
+                ))}
+              </div>
+            )}
             <dl>
               <div><dt>115 秒传</dt><dd>{shareCount}</dd></div>
               <div><dt>离线下载</dt><dd>{offlineCount}</dd></div>

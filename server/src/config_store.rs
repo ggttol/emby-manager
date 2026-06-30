@@ -316,10 +316,15 @@ async fn normalize_import_value(pool: &PgPool, key: &str, value: Value) -> AppRe
     }
 
     let normalized = match key {
-        "emby_url" | "tmdb_base_url" | "tmdb_url" => normalize_url(key, value),
-        "api_key" | "c115_cookie" | "cd2_webhook_secret" | "tmdb_api_key" | "tmdb_key" => {
-            normalize_string(key, value)
+        "emby_url" | "tmdb_base_url" | "tmdb_url" | "tg_resource_api_base_url" => {
+            normalize_url(key, value)
         }
+        "api_key"
+        | "c115_cookie"
+        | "cd2_webhook_secret"
+        | "tmdb_api_key"
+        | "tmdb_key"
+        | "tg_resource_api_token" => normalize_string(key, value),
         "c115_cid_map" => normalize_cid_map(value),
         "trusted_proxies" => normalize_string_list(key, value),
         "auto_strm_enabled" | "auto_strm_fullauto" | "bind_token_ip" => normalize_bool(key, value),
@@ -476,6 +481,7 @@ fn is_sensitive_key(key: &str) -> bool {
         || key.contains("cookie")
         || key.contains("secret")
         || key.contains("api_key")
+        || key.contains("token")
 }
 
 const IMPORTABLE_CONFIG_KEYS: &[&str] = &[
@@ -494,6 +500,8 @@ const IMPORTABLE_CONFIG_KEYS: &[&str] = &[
     "tmdb_api_key",
     "tmdb_key",
     "tmdb_timeout_secs",
+    "tg_resource_api_base_url",
+    "tg_resource_api_token",
     "bind_token_ip",
 ];
 
@@ -548,6 +556,7 @@ mod tests {
         assert!(is_sensitive_key("api_key"));
         assert!(is_sensitive_key("c115_cookie"));
         assert!(is_sensitive_key("bootstrap_password"));
+        assert!(is_sensitive_key("tg_resource_api_token"));
         assert!(!is_sensitive_key("c115_cid_map"));
     }
 }

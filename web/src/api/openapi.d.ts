@@ -276,6 +276,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/catalog/library-context": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["catalog_library_context"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/catalog/remote-search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["catalog_remote_search"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/catalog/search": {
         parameters: {
             query?: never;
@@ -1597,14 +1629,103 @@ export interface components {
             link_type: string;
             name: string;
             rc?: string | null;
+            recommendation?: null | components["schemas"]["CatalogResourceRecommendation"];
             share?: string | null;
             sheet: string;
             transfer: boolean;
+        };
+        CatalogLibraryContextItem: {
+            duplicate: boolean;
+            episode_count: number;
+            episode_ranges: string[];
+            error?: string | null;
+            folder?: string | null;
+            has_primary_image: boolean;
+            id?: string | null;
+            item_type: string;
+            library?: string | null;
+            /** Format: int32 */
+            max_episode: number;
+            missing_ranges: string[];
+            name: string;
+            path?: string | null;
+            tmdb?: string | null;
+            /** Format: int32 */
+            year?: number | null;
+        };
+        CatalogLibraryContextQuery: {
+            limit?: number | null;
+            q: string;
+        };
+        CatalogLibraryContextResponse: {
+            items: components["schemas"]["CatalogLibraryContextItem"][];
+            ok: boolean;
+            query: string;
+            summary: components["schemas"]["CatalogLibraryContextSummary"];
+            total_matches: number;
+            truncated: boolean;
+            warnings: string[];
+        };
+        CatalogLibraryContextSummary: {
+            duplicate: boolean;
+            duplicate_groups: number;
+            episode_ranges: string[];
+            libraries: string[];
+            matched: boolean;
+            /** Format: int32 */
+            max_episode: number;
+            missing_ranges: string[];
+            note: string;
+            tmdb_ids: string[];
+            total_episodes: number;
+            years: number[];
         };
         CatalogLinkTypeCount: {
             /** Format: int64 */
             count: number;
             link_type: string;
+        };
+        CatalogRemoteDiskTypeCount: {
+            /** Format: int64 */
+            count: number;
+            disk_type: string;
+        };
+        CatalogRemoteSearchQuery: {
+            disk_type?: string | null;
+            exact?: boolean | null;
+            /** Format: int64 */
+            limit?: number | null;
+            /** Format: int64 */
+            offset?: number | null;
+            q: string;
+            sort?: string | null;
+        };
+        CatalogRemoteSearchResponse: {
+            context?: null | components["schemas"]["CatalogLibraryContextResponse"];
+            disk_types: components["schemas"]["CatalogRemoteDiskTypeCount"][];
+            exact: boolean;
+            has_more: boolean;
+            items: components["schemas"]["CatalogItem"][];
+            /** Format: int64 */
+            limit: number;
+            /** Format: int64 */
+            offset: number;
+            query: string;
+            sort: string;
+            /** Format: int64 */
+            total: number;
+            truncated: boolean;
+        };
+        CatalogResourceRecommendation: {
+            action: string;
+            already_have: boolean;
+            covers_missing: boolean;
+            duplicate_risk: boolean;
+            episode_ranges: string[];
+            level: string;
+            reasons: string[];
+            /** Format: int32 */
+            score: number;
         };
         CatalogSearchQuery: {
             /** Format: int64 */
@@ -3278,6 +3399,54 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CatalogDuplicatesResponse"];
+                };
+            };
+        };
+    };
+    catalog_library_context: {
+        parameters: {
+            query: {
+                q: string;
+                limit?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogLibraryContextResponse"];
+                };
+            };
+        };
+    };
+    catalog_remote_search: {
+        parameters: {
+            query: {
+                q: string;
+                limit?: number | null;
+                offset?: number | null;
+                disk_type?: string | null;
+                exact?: boolean | null;
+                sort?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogRemoteSearchResponse"];
                 };
             };
         };

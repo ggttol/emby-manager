@@ -2361,6 +2361,7 @@ describe('App shell', () => {
     render(<App />);
 
     fireEvent.click(await screen.findByRole('button', { name: '找资源' }));
+    fireEvent.change(screen.getByLabelText('资源数据源'), { target: { value: 'local' } });
     expect(await screen.findByText('库内 260,000 条 · 整包 1,200')).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('资源关键词'), { target: { value: 'movie' } });
@@ -2456,6 +2457,163 @@ describe('App shell', () => {
       target: { lib: '电影' }
     });
     expect(await screen.findByText('批量任务已交给任务中心，可在任务中心取消：目录转存: 2 项 -> cid=12345')).toBeInTheDocument();
+  });
+
+  it('shows remote catalog context and smart-selects recommended 115 resources', async () => {
+    const planPayloads: unknown[] = [];
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/catalog/stats') {
+        return jsonResponse({ available: true, total: 260000, packages: 1200 });
+      }
+      if (url.pathname === '/api/v2/config') {
+        return jsonResponse({ settings: { c115_cid_map: { 电视剧: '67890' } } });
+      }
+      if (url.pathname === '/api/v2/catalog/remote-search') {
+        expect(url.searchParams.get('q')).toBe('莫离');
+        expect(url.searchParams.get('limit')).toBe('80');
+        return jsonResponse({
+          total: 2,
+          limit: 80,
+          offset: 0,
+          has_more: false,
+          query: '莫离',
+          exact: false,
+          sort: 'resource',
+          truncated: false,
+          disk_types: [{ disk_type: '115', count: 2 }],
+          context: {
+            ok: true,
+            query: '莫离',
+            total_matches: 1,
+            truncated: false,
+            warnings: [],
+            summary: {
+              matched: true,
+              duplicate: false,
+              duplicate_groups: 0,
+              libraries: ['电视剧'],
+              tmdb_ids: ['123456'],
+              years: [2026],
+              episode_ranges: ['S01E01-E08'],
+              missing_ranges: ['S01E09-E40'],
+              max_episode: 8,
+              total_episodes: 8,
+              note: '库内已有条目但存在缺集，可优先选补缺或全集资源'
+            },
+            items: [{
+              id: 'series-1',
+              name: '莫离',
+              item_type: 'Series',
+              library: '电视剧',
+              folder: '莫离',
+              path: '/strm/电视剧/莫离',
+              year: 2026,
+              tmdb: '123456',
+              has_primary_image: true,
+              duplicate: false,
+              episode_count: 8,
+              episode_ranges: ['S01E01-E08'],
+              missing_ranges: ['S01E09-E40'],
+              max_episode: 8
+            }]
+          },
+          items: [
+            {
+              name: '莫离 S01E01-E40 2160p',
+              sheet: 'TG Resource API',
+              link: 'https://115cdn.com/s/swfull?password=8888',
+              is_pkg: true,
+              link_type: 'share115',
+              transfer: true,
+              share: 'swfull',
+              rc: '8888',
+              recommendation: {
+                score: 205,
+                level: 'best',
+                action: '推荐转存',
+                reasons: ['115 可直接转存', '资源到 E40，本地到 E8，适合补缺'],
+                episode_ranges: ['S01E01-E40'],
+                covers_missing: true,
+                duplicate_risk: false,
+                already_have: false
+              }
+            },
+            {
+              name: '莫离 S01E05 2160p',
+              sheet: 'TG Resource API',
+              link: 'https://115cdn.com/s/swsingle?password=8888',
+              is_pkg: false,
+              link_type: 'share115',
+              transfer: true,
+              share: 'swsingle',
+              rc: '8888',
+              recommendation: {
+                score: 0,
+                level: 'skip',
+                action: '可能已存在',
+                reasons: ['疑似单集 E5，本地大概率已有'],
+                episode_ranges: ['S01E05'],
+                covers_missing: false,
+                duplicate_risk: false,
+                already_have: true
+              }
+            }
+          ]
+        });
+      }
+      if (url.pathname === '/api/v2/catalog/transfer-plan') {
+        const headers = init?.headers as Headers;
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        const payload = JSON.parse(String(init?.body));
+        planPayloads.push(payload);
+        return jsonResponse({
+          ok: true,
+          transfer: true,
+          action: 'save_share',
+          link_type: 'share115',
+          is_pkg: Boolean(payload.item.is_pkg),
+          label: payload.item.name,
+          target: { lib: payload.lib },
+          save: {
+            endpoint: '/api/v2/c115/save',
+            method: 'POST',
+            share: payload.item.share,
+            receive_code: payload.item.rc,
+            payload: { url: payload.item.link, pwd: payload.item.rc, lib: payload.lib, label: payload.item.name }
+          }
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '找资源' }));
+    fireEvent.change(screen.getByLabelText('资源关键词'), { target: { value: '莫离' } });
+    fireEvent.click(screen.getByRole('button', { name: '搜索' }));
+
+    expect(await screen.findByText('库内已有条目但存在缺集，可优先选补缺或全集资源')).toBeInTheDocument();
+    expect(screen.getByText('莫离 S01E01-E40 2160p')).toBeInTheDocument();
+    expect(screen.getByText('推荐转存')).toBeInTheDocument();
+    expect(screen.getByText('可能已存在')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '智能选择 1' }));
+    fireEvent.click(screen.getByRole('button', { name: '转存选中' }));
+
+    await waitFor(() => expect(planPayloads).toHaveLength(1));
+    expect(planPayloads[0]).toEqual({
+      item: {
+        name: '莫离 S01E01-E40 2160p',
+        sheet: 'TG Resource API',
+        link: 'https://115cdn.com/s/swfull?password=8888',
+        link_type: 'share115',
+        is_pkg: true,
+        share: 'swfull',
+        rc: '8888'
+      },
+      lib: '电视剧'
+    });
+    expect(await screen.findByText('本库情况：库内已有条目但存在缺集，可优先选补缺或全集资源')).toBeInTheDocument();
   });
 
   it('previews 115 share files and creates save/offline/scan tasks with csrf', async () => {
@@ -2824,6 +2982,7 @@ describe('App shell', () => {
         tmdb_base_url: 'https://api.themoviedb.org',
         tmdb_api_key: '***',
         tmdb_timeout_secs: 12,
+        tg_resource_api_base_url: 'http://gaotao.cc:8100',
         c115_cookie: 'UID=1; CID=2; SEID=3',
         c115_cid_map: { 电影: '12345', 电视剧: '67890' },
         trusted_proxies: ['192.168.2.1', '10.0.0.1'],

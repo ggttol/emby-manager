@@ -1,4 +1,4 @@
-import { ClipboardCheck, Copy, Download, KeyRound, RefreshCw, Save, SearchCheck, ShieldCheck, Shuffle, Webhook } from 'lucide-react';
+import { ClipboardCheck, Copy, Download, Globe2, KeyRound, RefreshCw, Save, SearchCheck, ShieldCheck, Shuffle, Webhook } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
@@ -24,6 +24,7 @@ type CidRow = {
 
 const defaultEmbyUrl = 'http://127.0.0.1:8096/emby';
 const defaultTmdbBaseUrl = 'https://api.themoviedb.org';
+const defaultTgResourceApiBaseUrl = 'http://gaotao.cc:8100';
 const knownKeys = new Set([
   'emby_url',
   'api_key',
@@ -32,6 +33,8 @@ const knownKeys = new Set([
   'tmdb_api_key',
   'tmdb_key',
   'tmdb_timeout_secs',
+  'tg_resource_api_base_url',
+  'tg_resource_api_token',
   'c115_cookie',
   'c115_cid_map',
   'trusted_proxies',
@@ -208,6 +211,8 @@ export function SettingsPanel() {
   const [tmdbBaseUrl, setTmdbBaseUrl] = useState(defaultTmdbBaseUrl);
   const [tmdbApiKey, setTmdbApiKey] = useState('');
   const [tmdbTimeout, setTmdbTimeout] = useState('8');
+  const [tgResourceApiBaseUrl, setTgResourceApiBaseUrl] = useState(defaultTgResourceApiBaseUrl);
+  const [tgResourceApiToken, setTgResourceApiToken] = useState('');
   const [c115Cookie, setC115Cookie] = useState('');
   const [c115CookieSet, setC115CookieSet] = useState(false);
   const [cidRows, setCidRows] = useState<CidRow[]>([]);
@@ -239,6 +244,7 @@ export function SettingsPanel() {
 
   const maskedApiKey = config.settings.api_key === '***';
   const maskedTmdbApiKey = config.settings.tmdb_api_key === '***' || config.settings.tmdb_key === '***';
+  const maskedTgResourceApiToken = config.settings.tg_resource_api_token === '***';
   const webhookSecretSet = Boolean(stringValue(config.settings.cd2_webhook_secret));
   const maskedWebhookSecret = config.settings.cd2_webhook_secret === '***';
   const copyableWebhookUrl = webhookUrl(cd2Secret);
@@ -259,6 +265,8 @@ export function SettingsPanel() {
     setTmdbBaseUrl(stringValue(nextConfig.settings.tmdb_base_url ?? nextConfig.settings.tmdb_url, defaultTmdbBaseUrl));
     setTmdbApiKey(stringValue(nextConfig.settings.tmdb_api_key ?? nextConfig.settings.tmdb_key));
     setTmdbTimeout(numberString(nextConfig.settings.tmdb_timeout_secs, 8));
+    setTgResourceApiBaseUrl(stringValue(nextConfig.settings.tg_resource_api_base_url, defaultTgResourceApiBaseUrl));
+    setTgResourceApiToken('');
     setC115Cookie('');
     setC115CookieSet(Boolean(stringValue(nextConfig.settings.c115_cookie)));
     setCidRows(rowsFromConfig(nextConfig, nextLibraries));
@@ -321,6 +329,7 @@ export function SettingsPanel() {
       tmdb_base_url: tmdbBaseUrl.trim() || defaultTmdbBaseUrl,
       tmdb_api_key: tmdbApiKey.trim() || (maskedTmdbApiKey ? '***' : ''),
       tmdb_timeout_secs: timeout,
+      tg_resource_api_base_url: tgResourceApiBaseUrl.trim() || defaultTgResourceApiBaseUrl,
       c115_cid_map: sanitizeCidRows(cidRows),
       trusted_proxies: splitTrustedProxies(trustedProxies),
       auto_strm_enabled: autoEnabled,
@@ -329,6 +338,8 @@ export function SettingsPanel() {
       auto_strm_debounce_sec: debounce
     };
     if (c115Cookie.trim()) settings.c115_cookie = c115Cookie.trim();
+    if (tgResourceApiToken.trim()) settings.tg_resource_api_token = tgResourceApiToken.trim();
+    else if (maskedTgResourceApiToken) settings.tg_resource_api_token = '***';
     if (cd2Secret.trim()) settings.cd2_webhook_secret = cd2Secret.trim();
     return { settings };
   };
@@ -650,6 +661,33 @@ export function SettingsPanel() {
               inputMode="numeric"
               value={tmdbTimeout}
               onChange={(event) => setTmdbTimeout(event.target.value)}
+            />
+          </label>
+        </section>
+
+        <section className="settingsBlock">
+          <h2>TG Resource API</h2>
+          <div className="settingsStatus">
+            <Globe2 size={16} />
+            {maskedTgResourceApiToken ? 'Token 已设置，保存空输入不会覆盖' : '默认无需认证'}
+          </div>
+          <label>
+            <span>地址</span>
+            <input
+              className="input"
+              aria-label="TG Resource API 地址"
+              value={tgResourceApiBaseUrl}
+              onChange={(event) => setTgResourceApiBaseUrl(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Token</span>
+            <input
+              className="input"
+              aria-label="TG Resource API Token"
+              value={tgResourceApiToken}
+              onChange={(event) => setTgResourceApiToken(event.target.value)}
+              placeholder={maskedTgResourceApiToken ? '已设置，留空保留；输入新值会替换' : 'API_TOKEN 启用时填写'}
             />
           </label>
         </section>

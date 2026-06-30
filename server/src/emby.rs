@@ -506,6 +506,52 @@ impl EmbyClient {
         })
     }
 
+    pub async fn search_items(
+        &self,
+        search_term: &str,
+        item_types: &str,
+        limit: usize,
+    ) -> anyhow::Result<EmbyItemsResult> {
+        let search_term = search_term.trim();
+        if search_term.is_empty() {
+            bail!("search_term is required for Emby item search");
+        }
+        if item_types.trim().is_empty() {
+            bail!("item_types is required for Emby item search");
+        }
+        if !self.has_api_key() {
+            bail!("api_key is not configured for Emby requests");
+        }
+        let limit = limit.clamp(1, 100);
+        let limit_string = limit.to_string();
+        let url = format!("{}/Items", self.base_url);
+        let page = self
+            .http
+            .get(url)
+            .query(&[
+                ("api_key", self.api_key.as_str()),
+                ("SearchTerm", search_term),
+                ("Recursive", "true"),
+                ("IncludeItemTypes", item_types.trim()),
+                ("Fields", "Path,ProductionYear,ProviderIds,ImageTags"),
+                ("Limit", limit_string.as_str()),
+            ])
+            .send()
+            .await
+            .context("failed to call Emby /Items for item search")?
+            .error_for_status()
+            .context("Emby /Items returned an error for item search")?
+            .json::<EmbyItemsPage>()
+            .await?;
+        let total_record_count = page.total_record_count;
+        let truncated = total_record_count.is_some_and(|total| page.items.len() < total);
+        Ok(EmbyItemsResult {
+            items: page.items,
+            total_record_count,
+            truncated,
+        })
+    }
+
     pub async fn cleanup_items(
         &self,
         parent_id: &str,

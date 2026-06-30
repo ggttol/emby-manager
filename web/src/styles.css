@@ -981,6 +981,12 @@ main {
   gap: 12px;
 }
 
+.catalogResultActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .catalogMeta > div {
   display: grid;
   gap: 3px;
@@ -1009,7 +1015,7 @@ main {
 }
 
 .catalogSearchBar {
-  grid-template-columns: minmax(280px, 1fr) minmax(150px, 190px) auto;
+  grid-template-columns: minmax(260px, 1fr) minmax(150px, 190px) minmax(150px, 190px) auto;
 }
 
 .catalogTargetBar {
@@ -1030,6 +1036,104 @@ main {
   align-self: center;
 }
 
+.catalogRemoteTypes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.catalogLibraryContext {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #b8ddd5;
+  border-radius: 8px;
+  background: var(--accent-soft);
+}
+
+.catalogLibraryContext.warn {
+  border-color: #ead38b;
+  background: var(--amber-soft);
+}
+
+.catalogContextHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.catalogContextHead > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.catalogContextHead span,
+.catalogContextSummary span,
+.catalogContextItem span,
+.catalogContextItem small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.catalogContextHead strong {
+  font-size: 15px;
+}
+
+.catalogContextBadges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.catalogContextSummary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.catalogContextSummary div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(31, 96, 82, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.catalogContextSummary strong {
+  display: block;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.catalogContextWarning,
+.catalogPlanContext {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.catalogContextList {
+  display: grid;
+  gap: 7px;
+}
+
+.catalogContextItem {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border: 1px solid rgba(31, 96, 82, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.catalogContextItem strong {
+  overflow-wrap: anywhere;
+}
+
 .catalogTableWrap {
   width: 100%;
   overflow-x: auto;
@@ -1037,7 +1141,7 @@ main {
 }
 
 .catalogTable {
-  min-width: 960px;
+  min-width: 1080px;
 }
 
 .c115Panel {
@@ -2905,6 +3009,70 @@ main {
   white-space: nowrap;
 }
 
+.catalogRecommendation {
+  display: grid;
+  gap: 5px;
+  min-width: 150px;
+  max-width: 220px;
+}
+
+.catalogRecommendationBadge {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 780;
+}
+
+.catalogRecommendationBadge small {
+  color: inherit;
+  font-size: 11px;
+  opacity: 0.78;
+}
+
+.catalogRecommendationBadge.best {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.catalogRecommendationBadge.good {
+  background: #edf7df;
+  color: #53711f;
+}
+
+.catalogRecommendationBadge.warn {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.catalogRecommendationBadge.skip,
+.catalogRecommendationBadge.neutral {
+  background: #edf0ea;
+  color: var(--muted-strong);
+}
+
+.catalogRecommendationRanges {
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.catalogRecommendationReasons {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding-left: 15px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.catalogRecommendationReasons li {
+  overflow-wrap: anywhere;
+}
+
 .badge.packageBadge {
   display: inline-flex;
   align-items: center;
@@ -3143,8 +3311,11 @@ main {
   .inlineTool,
   .catalogMeta,
   .catalogResultHead,
+  .catalogResultActions,
   .catalogSearchBar,
   .catalogTargetBar,
+  .catalogContextHead,
+  .catalogContextSummary,
   .c115Meta,
   .c115MetaActions,
   .c115TargetBar,
