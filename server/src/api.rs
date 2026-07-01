@@ -1,7 +1,7 @@
 use crate::{
     auth, autostrm, c115, catalog, config_store, dashboard, dedup, error::AppResult, gaps,
     insights, logs, media_fs, openapi::ApiDoc, posters, scheduler, settings::Settings,
-    state::AppState, system, tasks, undo, users, wizard, zhuigeng,
+    smart_actions, state::AppState, system, tasks, undo, users, wizard, zhuigeng,
 };
 use axum::{
     Json, Router,
@@ -47,6 +47,7 @@ pub fn router_with_state(state: AppState) -> Router {
         .merge(tasks::router())
         .merge(scheduler::router())
         .merge(dashboard::router())
+        .merge(smart_actions::router())
         .merge(catalog::router())
         .merge(system::router())
         .merge(autostrm::router())

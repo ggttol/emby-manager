@@ -79,6 +79,8 @@ pub struct DedupDeleteResult {
     pub emby_updates: Vec<EmbyUpdate>,
     pub notified: bool,
     pub undo_id: Uuid,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -105,6 +107,10 @@ pub struct DedupExecuteBatchItemResult {
     pub ok: bool,
     pub removed: usize,
     pub err: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
@@ -273,6 +279,17 @@ pub async fn execute_dedup_batch(
     State(state): State<AppState>,
     Json(req): Json<DedupExecuteBatchRequest>,
 ) -> AppResult<Json<TaskRun>> {
+    Ok(Json(
+        dedup_execute_batch_for_state(state, req, "api", None).await?,
+    ))
+}
+
+pub async fn dedup_execute_batch_for_state(
+    state: AppState,
+    req: DedupExecuteBatchRequest,
+    source: &str,
+    label: Option<&str>,
+) -> AppResult<TaskRun> {
     if req.groups.is_empty() {
         return Err(AppError::BadRequest("groups must not be empty".to_string()));
     }
@@ -286,17 +303,20 @@ pub async fn execute_dedup_batch(
         groups: groups.clone(),
     })
     .unwrap_or_else(|_| serde_json::json!({}));
+    let task_label = label
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("批量去重: {} 组", groups.len()));
     let task = tasks::insert_task_with_meta(
         &state.pool,
         "dedup_exec_batch",
-        &format!("批量去重: {} 组", groups.len()),
+        &task_label,
         groups.len() as i64,
-        "api",
+        source,
         params,
     )
     .await?;
     spawn_dedup_batch(state, task.id, groups);
-    Ok(Json(task))
+    Ok(task)
 }
 
 #[utoipa::path(post, path = "/api/v2/dedup/replace", tag = "dedup", request_body = ReplaceRequest, responses((status = 200, body = ReplaceExecuteResponse)))]
@@ -449,13 +469,29 @@ fn spawn_dedup_batch(state: AppState, task_id: Uuid, groups: Vec<DedupExecuteBat
 
             let mut removed = 0usize;
             let mut err = None;
+            let mut errors = Vec::new();
+            let mut warnings = Vec::new();
             for item in &group.remove {
                 match delete_duplicate_folder(&state, item, &emby_client, c115_delete.as_ref())
                     .await
                 {
-                    Ok(_) => removed += 1,
+                    Ok(result) => {
+                        removed += 1;
+                        warnings.extend(
+                            result.warnings.into_iter().map(|warning| {
+                                format!("{} / {}: {warning}", item.lib, item.folder)
+                            }),
+                        );
+                    }
                     Err(current) => {
-                        err = Some(current.to_string());
+                        let detail = format!(
+                            "{} / {} item_id={}: {current}",
+                            item.lib,
+                            item.folder,
+                            item.item_id.as_deref().unwrap_or("-")
+                        );
+                        errors.push(detail.clone());
+                        err = Some(detail);
                         break;
                     }
                 }
@@ -465,6 +501,8 @@ fn spawn_dedup_batch(state: AppState, task_id: Uuid, groups: Vec<DedupExecuteBat
                 ok: err.is_none(),
                 removed,
                 err,
+                errors,
+                warnings,
             });
             let _ = tasks::set_progress(
                 &state.pool,
@@ -687,7 +725,9 @@ pub fn analyze_duplicate_groups(strm_root: &Path) -> AppResult<DedupAnalysisResp
     Ok(DedupAnalysisResponse { dups, review })
 }
 
-async fn analyze_duplicate_groups_for_state(state: &AppState) -> AppResult<DedupAnalysisResponse> {
+pub(crate) async fn analyze_duplicate_groups_for_state(
+    state: &AppState,
+) -> AppResult<DedupAnalysisResponse> {
     let mut analysis = analyze_duplicate_groups(&state.settings.strm_root)?;
     let Ok(client) = optional_dedup_emby_client(state).await else {
         return Ok(analysis);
@@ -1006,40 +1046,88 @@ async fn delete_duplicate_folder(
     let lib = required_value(&item.lib, "lib")?;
     let folder = required_value(&item.folder, "folder")?;
     let mut deleted_from = Vec::new();
-    if let Some(item_id) = item.item_id.as_deref().and_then(non_empty_trimmed) {
-        emby_client.delete_item(item_id).await.map_err(|err| {
-            AppError::Conflict(format!(
-                "Emby 删除 item_id={item_id} 失败，已停止本地/115 清理: {err}"
-            ))
-        })?;
-        deleted_from.push("emby".to_string());
+    let mut warnings = Vec::new();
+    let emby_item_id = item
+        .item_id
+        .as_deref()
+        .and_then(non_empty_trimmed)
+        .map(ToString::to_string);
+    if let Some(item_id) = emby_item_id.as_deref() {
+        match emby_client.delete_item(item_id).await {
+            Ok(_) => deleted_from.push("emby".to_string()),
+            Err(err) => {
+                let warning = format!(
+                    "Emby 删除 item_id={item_id} 失败，已继续清理本地/115 并通知媒体库刷新: {err}"
+                );
+                tracing::warn!(
+                    item_id,
+                    lib,
+                    folder,
+                    error = %err,
+                    "Emby item delete failed during dedup; continuing path cleanup"
+                );
+                warnings.push(warning);
+            }
+        }
     }
 
     let cd_lib = match safe_under(&state.settings.cd_root, lib) {
         Ok(path) => path,
         Err(_err) if !deleted_from.is_empty() => {
-            return finish_duplicate_delete(state, emby_client, lib, folder, deleted_from).await;
+            return finish_duplicate_delete(
+                state,
+                emby_client,
+                lib,
+                folder,
+                deleted_from,
+                warnings,
+            )
+            .await;
         }
         Err(err) => return Err(err),
     };
     let strm_lib = match safe_under(&state.settings.strm_root, lib) {
         Ok(path) => path,
         Err(_err) if !deleted_from.is_empty() => {
-            return finish_duplicate_delete(state, emby_client, lib, folder, deleted_from).await;
+            return finish_duplicate_delete(
+                state,
+                emby_client,
+                lib,
+                folder,
+                deleted_from,
+                warnings,
+            )
+            .await;
         }
         Err(err) => return Err(err),
     };
     let cd_target = match safe_under(&cd_lib, folder) {
         Ok(path) => path,
         Err(_err) if !deleted_from.is_empty() => {
-            return finish_duplicate_delete(state, emby_client, lib, folder, deleted_from).await;
+            return finish_duplicate_delete(
+                state,
+                emby_client,
+                lib,
+                folder,
+                deleted_from,
+                warnings,
+            )
+            .await;
         }
         Err(err) => return Err(err),
     };
     let strm_target = match safe_under(&strm_lib, folder) {
         Ok(path) => path,
         Err(_err) if !deleted_from.is_empty() => {
-            return finish_duplicate_delete(state, emby_client, lib, folder, deleted_from).await;
+            return finish_duplicate_delete(
+                state,
+                emby_client,
+                lib,
+                folder,
+                deleted_from,
+                warnings,
+            )
+            .await;
         }
         Err(err) => return Err(err),
     };
@@ -1050,8 +1138,55 @@ async fn delete_duplicate_folder(
     if remove_path_if_exists(&strm_target).await? {
         deleted_from.push("strm".to_string());
     }
+    reconcile_emby_after_path_cleanup(
+        emby_client,
+        emby_item_id.as_deref(),
+        &mut deleted_from,
+        &mut warnings,
+    )
+    .await?;
 
-    finish_duplicate_delete(state, emby_client, lib, folder, deleted_from).await
+    finish_duplicate_delete(state, emby_client, lib, folder, deleted_from, warnings).await
+}
+
+async fn reconcile_emby_after_path_cleanup(
+    emby_client: &EmbyClient,
+    item_id: Option<&str>,
+    deleted_from: &mut Vec<String>,
+    warnings: &mut Vec<String>,
+) -> AppResult<()> {
+    let Some(item_id) = item_id else {
+        return Ok(());
+    };
+    if deleted_from.iter().any(|source| source == "emby")
+        || !deleted_from
+            .iter()
+            .any(|source| source == "115" || source == "strm")
+    {
+        return Ok(());
+    }
+
+    match emby_client.delete_item(item_id).await {
+        Ok(_) => {
+            deleted_from.push("emby".to_string());
+            warnings.push(format!("路径清理后已二次删除 Emby item_id={item_id}"));
+            Ok(())
+        }
+        Err(delete_err) => match emby_client.item_exists(item_id).await {
+            Ok(false) => {
+                warnings.push(format!(
+                    "Emby 二次删除 item_id={item_id} 返回错误，但回查条目已消失: {delete_err}"
+                ));
+                Ok(())
+            }
+            Ok(true) => Err(AppError::Conflict(format!(
+                "路径已清理，但 Emby item_id={item_id} 仍存在；二次删除失败: {delete_err}"
+            ))),
+            Err(check_err) => Err(AppError::Conflict(format!(
+                "路径已清理，但无法确认 Emby item_id={item_id} 是否消失；二次删除失败: {delete_err}; 回查失败: {check_err}"
+            ))),
+        },
+    }
 }
 
 async fn finish_duplicate_delete(
@@ -1060,6 +1195,7 @@ async fn finish_duplicate_delete(
     lib: &str,
     folder: &str,
     deleted_from: Vec<String>,
+    warnings: Vec<String>,
 ) -> AppResult<DedupDeleteResult> {
     if deleted_from.is_empty() {
         return Err(AppError::NotFound(format!(
@@ -1099,6 +1235,7 @@ async fn finish_duplicate_delete(
         emby_updates,
         notified,
         undo_id,
+        warnings,
     })
 }
 

@@ -1028,6 +1028,214 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v2/smart-actions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_smart_actions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/execute-batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["execute_smart_actions_batch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/from-next-action": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["smart_action_from_next_action"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/from-task/{task_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["smart_action_from_task"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/inspect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["inspect_smart_actions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_smart_action_policies"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/policies/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_smart_action_policy"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["refresh_smart_actions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["smart_actions_summary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_smart_action"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/{id}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["dismiss_smart_action"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/{id}/execute": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["execute_smart_action"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v2/smart-actions/{id}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["verify_smart_action"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v2/system/summary": {
         parameters: {
             query?: never;
@@ -2098,6 +2306,7 @@ export interface components {
             notified: boolean;
             /** Format: uuid */
             undo_id: string;
+            warnings?: string[];
         };
         DedupExecuteBatchGroup: {
             remove: components["schemas"]["DedupFolderRef"][];
@@ -2105,9 +2314,11 @@ export interface components {
         };
         DedupExecuteBatchItemResult: {
             err?: string | null;
+            errors?: string[];
             ok: boolean;
             removed: number;
             tmdb?: string | null;
+            warnings?: string[];
         };
         DedupExecuteBatchRequest: {
             groups: components["schemas"]["DedupExecuteBatchGroup"][];
@@ -2806,6 +3017,288 @@ export interface components {
         ShareUrl: {
             pwd?: string | null;
             url: string;
+        };
+        SmartAction: {
+            action_label: string;
+            action_type: components["schemas"]["SmartActionType"];
+            /** Format: date-time */
+            created_at: string;
+            evidence: components["schemas"]["SmartEvidence"][];
+            /** Format: uuid */
+            id: string;
+            plan: components["schemas"]["SmartExecutionPlan"];
+            policy: components["schemas"]["SmartPolicyDecision"];
+            recommendation: components["schemas"]["SmartRecommendation"];
+            risk: components["schemas"]["SmartRisk"];
+            source: string;
+            status: components["schemas"]["SmartActionStatus"];
+            subject: components["schemas"]["SmartSubject"];
+            summary: string;
+            tab: string;
+            title: string;
+            /** Format: date-time */
+            updated_at: string;
+            verification: components["schemas"]["SmartVerificationPlan"];
+        };
+        SmartActionDetailResponse: {
+            action: components["schemas"]["SmartAction"];
+            ok: boolean;
+        };
+        SmartActionDismissRequest: {
+            reason?: string | null;
+        };
+        SmartActionDismissResponse: {
+            /** Format: uuid */
+            id: string;
+            ok: boolean;
+            status: components["schemas"]["SmartActionStatus"];
+        };
+        SmartActionExecuteBatchItem: {
+            err?: string | null;
+            /** Format: uuid */
+            id: string;
+            ok: boolean;
+            status?: null | components["schemas"]["SmartActionStatus"];
+            task?: null | components["schemas"]["TaskRun"];
+        };
+        SmartActionExecuteBatchRequest: {
+            dry_run?: boolean | null;
+            ids: string[];
+        };
+        SmartActionExecuteBatchResponse: {
+            failed: number;
+            ok: boolean;
+            results: components["schemas"]["SmartActionExecuteBatchItem"][];
+            submitted: number;
+            total: number;
+        };
+        SmartActionExecuteRequest: {
+            confirm_text?: string | null;
+            dry_run?: boolean | null;
+            payload?: unknown;
+        };
+        SmartActionExecuteResponse: {
+            /** Format: uuid */
+            id: string;
+            message: string;
+            ok: boolean;
+            status: components["schemas"]["SmartActionStatus"];
+            task: components["schemas"]["TaskRun"];
+        };
+        SmartActionFromNextActionRequest: {
+            next_action: components["schemas"]["SmartNextAction"];
+            persist?: boolean | null;
+            /** Format: uuid */
+            source_action_id?: string | null;
+            /** Format: uuid */
+            task_id?: string | null;
+        };
+        SmartActionFromNextActionResponse: {
+            action: components["schemas"]["SmartAction"];
+            ok: boolean;
+            persisted: boolean;
+            warnings: string[];
+        };
+        SmartActionFromTaskResponse: {
+            action: components["schemas"]["SmartAction"];
+            ok: boolean;
+        };
+        SmartActionInspectRequest: {
+            catalog_context?: null | components["schemas"]["CatalogLibraryContextResponse"];
+            catalog_items?: components["schemas"]["CatalogItem"][] | null;
+            limit?: number | null;
+            q?: string | null;
+            subject?: null | components["schemas"]["SmartSubject"];
+        };
+        SmartActionInspectResponse: {
+            actions: components["schemas"]["SmartAction"][];
+            ok: boolean;
+            warnings: string[];
+        };
+        SmartActionPoliciesResponse: {
+            ok: boolean;
+            policies: components["schemas"]["SmartActionPolicy"][];
+        };
+        SmartActionPolicy: {
+            enabled: boolean;
+            key: string;
+            max_risk: components["schemas"]["SmartRiskLevel"];
+            mode: components["schemas"]["SmartPolicyMode"];
+            params: unknown;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        SmartActionPolicyUpdateRequest: {
+            enabled?: boolean | null;
+            max_risk?: null | components["schemas"]["SmartRiskLevel"];
+            mode?: null | components["schemas"]["SmartPolicyMode"];
+            params?: unknown;
+        };
+        SmartActionPolicyUpdateResponse: {
+            ok: boolean;
+            policy: components["schemas"]["SmartActionPolicy"];
+        };
+        /** @enum {string} */
+        SmartActionStatus: "suggested" | "confirmed" | "queued" | "running" | "verifying" | "done" | "partial" | "failed" | "cancelled" | "dismissed";
+        SmartActionTaskResult: {
+            /** Format: uuid */
+            action_id: string;
+            action_type: string;
+            dry_run: boolean;
+            next_actions: components["schemas"]["SmartNextAction"][];
+            outputs: unknown[];
+            steps: unknown[];
+            subject: components["schemas"]["SmartSubject"];
+            verification: unknown;
+        };
+        /** @enum {string} */
+        SmartActionType: "transfer_add_new" | "transfer_update_series" | "dedup_remove_old" | "dedup_review" | "poster_fix" | "metadata_refresh" | "library_scan" | "archive_series" | "cleanup_empty_folder" | "task_retry_or_diagnose";
+        SmartActionVerifyResponse: {
+            /** Format: uuid */
+            id: string;
+            ok: boolean;
+            result: unknown;
+            status: components["schemas"]["SmartActionStatus"];
+            warnings: string[];
+        };
+        SmartActionsListResponse: {
+            actions: components["schemas"]["SmartAction"][];
+            limit: number;
+            offset: number;
+            ok: boolean;
+            summary: components["schemas"]["SmartActionsSummary"];
+            total: number;
+            warnings: string[];
+        };
+        SmartActionsQuery: {
+            action_type?: string | null;
+            lib?: string | null;
+            limit?: number | null;
+            offset?: number | null;
+            q?: string | null;
+            risk?: string | null;
+            status?: string | null;
+            subject_kind?: string | null;
+        };
+        SmartActionsSummary: {
+            auto_ready: number;
+            confirm_required: number;
+            critical: number;
+            failed: number;
+            high: number;
+            low: number;
+            medium: number;
+            running: number;
+            suggested: number;
+            total: number;
+        };
+        SmartActionsSummaryResponse: {
+            ok: boolean;
+            summary: components["schemas"]["SmartActionsSummary"];
+            warnings: string[];
+        };
+        SmartAlternative: {
+            action: string;
+            reason: string;
+        };
+        /** @enum {string} */
+        SmartConfidence: "high" | "medium" | "low";
+        SmartEvidence: {
+            /** Format: date-time */
+            collected_at: string;
+            label: string;
+            source: components["schemas"]["SmartEvidenceSource"];
+            value: unknown;
+            /** Format: int32 */
+            weight: number;
+        };
+        /** @enum {string} */
+        SmartEvidenceSource: "emby_item" | "emby_episodes" | "strm_scan" | "cloud_drive_path" | "c115_resource" | "catalog_candidate" | "tmdb_metadata" | "poster_detection" | "dedup_analysis" | "task_history" | "undo_log" | "system_health" | "dashboard_todo";
+        SmartExecutionPlan: {
+            can_cancel: boolean;
+            concurrency_key?: string | null;
+            /** Format: int64 */
+            estimated_seconds?: number | null;
+            steps: components["schemas"]["SmartExecutionStep"][];
+        };
+        SmartExecutionStep: {
+            executor: components["schemas"]["SmartExecutorKind"];
+            key: string;
+            params: unknown;
+            rollback?: null | components["schemas"]["SmartRollbackStep"];
+            title: string;
+        };
+        /** @enum {string} */
+        SmartExecutorKind: "open_tab" | "existing_endpoint" | "task_pipeline" | "manual_confirm";
+        SmartNextAction: {
+            action_type: string;
+            label: string;
+            reason: string;
+            subject?: null | components["schemas"]["SmartNextActionSubject"];
+            tab: string;
+        };
+        SmartNextActionSubject: {
+            emby_id?: string | null;
+            folder?: string | null;
+            lib?: string | null;
+            name?: string | null;
+            tmdb?: string | null;
+        };
+        SmartPolicyDecision: {
+            enabled: boolean;
+            max_risk: components["schemas"]["SmartRiskLevel"];
+            mode: components["schemas"]["SmartPolicyMode"];
+            reason: string;
+        };
+        /** @enum {string} */
+        SmartPolicyMode: "auto" | "confirm" | "disabled";
+        SmartRecommendation: {
+            alternatives: components["schemas"]["SmartAlternative"][];
+            confidence: components["schemas"]["SmartConfidence"];
+            primary_action: string;
+            reasons: string[];
+            /** Format: int32 */
+            score: number;
+        };
+        SmartRisk: {
+            destructive: boolean;
+            level: components["schemas"]["SmartRiskLevel"];
+            requires_confirm_text?: string | null;
+            touches_c115: boolean;
+            touches_disk: boolean;
+            touches_emby: boolean;
+            warnings: string[];
+        };
+        /** @enum {string} */
+        SmartRiskLevel: "low" | "medium" | "high" | "critical";
+        SmartRollbackStep: {
+            params: unknown;
+            title: string;
+        };
+        SmartSubject: {
+            cd_path?: string | null;
+            emby_id?: string | null;
+            folder?: string | null;
+            kind: components["schemas"]["SmartSubjectKind"];
+            lib?: string | null;
+            name: string;
+            strm_path?: string | null;
+            tmdb?: string | null;
+            /** Format: int32 */
+            year?: number | null;
+        };
+        /** @enum {string} */
+        SmartSubjectKind: "movie" | "series" | "season" | "episode" | "library" | "task" | "system" | "unknown";
+        SmartVerificationCheck: {
+            expected: string;
+            key: string;
+            source: components["schemas"]["SmartEvidenceSource"];
+            title: string;
+        };
+        SmartVerificationPlan: {
+            checks: components["schemas"]["SmartVerificationCheck"][];
+            partial_message: string;
+            success_message: string;
         };
         StrmEntry: {
             is_dir: boolean;
@@ -4756,6 +5249,304 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunScheduleResponse"];
+                };
+            };
+        };
+    };
+    list_smart_actions: {
+        parameters: {
+            query?: {
+                status?: string | null;
+                action_type?: string | null;
+                risk?: string | null;
+                subject_kind?: string | null;
+                lib?: string | null;
+                q?: string | null;
+                limit?: number | null;
+                offset?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionsListResponse"];
+                };
+            };
+        };
+    };
+    execute_smart_actions_batch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SmartActionExecuteBatchRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionExecuteBatchResponse"];
+                };
+            };
+        };
+    };
+    smart_action_from_next_action: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SmartActionFromNextActionRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionFromNextActionResponse"];
+                };
+            };
+        };
+    };
+    smart_action_from_task: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Task id to diagnose */
+                task_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionFromTaskResponse"];
+                };
+            };
+        };
+    };
+    inspect_smart_actions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SmartActionInspectRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionInspectResponse"];
+                };
+            };
+        };
+    };
+    list_smart_action_policies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionPoliciesResponse"];
+                };
+            };
+        };
+    };
+    update_smart_action_policy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Smart action type key */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SmartActionPolicyUpdateRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionPolicyUpdateResponse"];
+                };
+            };
+        };
+    };
+    refresh_smart_actions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskRun"];
+                };
+            };
+        };
+    };
+    smart_actions_summary: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionsSummaryResponse"];
+                };
+            };
+        };
+    };
+    get_smart_action: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Smart action id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionDetailResponse"];
+                };
+            };
+        };
+    };
+    dismiss_smart_action: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Smart action id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SmartActionDismissRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionDismissResponse"];
+                };
+            };
+        };
+    };
+    execute_smart_action: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Smart action id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SmartActionExecuteRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionExecuteResponse"];
+                };
+            };
+        };
+    };
+    verify_smart_action: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Smart action id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SmartActionVerifyResponse"];
                 };
             };
         };

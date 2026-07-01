@@ -12,6 +12,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
 import { useTaskCompletion } from '../hooks/useTaskCompletion';
+import { ContextSmartActions } from './ContextSmartActions';
 import { Modal } from './Modal';
 import { useToast } from './Toast';
 
@@ -288,7 +289,7 @@ function resultTargetLib(result: unknown) {
   return typeof lib === 'string' && lib.trim() ? lib.trim() : null;
 }
 
-export function CatalogPanel() {
+export function CatalogPanel({ onNavigate }: { onNavigate?: (tabId: string) => void }) {
   const [stats, setStats] = useState<CatalogStatsResponse | null>(null);
   const [cidMap, setCidMap] = useState<Record<string, string>>({});
   const [targetLib, setTargetLib] = useState('');
@@ -318,6 +319,11 @@ export function CatalogPanel() {
   const cidEntries = useMemo(() => Object.entries(cidMap).sort(([a], [b]) => a.localeCompare(b, 'zh-CN')), [cidMap]);
   const selectedItems = useMemo(() => items.filter((_, index) => selected.has(index)), [items, selected]);
   const smartSelectableCount = useMemo(() => items.filter(isSmartSelectable).length, [items]);
+  const smartActionInspectPayload = useMemo(() => (
+    source === 'remote' && items.length > 0 && libraryContext
+      ? { catalog_items: items.slice(0, 8), catalog_context: libraryContext }
+      : undefined
+  ), [items, libraryContext, source]);
   const allSelected = items.length > 0 && selected.size === items.length;
   const filterOptions = source === 'remote' ? remoteDiskTypeOptions : localLinkTypeOptions;
 
@@ -674,6 +680,16 @@ export function CatalogPanel() {
       )}
 
       {source === 'remote' && libraryContext && <CatalogLibraryContextPanel context={libraryContext} />}
+
+      {searched && (
+        <ContextSmartActions
+          title="找资源关联智能动作"
+          q={libraryContext?.query || query}
+          emptyText="当前搜索没有匹配到需要处理的库内动作。"
+          inspectPayload={smartActionInspectPayload}
+          onNavigate={onNavigate}
+        />
+      )}
 
       {error && <div className="notice warn whitespaceNotice">{error}</div>}
 

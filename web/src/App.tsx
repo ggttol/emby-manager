@@ -11,6 +11,7 @@ import {
   ListChecks,
   LogOut,
   MonitorCog,
+  WandSparkles,
   Search,
   Settings,
   Shield,
@@ -30,6 +31,7 @@ import {
   subscribeAuthSession,
   type AuthSession
 } from './api/client';
+import type { components } from './api/openapi';
 import { TaskCenter } from './components/TaskCenter';
 import { ToastProvider, useToast } from './components/Toast';
 import { C115Panel } from './components/C115Panel';
@@ -42,6 +44,7 @@ import { DashboardPanel, SystemPanel } from './components/ReadOnlyPanels';
 import { ScanPanel } from './components/ScanPanel';
 import { SchedulesPanel } from './components/SchedulesPanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import { SmartActionsPanel } from './components/SmartActionsPanel';
 import { UsersPanel } from './components/UsersPanel';
 
 type Tab = {
@@ -53,8 +56,11 @@ type Tab = {
   group: 'overview' | 'media' | 'resources' | 'repair' | 'ops';
 };
 
+type SmartAction = components['schemas']['SmartAction'];
+
 const tabs: Tab[] = [
   { id: 'dashboard', label: '仪表盘', endpoint: '/api/v2/system/summary', description: '在线状态、库卡片和待办入口', icon: LayoutDashboard, group: 'overview' },
+  { id: 'smart-actions', label: '智能动作', endpoint: '/api/v2/smart-actions', description: '跨功能建议、证据、风险和执行计划', icon: WandSparkles, group: 'overview' },
   { id: 'scan', label: '扫描', endpoint: '/api/v2/libraries', description: '单库 / 全库扫描与孤儿 strm 清理', icon: FolderSearch, group: 'media' },
   { id: 'c115', label: '115 转存', endpoint: '/api/v2/c115/test', description: '分享链接 snap、转存、离线下载', icon: HardDrive, group: 'resources' },
   { id: 'catalog', label: '找资源', endpoint: '/api/v2/catalog/stats', description: 'Postgres catalog 搜索和转存入口', icon: Search, group: 'resources' },
@@ -90,6 +96,7 @@ function errorMessage(error: unknown) {
 
 function Shell({ username, onLogout }: { username: string; onLogout: () => void }) {
   const [active, setActive] = useState(tabs[0].id);
+  const [focusedSmartAction, setFocusedSmartAction] = useState<SmartAction | null>(null);
   const tab = useMemo(() => tabs.find((item) => item.id === active) || tabs[0], [active]);
   const groupLabel = navGroups.find((group) => group.id === tab.group)?.label || '';
 
@@ -130,7 +137,10 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
             <p>{tab.description}</p>
           </div>
           <div className="topbarActions">
-            <TaskCenter />
+            <TaskCenter onOpenSmartAction={(action) => {
+              setFocusedSmartAction(action);
+              setActive('smart-actions');
+            }} />
             <span className="userPill">
               <UserRound size={15} />
               {username}
@@ -140,17 +150,44 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
             </button>
           </div>
         </header>
-        <TabPanel tab={tab} onNavigate={setActive} />
+        <TabPanel
+          tab={tab}
+          onNavigate={setActive}
+          focusedSmartAction={focusedSmartAction}
+          onFocusedSmartActionConsumed={() => setFocusedSmartAction(null)}
+        />
       </main>
     </div>
   );
 }
 
-function TabPanel({ tab, onNavigate }: { tab: Tab; onNavigate: (tabId: string) => void }) {
+function TabPanel({
+  tab,
+  onNavigate,
+  focusedSmartAction,
+  onFocusedSmartActionConsumed
+}: {
+  tab: Tab;
+  onNavigate: (tabId: string) => void;
+  focusedSmartAction: SmartAction | null;
+  onFocusedSmartActionConsumed: () => void;
+}) {
   if (tab.id === 'dashboard') {
     return (
       <section className="panel">
         <DashboardPanel onNavigate={onNavigate} />
+      </section>
+    );
+  }
+
+  if (tab.id === 'smart-actions') {
+    return (
+      <section className="panel">
+        <SmartActionsPanel
+          onNavigate={onNavigate}
+          focusAction={focusedSmartAction}
+          onFocusActionConsumed={onFocusedSmartActionConsumed}
+        />
       </section>
     );
   }
@@ -174,7 +211,7 @@ function TabPanel({ tab, onNavigate }: { tab: Tab; onNavigate: (tabId: string) =
   if (tab.id === 'catalog') {
     return (
       <section className="panel">
-        <CatalogPanel />
+        <CatalogPanel onNavigate={onNavigate} />
       </section>
     );
   }
@@ -230,7 +267,7 @@ function TabPanel({ tab, onNavigate }: { tab: Tab; onNavigate: (tabId: string) =
   if (tab.id === 'zhuigeng') {
     return (
       <section className="panel">
-        <ZhuigengGapsPanel mode="zhuigeng" />
+        <ZhuigengGapsPanel mode="zhuigeng" onNavigate={onNavigate} />
       </section>
     );
   }
@@ -254,7 +291,7 @@ function TabPanel({ tab, onNavigate }: { tab: Tab; onNavigate: (tabId: string) =
   if (tab.id === 'dedup') {
     return (
       <section className="panel">
-        <DedupPanel />
+        <DedupPanel onNavigate={onNavigate} />
       </section>
     );
   }

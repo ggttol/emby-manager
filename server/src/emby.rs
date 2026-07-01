@@ -635,16 +635,27 @@ impl EmbyClient {
         }
         let path = format!("/Items/{}", urlencoding::encode(item_id.trim()));
         let url = format!("{}{}", self.base_url, path);
-        let status = self
+        let response = self
             .http
             .delete(url)
             .query(&[("api_key", self.api_key.as_str())])
             .send()
             .await
-            .with_context(|| format!("failed to call Emby {path}"))?
-            .error_for_status()
-            .with_context(|| format!("Emby {path} returned an error"))?
-            .status();
+            .with_context(|| format!("failed to call Emby {path}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let body = body.trim();
+            let body = if body.chars().count() > 500 {
+                format!("{}...", body.chars().take(500).collect::<String>())
+            } else {
+                body.to_string()
+            };
+            if body.is_empty() {
+                bail!("Emby {path} returned HTTP {}", status.as_u16());
+            }
+            bail!("Emby {path} returned HTTP {}: {body}", status.as_u16());
+        }
         Ok(status.as_u16())
     }
 

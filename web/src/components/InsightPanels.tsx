@@ -16,6 +16,7 @@ import {
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react';
 import { api } from '../api/client';
 import type { components } from '../api/openapi';
+import { ContextSmartActions } from './ContextSmartActions';
 import { ConfirmDanger } from './Modal';
 import { TASK_COMPLETED_EVENT, type TaskCompleteDetail } from './TaskCenter';
 import { useToast } from './Toast';
@@ -88,6 +89,8 @@ type DedupExecuteBatchItemResult = {
   ok: boolean;
   removed: number;
   err?: string | null;
+  errors?: string[];
+  warnings?: string[];
 };
 
 type DedupExecuteBatchResult = {
@@ -1508,7 +1511,12 @@ function DedupExecuteBatchTaskBlock({ task }: { task: TaskRun | null }) {
           <article key={`dedup-batch-${item.tmdb || 'unknown'}-${index}`}>
             <span className={`badge ${item.ok ? 'ok' : 'error'}`}>{item.ok ? 'ok' : 'error'}</span>
             <strong>tmdb:{item.tmdb || 'unknown'}</strong>
-            <small>removed {count(item.removed)}{item.err ? ` · ${item.err}` : ''}</small>
+            <small>
+              removed {count(item.removed)}
+              {item.err ? ` · ${item.err}` : ''}
+              {item.errors?.length ? ` · ${item.errors.join('；')}` : ''}
+              {item.warnings?.length ? ` · 警告 ${item.warnings.join('；')}` : ''}
+            </small>
           </article>
         ))}
         {!result && <div className="empty inlineEmpty">等待任务完成后展示每个 tmdb 分组结果</div>}
@@ -1575,7 +1583,7 @@ function ReplaceResultBlock({ result }: { result: ReplaceExecuteResponse | null 
   );
 }
 
-export function DedupPanel() {
+export function DedupPanel({ onNavigate }: { onNavigate?: (tabId: string) => void }) {
   const [data, setData] = useState<DedupAnalysisResponse | null>(null);
   const [autoAllResult, setAutoAllResult] = useState<DedupAutoAllResponse | null>(null);
   const [executeBatchTask, setExecuteBatchTask] = useState<TaskRun | null>(null);
@@ -1866,6 +1874,12 @@ export function DedupPanel() {
           <StatCard icon={<Trash2 />} label="批量去重" value={executeBatchTask?.status || '待命'} tone={executeBatchTask?.status === 'done' ? 'ok' : manualDedupActive ? 'warn' : 'neutral'} hint={executeBatchResult ? `成功 ${count(executeBatchResult.ok_count)} / ${count(executeBatchResult.total)}` : `已选 ${count(selectedManualRows.length)}`} />
           <StatCard icon={<CheckCircle2 />} label="Replace" value={replaceResult?.ok ? '完成' : '待命'} tone={replaceResult?.ok ? 'ok' : 'neutral'} hint={replaceResult?.kept_as || '手动 lib/win/lose'} />
         </div>
+        <ContextSmartActions
+          title="去重关联智能动作"
+          q="dedup"
+          emptyText="当前没有新的去重智能动作。"
+          onNavigate={onNavigate}
+        />
         <div className="dedupBulkBar">
           <div className="dedupBulkSummary">
             <strong>已选 {count(selectedManualRows.length)}</strong>
@@ -2375,7 +2389,7 @@ function GapsScanResultBlock({
   );
 }
 
-export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
+export function ZhuigengGapsPanel({ mode, onNavigate }: { mode: 'zhuigeng' | 'gaps'; onNavigate?: (tabId: string) => void }) {
   const [zhuigeng, setZhuigeng] = useState<ZhuigengStatusResponse | null>(null);
   const [zhuigengWorkbench, setZhuigengWorkbench] = useState<ZhuigengWorkbenchResponse | null>(null);
   const [airingResult, setAiringResult] = useState<ZhuigengScanAiringResponse | null>(null);
@@ -2837,6 +2851,14 @@ export function ZhuigengGapsPanel({ mode }: { mode: 'zhuigeng' | 'gaps' }) {
           <StatCard icon={<CheckCircle2 />} label="补齐后归档" value={count(counts?.complete_after_update)} tone={counts?.complete_after_update ? 'warn' : 'neutral'} hint="完结但缺集" />
           <StatCard icon={<AlertTriangle />} label="异常" value={count(errors)} tone={errors ? 'error' : 'ok'} hint={`总数 ${count(counts?.total || zhuigeng?.total)}`} />
         </div>
+        {isZhuigeng && (
+          <ContextSmartActions
+            title="追更关联智能动作"
+            q="zhuigeng"
+            emptyText="当前没有新的追更更新或归档智能动作。"
+            onNavigate={onNavigate}
+          />
+        )}
         <section className="readonlyBlock zhuigengCommandBar">
           <div className="sectionTitleRow">
             <h2>批量动作</h2>

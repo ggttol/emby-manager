@@ -347,10 +347,16 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<ZhuigengSta
 pub async fn workbench(
     State(state): State<AppState>,
 ) -> AppResult<Json<ZhuigengWorkbenchResponse>> {
-    let config = zhuigeng_config_from_state(&state).await?;
+    Ok(Json(zhuigeng_workbench_for_state(&state).await?))
+}
+
+pub async fn zhuigeng_workbench_for_state(
+    state: &AppState,
+) -> AppResult<ZhuigengWorkbenchResponse> {
+    let config = zhuigeng_config_from_state(state).await?;
     let status = zhuigeng_status_with_config(config, state.http.clone()).await?;
-    let status = enrich_zhuigeng_status_with_catalog(&state, status).await;
-    Ok(Json(build_zhuigeng_workbench(status)))
+    let status = enrich_zhuigeng_status_with_catalog(state, status).await;
+    Ok(build_zhuigeng_workbench(status))
 }
 
 #[utoipa::path(post, path = "/api/v2/zhuigeng/resource-plan", tag = "zhuigeng", request_body = ZhuigengResourcePlanRequest, responses((status = 200, body = ZhuigengResourcePlanResponse)))]

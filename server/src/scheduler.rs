@@ -2,7 +2,7 @@ use crate::{
     config_store,
     emby::{EmbyClient, EmbyLibrary},
     error::{AppError, AppResult},
-    media_fs, posters,
+    media_fs, posters, smart_actions,
     state::AppState,
     tasks, zhuigeng,
 };
@@ -73,6 +73,7 @@ pub const SUPPORTED_SCHEDULE_KINDS: &[&str] = &[
     "fix_posters_all",
     "refresh_no_rating_all",
     "monitor_incremental",
+    "smart_actions_refresh",
 ];
 
 pub fn router() -> Router<AppState> {
@@ -428,6 +429,7 @@ async fn run_schedule_worker(
             run_scheduled_refresh_no_rating_all(state, task_id, params).await?
         }
         "monitor_incremental" => run_scheduled_monitor_incremental(state, task_id, params).await?,
+        "smart_actions_refresh" => run_scheduled_smart_actions_refresh(state, task_id).await?,
         _ => {
             return Err(AppError::BadRequest(format!(
                 "unknown schedule kind: {kind}"
@@ -454,6 +456,11 @@ async fn run_schedule_worker(
     .await?;
     update_schedule_finished(&state.pool, schedule_id, "done", None).await?;
     Ok(())
+}
+
+async fn run_scheduled_smart_actions_refresh(state: &AppState, task_id: Uuid) -> AppResult<Value> {
+    check_schedule_cancelled(state, task_id).await?;
+    smart_actions::run_smart_actions_refresh_for_task(state, task_id).await
 }
 
 async fn run_scheduled_scan_all(
@@ -996,6 +1003,7 @@ mod tests {
     #[test]
     fn schedule_kind_must_be_known() {
         assert!(validate_kind("scan_all").is_ok());
+        assert!(validate_kind("smart_actions_refresh").is_ok());
         assert!(validate_kind("unknown").is_err());
     }
 

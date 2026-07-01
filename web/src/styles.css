@@ -730,6 +730,21 @@ main {
   color: #3a7430;
 }
 
+.badge.ok {
+  background: #e5f4df;
+  color: #3a7430;
+}
+
+.badge.warn {
+  background: var(--amber-soft);
+  color: var(--amber-strong);
+}
+
+.badge.neutral {
+  background: var(--surface-soft);
+  color: var(--muted-strong);
+}
+
 .miniProgress {
   height: 7px;
   margin-top: 10px;
@@ -893,6 +908,223 @@ main {
 .taskResultStage p {
   margin: 7px 0 0;
   overflow-wrap: anywhere;
+}
+
+.taskSmartActionPanel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.taskSmartActionOverview {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.4fr);
+  gap: 8px;
+}
+
+.taskSmartActionOverview article,
+.taskSmartActionBlock,
+.taskSmartActionVerification {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.taskSmartActionOverview span,
+.taskSmartActionBlock h5,
+.taskSmartActionVerification h5 {
+  display: block;
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.taskSmartActionOverview strong,
+.taskSmartActionVerification > strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.taskSmartActionOverview dl {
+  display: grid;
+  gap: 5px;
+  margin: 8px 0 0;
+}
+
+.taskSmartActionOverview dl div {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.taskSmartActionOverview dt {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.taskSmartActionOverview dd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.taskSmartActionSteps {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.taskSmartActionSteps li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-soft);
+}
+
+.taskSmartActionSteps li.ok {
+  border-color: #b7dba5;
+}
+
+.taskSmartActionSteps li.warn {
+  border-color: #edcf95;
+}
+
+.taskSmartActionSteps li.error {
+  border-color: #efb3ad;
+}
+
+.taskSmartActionSteps div {
+  min-width: 0;
+}
+
+.taskSmartActionSteps strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+
+.taskSmartActionSteps p,
+.taskSmartActionVerification p,
+.taskSmartActionNext {
+  margin: 5px 0 0;
+}
+
+.taskSmartActionSteps small {
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.taskSmartActionVerification.ok {
+  border-color: #b7dba5;
+  background: #f0f8ed;
+}
+
+.taskSmartActionVerification.warn {
+  border-color: #edcf95;
+  background: var(--amber-soft);
+}
+
+.taskSmartActionVerification.error {
+  border-color: #efb3ad;
+  background: var(--danger-soft);
+}
+
+.taskSmartActionVerification ul,
+.taskSmartActionNext {
+  display: grid;
+  gap: 5px;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.taskSmartActionVerification li,
+.taskSmartActionNext li {
+  overflow-wrap: anywhere;
+}
+
+.taskSmartActionNextItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.taskSmartActionNextItem > div {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.taskSmartActionNextItem > .btn {
+  white-space: nowrap;
+}
+
+.taskDiagnosticPanel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.taskDiagnosticPanel h4 {
+  margin: 0;
+}
+
+.taskDiagnosticPanel p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.taskDiagnosticPanel > .btn {
+  justify-self: flex-start;
+}
+
+.taskDiagnosticAction {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 9px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid #bfd7f0;
+  border-radius: 7px;
+  background: var(--info-soft);
+}
+
+.taskDiagnosticAction div {
+  min-width: 0;
+}
+
+.taskDiagnosticAction strong,
+.taskDiagnosticAction small {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.taskDiagnosticAction small {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .taskJsonDetails {
@@ -2059,13 +2291,18 @@ main {
 
 .smartActionItem {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 7px 12px;
   min-width: 0;
   padding: 11px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
+}
+
+.smartActionItem.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .smartActionItem.error {
@@ -2078,11 +2315,37 @@ main {
   background: var(--amber-soft);
 }
 
-.smartActionItem > div {
+.smartActionSelect {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  justify-items: center;
+  align-content: start;
+  gap: 5px;
+  color: var(--muted-strong);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.smartActionSelect input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+}
+
+.smartActionSelect.disabled {
+  color: var(--muted);
+}
+
+.smartActionMain {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.smartActionTitleLine {
+  display: flex;
   align-items: center;
-  gap: 5px 8px;
+  gap: 7px;
   min-width: 0;
 }
 
@@ -2092,13 +2355,12 @@ main {
 }
 
 .smartActionItem small {
-  grid-column: 2;
   color: var(--muted);
   font-size: 12px;
 }
 
 .smartActionItem p {
-  grid-column: 1 / -1;
+  grid-column: 2 / -1;
   margin: 0;
   color: var(--muted-strong);
   font-size: 13px;
@@ -2108,6 +2370,877 @@ main {
 .smartActionItem .btn {
   align-self: start;
   white-space: nowrap;
+}
+
+.smartActionPolicyStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.smartActionPolicyStrip > span:not(.badge) {
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.smartActionsPanel {
+  min-width: 0;
+}
+
+.smartActionsFilters {
+  grid-template-columns: minmax(260px, 1fr) repeat(5, minmax(120px, 170px));
+}
+
+.smartActionsSearch {
+  min-width: 0;
+}
+
+.inputWithIcon {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.inputWithIcon svg {
+  position: absolute;
+  left: 11px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.inputWithIcon .input {
+  width: 100%;
+  padding-left: 34px;
+}
+
+.smartActionQuickFacts {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 5px;
+  min-width: 210px;
+  align-self: start;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.52);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.smartActionQuickFacts span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.smartActionQuickFacts strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.smartActionItem .smartActionQuickFacts {
+  grid-column: 3;
+  grid-template-columns: 1fr;
+}
+
+.smartActionsPanel .smartActionItem .btn {
+  grid-column: 3;
+  justify-self: end;
+}
+
+.smartActionSafety {
+  grid-column: 2 / -1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.45);
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.smartActionSafety.ok {
+  border-color: #bdddb3;
+  background: #edf8e8;
+}
+
+.smartActionSafety.warn {
+  border-color: #edcf95;
+  background: var(--amber-soft);
+}
+
+.smartActionSafety span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.smartActionsPolicyOverview {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.smartActionsPolicyOverview article {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.smartActionsPolicyOverview svg {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.smartActionsPolicyOverview div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.smartActionsPolicyOverview strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.smartActionsPolicyOverview span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.contextSmartActions {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #c8d9cc;
+  border-radius: 8px;
+  background: #f2f8f3;
+}
+
+.contextSmartActionsHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.contextSmartActionsHead > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.contextSmartActionsHead strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.contextSmartActionsHead span,
+.contextSmartWarnings span,
+.contextSmartActionList small,
+.contextSmartActionList p {
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.contextSmartWarnings {
+  display: grid;
+  gap: 5px;
+  padding: 8px 10px;
+  border: 1px solid #edcf95;
+  border-radius: 8px;
+  background: var(--amber-soft);
+}
+
+.contextSmartWarnings span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.contextSmartActionList {
+  display: grid;
+  gap: 8px;
+}
+
+.contextSmartActionList article {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-left-width: 3px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.contextSmartActionList article.ok {
+  border-left-color: var(--ok);
+}
+
+.contextSmartActionList article.warn {
+  border-left-color: var(--amber);
+}
+
+.contextSmartActionList article.error {
+  border-left-color: var(--danger);
+}
+
+.contextSmartActionList article > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.contextSmartActionList strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.contextSmartActionList p {
+  margin: 0;
+}
+
+.smartActionsBulkBar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.smartActionsBulkBar > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.smartActionsBulkBar span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.smartActionsBulkButtons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.smartActionsBulkResult {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 3px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.smartActionsBulkResult.ok {
+  border-color: #bdddb3;
+  background: #edf8e8;
+}
+
+.smartActionsBulkResult.warn {
+  border-color: #edcf95;
+  background: var(--amber-soft);
+}
+
+.smartActionsListHead,
+.smartActionDetailHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.smartActionsListHead > div,
+.smartActionDetailHead {
+  display: grid;
+  gap: 3px;
+}
+
+.smartActionsListHead h2,
+.smartActionDetailHead h3 {
+  margin: 0;
+}
+
+.smartActionsListHead span,
+.smartActionDetailHead p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.smartActionStateBanner {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.smartActionStateBanner.ok {
+  border-color: #bdddb3;
+  background: #edf8e8;
+}
+
+.smartActionStateBanner.warn {
+  border-color: #edcf95;
+  background: var(--amber-soft);
+}
+
+.smartActionStateBanner.error {
+  border-color: #efb3ad;
+  background: var(--danger-soft);
+}
+
+.smartActionStateBanner > svg {
+  margin-top: 1px;
+  color: var(--accent-strong);
+}
+
+.smartActionStateBanner.error > svg {
+  color: var(--danger);
+}
+
+.smartActionStateBanner div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.smartActionStateBanner span {
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.smartActionDrawerBody {
+  display: grid;
+  gap: 12px;
+  padding: 14px 18px 22px;
+}
+
+.smartActionDrawerBody .readonlyBlock {
+  padding: 12px;
+}
+
+.smartActionMiniStats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.smartActionTextList {
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.smartActionTextList.warn {
+  padding: 10px 10px 10px 28px;
+  border: 1px solid #edcf95;
+  border-radius: 8px;
+  background: var(--amber-soft);
+}
+
+.smartActionSubList,
+.smartActionEvidenceList,
+.smartActionStepList {
+  display: grid;
+  gap: 8px;
+}
+
+.smartActionSubList article,
+.smartActionEvidenceList article,
+.smartActionStepList article {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.smartActionSubList article {
+  display: grid;
+  gap: 3px;
+}
+
+.smartActionSubList p,
+.smartActionStepList p,
+.smartActionResultText {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.smartActionResultText.muted {
+  color: var(--muted);
+}
+
+.smartActionEvidenceList article {
+  display: grid;
+  gap: 7px;
+}
+
+.smartActionEvidenceList article > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.smartActionEvidenceList pre {
+  max-height: 180px;
+  margin: 0;
+  overflow: auto;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #132018;
+  color: #eaf4ec;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.smartActionEvidenceFacts {
+  display: grid !important;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch !important;
+  gap: 7px !important;
+}
+
+.smartActionEvidenceFacts span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.smartActionEvidenceFacts strong {
+  color: var(--text);
+}
+
+.smartActionTechDetails {
+  min-width: 0;
+}
+
+.smartActionTechDetails summary {
+  cursor: pointer;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.smartActionEvidenceList small,
+.smartActionStepList small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.smartActionStepList article {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+}
+
+.smartActionStepList article > span,
+.smartActionStepList article > svg {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.smartActionStepList article > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.smartActionStepList strong,
+.smartActionEvidenceList strong,
+.smartActionSubList strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.smartActionPolicy {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.smartActionPolicy.ok {
+  border-color: #bdddb3;
+  background: #edf8e8;
+}
+
+.smartActionPolicy.warn {
+  border-color: #edcf95;
+  background: var(--amber-soft);
+}
+
+.smartActionPolicy.error {
+  border-color: #efb3ad;
+  background: var(--danger-soft);
+}
+
+.smartActionExecuteBlock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.smartActionExecuteBlock h2,
+.smartActionExecuteBlock p {
+  margin: 0;
+}
+
+.smartActionExecuteBlock p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.smartActionExecuteBlock .notice,
+.smartActionDangerPanel,
+.smartActionTaskInfo,
+.smartActionFailureNotice,
+.smartActionFormState,
+.smartActionNextSteps,
+.smartActionVerifyResult,
+.smartActionPreflight,
+.smartActionSafetyChecklist {
+  grid-column: 1 / -1;
+}
+
+.smartActionPreflight {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.smartActionPreflight.ok {
+  border-color: #bdddb3;
+  background: #edf8e8;
+}
+
+.smartActionPreflight.warn {
+  border-color: #edcf95;
+  background: var(--amber-soft);
+}
+
+.smartActionPreflight div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.smartActionPreflight span {
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.smartActionDangerPanel {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid #efb3ad;
+  border-radius: 8px;
+  background: var(--danger-soft);
+}
+
+.smartActionDangerPanel > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.smartActionDangerPanel span,
+.smartActionDangerModal p {
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.smartActionDangerInput {
+  display: grid;
+  gap: 5px;
+}
+
+.smartActionDangerInput .input[aria-invalid="true"] {
+  border-color: var(--danger);
+  background: #fff7f6;
+}
+
+.smartActionTransferForm {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.smartActionTransferForm .smartActionPkgAck {
+  grid-column: 1 / -1;
+}
+
+.smartActionTransferForm .smartActionWideInput {
+  grid-column: 1 / -1;
+}
+
+.smartActionDangerFacts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.smartActionDangerFacts span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(186, 45, 45, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.smartActionDangerFacts strong {
+  color: var(--text);
+}
+
+.smartActionFormState,
+.smartActionFailureNotice,
+.smartActionVerifyResult {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.smartActionFormState.ok,
+.smartActionVerifyResult.ok {
+  border-color: #bdddb3;
+  background: #edf8e8;
+}
+
+.smartActionFormState.warn,
+.smartActionVerifyResult.warn {
+  border-color: #edcf95;
+  background: var(--amber-soft);
+}
+
+.smartActionFailureNotice,
+.smartActionVerifyResult.error {
+  border-color: #efb3ad;
+  background: var(--danger-soft);
+}
+
+.smartActionVerifyResult {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.smartActionFailureNotice svg,
+.smartActionVerifyResult.error svg {
+  color: var(--danger);
+}
+
+.smartActionFormState div,
+.smartActionFailureNotice div,
+.smartActionVerifyResult div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.smartActionFormState span,
+.smartActionFailureNotice span,
+.smartActionVerifyResult span,
+.smartActionVerifyResult p {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.smartActionCandidateTransfer {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid rgba(64, 104, 168, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.smartActionCandidateTransfer span {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.smartActionCandidateTransfer b {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.smartActionDangerModal {
+  display: grid;
+  gap: 10px;
+}
+
+.smartActionDangerModal label {
+  display: grid;
+  gap: 5px;
+}
+
+.smartActionSafetyChecklist {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.smartActionSafetyChecklist span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted-strong);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.smartActionSafetyChecklist strong {
+  color: var(--text);
+}
+
+.smartActionTaskInfo {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid #bdddb3;
+  border-radius: 8px;
+  background: #edf8e8;
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.smartActionTaskInfo span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.smartActionTaskInfo strong {
+  display: inline-block;
+  min-width: 42px;
+  margin-right: 8px;
+  color: var(--text);
+}
+
+.smartActionNextSteps {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid #c8d9cc;
+  border-radius: 8px;
+  background: #f2f8f3;
+}
+
+.smartActionNextSteps > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.smartActionNextSteps span {
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.smartActionNextSteps > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
 }
 
 .miniStats {
@@ -3658,6 +4791,9 @@ main {
   .manageForms,
   .manageTaskMeta,
   .catalogMiniStats,
+  .smartActionTransferForm,
+  .smartActionDangerFacts,
+  .smartActionSafetyChecklist,
   .modalActions {
     align-items: stretch;
     flex-direction: column;
@@ -4470,8 +5606,49 @@ main {
   }
 
   .taskResultStages,
+  .taskSmartActionOverview,
   .smartActionItem {
     grid-template-columns: 1fr;
+  }
+
+  .smartActionsFilters,
+  .smartActionsPolicyOverview,
+  .smartActionMiniStats,
+  .smartActionsListHead,
+  .smartActionDetailHead,
+  .smartActionsBulkBar,
+  .smartActionSafetyChecklist {
+    grid-template-columns: 1fr;
+  }
+
+  .smartActionsFilters,
+  .smartActionsListHead,
+  .smartActionDetailHead,
+  .smartActionsBulkButtons,
+  .smartActionEvidenceList article > div {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .smartActionSelect {
+    grid-template-columns: auto minmax(0, 1fr);
+    justify-items: start;
+    align-items: center;
+  }
+
+  .smartActionItem p,
+  .smartActionSafety,
+  .smartActionsBulkResult {
+    grid-column: 1;
+  }
+
+  .smartActionItem .smartActionQuickFacts,
+  .smartActionsPanel .smartActionItem .btn {
+    grid-column: 1;
+  }
+
+  .smartActionQuickFacts {
+    min-width: 0;
   }
 
   .smartActionItem .btn {

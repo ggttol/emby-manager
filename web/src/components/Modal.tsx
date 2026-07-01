@@ -26,12 +26,14 @@ export function ConfirmDanger({
   title,
   body,
   confirmText,
+  confirmDisabled = false,
   onCancel,
   onConfirm
 }: {
   title: string;
   body: ReactNode;
   confirmText: string;
+  confirmDisabled?: boolean;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -40,9 +42,8 @@ export function ConfirmDanger({
       <div className="modalBody">{body}</div>
       <footer className="modalActions">
         <button className="btn ghost" onClick={onCancel}>取消</button>
-        <button className="btn danger" onClick={onConfirm}>{confirmText}</button>
+        <button className="btn danger" onClick={onConfirm} disabled={confirmDisabled}>{confirmText}</button>
       </footer>
     </Modal>
   );
 }
-

@@ -271,12 +271,17 @@ async fn execute_dedup_allows_emby_item_only_duplicate_delete() {
 }
 
 #[tokio::test]
-async fn execute_dedup_stops_local_cleanup_when_emby_delete_fails() {
+async fn execute_dedup_continues_path_cleanup_when_emby_delete_fails() {
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping dedup API DB test; set EMBY_MANAGER_DEDUP_TEST_DATABASE_URL");
         return;
     };
-    let (base_url, requests) = spawn_fake_emby(vec![FakeResponse::server_error()]).await;
+    let (base_url, requests) = spawn_fake_emby(vec![
+        FakeResponse::server_error(),
+        FakeResponse::no_content(),
+        FakeResponse::no_content(),
+    ])
+    .await;
     configure_emby(&state, &base_url).await;
 
     let cd_folder = state.settings.cd_root.join("TV/Show [tmdbid-100]");
@@ -285,7 +290,7 @@ async fn execute_dedup_stops_local_cleanup_when_emby_delete_fails() {
     std::fs::create_dir_all(&strm_folder).unwrap();
     std::fs::write(strm_folder.join("S01E01.strm"), "strm").unwrap();
 
-    let err = dedup::execute_dedup(
+    let response = dedup::execute_dedup(
         State(state.clone()),
         Json(dedup::DedupExecuteRequest {
             tmdb: Some("100".to_string()),
@@ -294,32 +299,62 @@ async fn execute_dedup_stops_local_cleanup_when_emby_delete_fails() {
                 folder: "Show [tmdbid-100]".to_string(),
                 item_id: Some("item-fails".to_string()),
             }],
-            reason: Some("emby delete failure must abort".to_string()),
+            reason: Some("emby delete failure should fall back to path cleanup".to_string()),
         }),
     )
     .await
-    .expect_err("Emby delete failure must fail the dedup request");
+    .expect("Emby delete failure should not block path cleanup")
+    .0;
 
-    assert!(matches!(err, AppError::Conflict(_)), "{err:?}");
-    assert!(cd_folder.exists(), "115/CloudDrive folder must remain");
-    assert!(strm_folder.exists(), "STRM folder must remain");
+    assert!(response.ok);
+    assert_eq!(response.removed.len(), 1);
+    assert_eq!(response.removed[0].deleted_from, vec!["strm", "emby"]);
+    assert_eq!(response.removed[0].warnings.len(), 2);
+    assert!(
+        response.removed[0].warnings[0].contains("HTTP 500"),
+        "{:?}",
+        response.removed[0].warnings
+    );
+    assert!(
+        cd_folder.exists(),
+        "CloudDrive folder remains without 115 delete context"
+    );
+    assert!(
+        !strm_folder.exists(),
+        "STRM folder should be cleaned by fallback"
+    );
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 3);
     assert!(
         requests[0].starts_with("DELETE /Items/item-fails?"),
         "{}",
         requests[0]
     );
+    assert!(
+        requests[1].starts_with("DELETE /Items/item-fails?"),
+        "{}",
+        requests[1]
+    );
+    assert!(
+        requests[2].starts_with("POST /Library/Media/Updated?"),
+        "{}",
+        requests[2]
+    );
 }
 
 #[tokio::test]
-async fn execute_dedup_batch_marks_task_error_when_a_group_fails() {
+async fn execute_dedup_batch_records_warnings_when_emby_delete_fails() {
     let Some((_tmp, state)) = test_state().await else {
         eprintln!("skipping dedup API DB test; set EMBY_MANAGER_DEDUP_TEST_DATABASE_URL");
         return;
     };
-    let (base_url, _requests) = spawn_fake_emby(vec![FakeResponse::server_error()]).await;
+    let (base_url, _requests) = spawn_fake_emby(vec![
+        FakeResponse::server_error(),
+        FakeResponse::no_content(),
+        FakeResponse::no_content(),
+    ])
+    .await;
     configure_emby(&state, &base_url).await;
 
     let strm_folder = state.settings.strm_root.join("TV/Show [tmdbid-200]");
@@ -359,20 +394,18 @@ async fn execute_dedup_batch_marks_task_error_when_a_group_fails() {
         sleep(Duration::from_millis(50)).await;
     }
     let (status, result, error) = row.expect("task should finish");
-    let result = result.expect("failed batch should still store a structured result");
-    assert_eq!(status, "error");
-    assert!(
-        error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("批量去重失败"),
-        "{error:?}"
+    let result = result.expect("batch should store a structured result");
+    assert_eq!(status, "done");
+    assert!(error.is_none(), "{error:?}");
+    assert_eq!(result["ok"], json!(true));
+    assert_eq!(result["ok_count"], json!(1));
+    assert_eq!(result["error_count"], json!(0));
+    assert_eq!(result["results"][0]["ok"], json!(true));
+    assert_eq!(
+        result["results"][0]["warnings"].as_array().unwrap().len(),
+        2
     );
-    assert_eq!(result["ok"], json!(false));
-    assert_eq!(result["ok_count"], json!(0));
-    assert_eq!(result["error_count"], json!(1));
-    assert_eq!(result["results"][0]["ok"], json!(false));
-    assert!(strm_folder.exists(), "failed dedup must not remove STRM");
+    assert!(!strm_folder.exists(), "fallback should remove STRM");
 }
 
 async fn configure_emby(state: &AppState, base_url: &str) {

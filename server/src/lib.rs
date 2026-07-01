@@ -18,6 +18,7 @@ pub mod openapi;
 pub mod posters;
 pub mod scheduler;
 pub mod settings;
+pub mod smart_actions;
 pub mod state;
 pub mod system;
 pub mod tasks;

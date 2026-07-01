@@ -5,6 +5,7 @@ import { api, clearAuthSession, getAuthSession, setAuthSession } from './api/cli
 
 const tabLabels = [
   '仪表盘',
+  '智能动作',
   '扫描',
   '115 转存',
   '找资源',
@@ -197,6 +198,356 @@ const taskHistory = {
       updated_at: '2026-06-28T00:02:00Z'
     }
   ]
+};
+
+const smartAction = {
+  id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  action_type: 'transfer_update_series',
+  status: 'suggested',
+  subject: {
+    kind: 'series',
+    name: '莫离',
+    year: 2026,
+    tmdb: '12345',
+    emby_id: 'emby-show-1',
+    lib: '电视剧',
+    folder: '/volume1/strm/电视剧/莫离',
+    strm_path: '/volume1/strm/电视剧/莫离/S01E26.strm',
+    cd_path: '/volume1/docker/clouddrive2/CloudNAS/CloudDrive/115/莫离'
+  },
+  title: '莫离有新集可更新',
+  summary: 'Emby 当前 25 集，资源侧发现 26 集，建议一条龙转存、生成 STRM 并刷新媒体库。',
+  recommendation: {
+    score: 91,
+    confidence: 'high',
+    primary_action: '更新转存并处理旧目录',
+    reasons: ['追更库集数落后', '资源标题和年份匹配', '旧目录需要在更新后清理'],
+    alternatives: [{ action: '仅打开追更检查', reason: '人工确认候选资源后再处理' }]
+  },
+  evidence: [
+    {
+      source: 'emby_episodes',
+      label: 'Emby 当前剧集',
+      value: { current_max_episode: 25, library: '电视剧' },
+      weight: 88,
+      collected_at: '2026-06-29T00:00:00Z'
+    },
+    {
+      source: 'catalog_candidate',
+      label: '115 候选资源',
+      value: { title: 'The.First.Jasmine.2026.S01E26', cid: 'cid-26' },
+      weight: 91,
+      collected_at: '2026-06-29T00:00:01Z'
+    }
+  ],
+  plan: {
+    steps: [
+      {
+        key: 'open-zhuigeng',
+        title: '打开追更检查并锁定莫离',
+        executor: 'open_tab',
+        params: { tab: 'zhuigeng' },
+        rollback: null
+      },
+      {
+        key: 'transfer',
+        title: '转存候选资源并生成 STRM',
+        executor: 'task_pipeline',
+        params: { cid: 'cid-26' },
+        rollback: { title: '用 undo 记录回滚 STRM 和移动操作', params: {} }
+      },
+      {
+        key: 'refresh',
+        title: '刷新 Emby 媒体库并修复海报',
+        executor: 'existing_endpoint',
+        params: { endpoint: '/api/v2/posters/fix-batch' },
+        rollback: null
+      }
+    ],
+    estimated_seconds: 180,
+    concurrency_key: 'clouddrive',
+    can_cancel: true
+  },
+  risk: {
+    level: 'high',
+    destructive: true,
+    touches_emby: true,
+    touches_disk: true,
+    touches_c115: true,
+    requires_confirm_text: '执行',
+    warnings: ['会删除同剧旧目录，必须保留 undo 记录']
+  },
+  policy: {
+    enabled: true,
+    mode: 'confirm',
+    max_risk: 'high',
+    reason: '涉及 115、磁盘和 Emby 写操作，需要用户确认'
+  },
+  verification: {
+    checks: [
+      {
+        key: 'episode-visible',
+        title: '新集可见',
+        source: 'emby_episodes',
+        expected: 'Emby 显示第 26 集'
+      },
+      {
+        key: 'poster-ok',
+        title: '海报可见',
+        source: 'poster_detection',
+        expected: '条目存在 Primary 图片'
+      }
+    ],
+    success_message: '新集入库、旧目录已清理、海报可见',
+    partial_message: '如果 Emby 刷新延迟，任务中心会提示复查'
+  },
+  source: 'zhuigeng.update_needed',
+  tab: 'zhuigeng',
+  action_label: '更新转存',
+  created_at: '2026-06-29T00:00:00Z',
+  updated_at: '2026-06-29T00:00:02Z'
+};
+
+const lowRiskSmartAction = {
+  ...smartAction,
+  id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+  action_type: 'library_scan',
+  title: '低风险媒体库扫描',
+  summary: '只提交媒体库扫描任务，不删除文件、不调用 115。',
+  recommendation: {
+    ...smartAction.recommendation,
+    primary_action: '刷新媒体库',
+    reasons: ['新 STRM 已生成', '只需要通知 Emby 扫描']
+  },
+  plan: {
+    ...smartAction.plan,
+    steps: [{
+      key: 'scan',
+      title: '刷新 Emby 媒体库',
+      executor: 'existing_endpoint',
+      params: { endpoint: '/api/v2/scan' },
+      rollback: null
+    }],
+    concurrency_key: 'emby'
+  },
+  risk: {
+    level: 'low',
+    destructive: false,
+    touches_emby: true,
+    touches_disk: false,
+    touches_c115: false,
+    requires_confirm_text: null,
+    warnings: []
+  },
+  policy: {
+    enabled: true,
+    mode: 'auto',
+    max_risk: 'medium',
+    reason: '低风险 Emby 扫描允许自动提交'
+  },
+  action_label: '刷新媒体库'
+};
+
+const transferAddNewSmartAction = {
+  ...smartAction,
+  id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+  action_type: 'transfer_add_new',
+  title: '新片可从找资源转存',
+  summary: '资源库发现新片候选，需要确认目标库或 cid 后安全转存。',
+  subject: {
+    ...smartAction.subject,
+    kind: 'movie',
+    name: '星河样片',
+    year: 2026,
+    lib: null,
+    emby_id: null
+  },
+  recommendation: {
+    ...smartAction.recommendation,
+    primary_action: '确认新增转存',
+    reasons: ['资源库存在 115 分享候选', '新增入库必须确认目标库或 cid']
+  },
+  evidence: [
+    {
+      source: 'catalog_candidate',
+      label: '找资源候选',
+      value: { title: 'Galaxy.Sample.2026.2160p', link: 'https://115.com/s/galaxy?password=xy12', is_pkg: true },
+      weight: 89,
+      collected_at: '2026-06-29T00:00:01Z'
+    }
+  ],
+  plan: {
+    steps: [
+      {
+        key: 'open-catalog',
+        title: '打开找资源并带入候选',
+        executor: 'open_tab',
+        params: { tab: 'catalog', q: '星河样片 2026' },
+        rollback: null
+      },
+      {
+        key: 'catalog_transfer_execute',
+        title: '在找资源转存弹窗中确认目标库和 cid',
+        executor: 'manual_confirm',
+        params: {
+          q: '星河样片 2026',
+          link: 'https://115.com/s/galaxy?password=xy12',
+          item: {
+            title: 'Galaxy.Sample.2026.2160p',
+            link: 'https://115.com/s/galaxy?password=xy12',
+            link_type: 'share115',
+            is_pkg: true
+          }
+        },
+        rollback: null
+      }
+    ],
+    estimated_seconds: 120,
+    concurrency_key: 'clouddrive',
+    can_cancel: true
+  },
+  risk: {
+    level: 'high',
+    destructive: false,
+    touches_emby: true,
+    touches_disk: true,
+    touches_c115: true,
+    requires_confirm_text: '执行',
+    warnings: ['新增转存前必须确认目标库或 cid']
+  },
+  policy: {
+    enabled: true,
+    mode: 'confirm',
+    max_risk: 'high',
+    reason: '新增转存需要人工确认目标库'
+  },
+  source: 'catalog.add_new',
+  tab: 'catalog',
+  action_label: '确认新增转存'
+};
+
+const dedupSmartAction = {
+  ...smartAction,
+  id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+  action_type: 'dedup_remove_old',
+  title: '莫离自动去重建议',
+  summary: '识别到同剧旧目录和新目录并存，建议删除旧资源。',
+  recommendation: {
+    ...smartAction.recommendation,
+    primary_action: '删除旧资源',
+    reasons: ['同 TMDb 下存在旧目录', '新目录集数更完整', '旧目录已经不应保留']
+  },
+  plan: {
+    steps: [
+      {
+        key: 'open_context',
+        title: '打开去重上下文',
+        executor: 'open_tab',
+        params: { tab: 'dedup', tmdb: '12345' },
+        rollback: null
+      },
+      {
+        key: 'review_keep_remove',
+        title: '复核保留项和删除项',
+        executor: 'manual_confirm',
+        params: { keep: [{ lib: '电视剧', folder: '莫离 新版', item_id: 'item-new' }], remove: [{ lib: '电视剧', folder: '莫离 旧版', item_id: 'item-old' }] },
+        rollback: null
+      },
+      {
+        key: 'dedup_execute_batch',
+        title: '确认后提交批量去重',
+        executor: 'task_pipeline',
+        params: {
+          endpoint: '/api/v2/dedup/execute-batch',
+          request: {
+            groups: [{
+              tmdb: '12345',
+              remove: [{ lib: '电视剧', folder: '莫离 旧版', item_id: 'item-old' }]
+            }]
+          }
+        },
+        rollback: { title: '按 undo_entries 恢复删除影响', params: { source: 'undo_entries' } }
+      }
+    ],
+    estimated_seconds: 90,
+    concurrency_key: 'clouddrive',
+    can_cancel: true
+  },
+  risk: {
+    level: 'critical',
+    destructive: true,
+    touches_emby: true,
+    touches_disk: true,
+    touches_c115: true,
+    requires_confirm_text: '删除',
+    warnings: ['会删除 Emby 条目和旧目录，必须确认保留项正确']
+  },
+  policy: {
+    enabled: true,
+    mode: 'confirm',
+    max_risk: 'critical',
+    reason: '破坏性去重必须人工确认'
+  },
+  source: 'dedup.auto_groups',
+  tab: 'dedup',
+  action_label: '删除旧资源'
+};
+
+const archiveSmartAction = {
+  ...smartAction,
+  id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+  action_type: 'archive_series',
+  title: '莫离已完结可归档',
+  summary: '追更库中莫离已经完结，建议移动到完结剧库。',
+  recommendation: {
+    ...smartAction.recommendation,
+    primary_action: '归档到完结剧库',
+    reasons: ['TMDb 状态为已完结', '当前仍在追更库']
+  },
+  plan: {
+    steps: [
+      {
+        key: 'open-zhuigeng',
+        title: '打开追更检查并锁定莫离',
+        executor: 'open_tab',
+        params: { tab: 'zhuigeng' },
+        rollback: null
+      },
+      {
+        key: 'zhuigeng_archive_execute',
+        title: '确认目标库后归档',
+        executor: 'task_pipeline',
+        params: {
+          endpoint: '/api/v2/zhuigeng/archive/execute',
+          requires_policy_param: 'archive_to_lib',
+          item: { lib: '追更', title: '莫离', emby_id: 'emby-show-1', folder: '/volume1/strm/追更/莫离' },
+          on_conflict: 'smart'
+        },
+        rollback: { title: '按 move undo 反向移动回追更库', params: { source: 'undo_entries' } }
+      }
+    ],
+    estimated_seconds: 120,
+    concurrency_key: 'clouddrive',
+    can_cancel: true
+  },
+  risk: {
+    level: 'high',
+    destructive: true,
+    touches_emby: true,
+    touches_disk: true,
+    touches_c115: false,
+    requires_confirm_text: '归档',
+    warnings: ['会移动目录并刷新 Emby，执行前必须确认目标库']
+  },
+  policy: {
+    enabled: true,
+    mode: 'confirm',
+    max_risk: 'high',
+    reason: '归档移动必须人工确认'
+  },
+  source: 'zhuigeng.archive_ready',
+  tab: 'zhuigeng',
+  action_label: '归档'
 };
 
 const strmReadonly = {
@@ -688,10 +1039,239 @@ describe('App shell', () => {
     expect(within(drawer).queryByText('追更一条龙更新')).not.toBeInTheDocument();
   });
 
+  it('renders smart action task results as structured summaries in task center', async () => {
+    const smartActionTask = taskRun(
+      '88888888-8888-4888-8888-888888888888',
+      'smart_action_execute',
+      '智能动作执行：莫离',
+      'done',
+      {
+        action_id: smartAction.id,
+        action_type: 'transfer_update_series',
+        subject: smartAction.subject,
+        dry_run: false,
+        steps: [
+          {
+            key: 'open_context',
+            title: '打开追更检查并锁定莫离',
+            executor: 'open_tab',
+            status: 'done',
+            message: '已记录建议对应的功能入口。',
+            result: { ok: true }
+          },
+          {
+            key: 'zhuigeng_update_execute',
+            title: '转存候选资源并生成 STRM',
+            executor: 'task_pipeline',
+            status: 'done',
+            message: '步骤完成。',
+            result: {
+              ok: true,
+              task: taskRun(
+                '99999999-9999-4999-8999-999999999999',
+                'zhuigeng_update',
+                '追更一条龙更新: 莫离'
+              )
+            }
+          },
+          {
+            key: 'poster_fix',
+            title: '刷新 Emby 媒体库并修复海报',
+            executor: 'existing_endpoint',
+            status: 'error',
+            message: 'TMDb ID 缺失，等待人工补齐',
+            result: { ok: false, err: 'tmdb missing' }
+          }
+        ],
+        verification: {
+          status: 'partial',
+          message: '如果 Emby 刷新延迟，任务中心会提示复查',
+          checks: [{
+            key: 'poster-ok',
+            title: '海报可见',
+            source: 'poster_detection',
+            expected: '条目存在 Primary 图片'
+          }]
+        },
+        next_actions: [{
+          action_type: 'transfer_update_series',
+          label: '更新转存',
+          tab: 'zhuigeng',
+          reason: '该建议仍需在具体功能页完成对象级处理。',
+          subject: smartAction.subject
+        }]
+      }
+    );
+    let nextActionRequest: Record<string, unknown> = {};
+    let nextActionMethod = '';
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/tasks') {
+        return jsonResponse({ active_count: 0, tasks: [smartActionTask] });
+      }
+      if (url.pathname === '/api/v2/smart-actions/from-next-action') {
+        nextActionMethod = init?.method || '';
+        nextActionRequest = JSON.parse(String(init?.body || '{}'));
+        return jsonResponse({
+          ok: true,
+          persisted: true,
+          warnings: [],
+          action: {
+            ...smartAction,
+            id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+            title: '下一步：更新转存',
+            summary: '该建议仍需在具体功能页完成对象级处理。',
+            source: 'task_next_actions',
+            tab: 'zhuigeng',
+            action_label: '更新转存'
+          }
+        });
+      }
+      if (url.pathname === '/api/v2/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 1,
+          limit: 80,
+          offset: 0,
+          actions: [smartAction],
+          warnings: [],
+          summary: {
+            total: 1,
+            suggested: 1,
+            auto_ready: 0,
+            confirm_required: 1,
+            running: 0,
+            failed: 0,
+            high: 1,
+            medium: 0,
+            low: 0,
+            critical: 0
+          }
+        });
+      }
+      if (url.pathname === '/api/v2/smart-actions/dddddddd-dddd-4ddd-8ddd-dddddddddddd') {
+        return jsonResponse({
+          ok: true,
+          action: {
+            ...smartAction,
+            id: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+            title: '下一步：更新转存',
+            summary: '该建议仍需在具体功能页完成对象级处理。',
+            source: 'task_next_actions',
+            tab: 'zhuigeng',
+            action_label: '更新转存'
+          }
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '任务中心' }));
+
+    const drawer = getTaskCenterDrawer();
+    expect(await within(drawer).findByText('智能动作执行：莫离')).toBeInTheDocument();
+    expect(within(drawer).getByText('追更更新转存 · 莫离 (2026) · 步骤 2/3，失败 1 · 验收 需复查')).toBeInTheDocument();
+    expect(within(drawer).queryByText((_, element) => element?.textContent?.includes('"action_id"') ?? false)).not.toBeInTheDocument();
+
+    fireEvent.click(within(drawer).getByRole('button', { name: '展开任务详情：智能动作执行：莫离' }));
+
+    expect(within(drawer).getByRole('heading', { name: '智能动作结果' })).toBeInTheDocument();
+    expect(within(drawer).getByText('动作类型')).toBeInTheDocument();
+    expect(within(drawer).getByText('追更更新转存')).toBeInTheDocument();
+    expect(within(drawer).getByText('对象')).toBeInTheDocument();
+    expect(within(drawer).getByText('莫离 (2026)')).toBeInTheDocument();
+    expect(within(drawer).getByText('步骤列表')).toBeInTheDocument();
+    expect(within(drawer).getByText('转存候选资源并生成 STRM')).toBeInTheDocument();
+    expect(within(drawer).getAllByText((_, element) => (
+      element?.textContent?.includes('下游任务 追更一条龙更新: 莫离') ?? false
+    )).length).toBeGreaterThan(0);
+    expect(within(drawer).getByText('刷新 Emby 媒体库并修复海报')).toBeInTheDocument();
+    expect(within(drawer).getByText('TMDb ID 缺失，等待人工补齐')).toBeInTheDocument();
+    expect(within(drawer).getByText('验收状态')).toBeInTheDocument();
+    expect(within(drawer).getByText('需复查')).toBeInTheDocument();
+    expect(within(drawer).getByText('海报可见：条目存在 Primary 图片')).toBeInTheDocument();
+    expect(within(drawer).getByText('后续动作')).toBeInTheDocument();
+    expect(within(drawer).getByText('更新转存 · 入口：追更检查 · 该建议仍需在具体功能页完成对象级处理。')).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole('button', { name: '生成智能动作' }));
+    expect(await within(drawer).findByText('下一步：更新转存')).toBeInTheDocument();
+    const nextActionBody = nextActionRequest;
+    const nextActionPayload = nextActionBody.next_action as Record<string, unknown>;
+    expect(nextActionMethod).toBe('POST');
+    expect(nextActionBody.task_id).toBe(smartActionTask.id);
+    expect(nextActionBody.source_action_id).toBe(smartAction.id);
+    expect(nextActionPayload.action_type).toBe('transfer_update_series');
+    expect((nextActionPayload.subject as Record<string, unknown>)?.name).toBe('莫离');
+    expect(within(drawer).getByText('建议入口：zhuigeng · 更新转存')).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole('button', { name: '打开详情' }));
+    expect(await screen.findByRole('heading', { name: '智能动作详情' })).toBeInTheDocument();
+    expect((await screen.findAllByText('下一步：更新转存')).length).toBeGreaterThan(0);
+    expect(within(drawer).getByText('技术详情 JSON')).toBeInTheDocument();
+  });
+
+  it('generates a diagnostic smart action from a failed task detail', async () => {
+    const normalTask = taskRun(
+      'aaaaaaaa-1111-4111-8111-aaaaaaaa1111',
+      'scan',
+      '扫描电影库',
+      'done',
+      { ok: true, total: 1, ok_count: 1 }
+    );
+    const failedTask = {
+      ...taskRun('bbbbbbbb-2222-4222-8222-bbbbbbbb2222', 'scan', '扫描电视剧库', 'error'),
+      status_text: '失败',
+      error: 'Emby timeout',
+      ended_at: '2026-06-29T00:00:04Z'
+    };
+    const diagnosticAction = {
+      ...smartAction,
+      id: 'cccccccc-3333-4333-8333-cccccccc3333',
+      action_type: 'task_retry_or_diagnose',
+      title: '扫描电视剧库失败诊断',
+      summary: '检测到 Emby timeout，建议先查看系统日志并重试扫描。',
+      tab: 'system',
+      action_label: '查看日志'
+    };
+    let generateCalls = 0;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/tasks') {
+        return jsonResponse({ active_count: 0, tasks: [normalTask, failedTask] });
+      }
+      if (url.pathname === `/api/v2/smart-actions/from-task/${failedTask.id}`) {
+        generateCalls += 1;
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        return jsonResponse({ ok: true, action: diagnosticAction });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '任务中心' }));
+    const drawer = getTaskCenterDrawer();
+    expect(await within(drawer).findByText('扫描电影库')).toBeInTheDocument();
+
+    fireEvent.click(within(drawer).getByRole('button', { name: '展开任务详情：扫描电影库' }));
+    expect(within(drawer).queryByRole('button', { name: '生成诊断智能动作' })).not.toBeInTheDocument();
+
+    fireEvent.click(within(drawer).getByRole('button', { name: '展开任务详情：扫描电视剧库' }));
+    fireEvent.click(within(drawer).getByRole('button', { name: '生成诊断智能动作' }));
+
+    await waitFor(() => expect(generateCalls).toBe(1));
+    expect(await screen.findByText('已生成诊断智能动作：扫描电视剧库失败诊断')).toBeInTheDocument();
+    const generated = within(drawer).getByLabelText('已生成诊断动作');
+    expect(within(generated).getByText('扫描电视剧库失败诊断')).toBeInTheDocument();
+    expect(within(generated).getByText('检测到 Emby timeout，建议先查看系统日志并重试扫描。')).toBeInTheDocument();
+    expect(within(generated).getByText('建议入口：system · 查看日志')).toBeInTheDocument();
+  });
+
   it('renders the dashboard read-only overview with csrf protected insight calls', async () => {
     let cleanupCalled = false;
     let gapsCalled = false;
     let dashboardSmartCalled = false;
+    let smartSummaryCalled = false;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/system/summary') {
         return jsonResponse(systemSummary);
@@ -758,6 +1338,26 @@ describe('App shell', () => {
           ]
         });
       }
+      if (url.pathname === '/api/v2/smart-actions/summary') {
+        smartSummaryCalled = true;
+        expect(init?.method || 'GET').toBe('GET');
+        return jsonResponse({
+          ok: true,
+          warnings: [],
+          summary: {
+            total: 4,
+            suggested: 2,
+            running: 1,
+            failed: 1,
+            auto_ready: 1,
+            confirm_required: 2,
+            low: 1,
+            medium: 1,
+            high: 1,
+            critical: 1
+          }
+        });
+      }
       return undefined;
     });
 
@@ -772,6 +1372,10 @@ describe('App shell', () => {
     expect(screen.getByText('无海报')).toBeInTheDocument();
     expect(screen.getByText('无评分')).toBeInTheDocument();
     expect(screen.getByText('智能下一步')).toBeInTheDocument();
+    expect(screen.getByText('可自动执行')).toBeInTheDocument();
+    expect(screen.getByText('需要确认')).toBeInTheDocument();
+    expect(screen.getByText('执行中/失败')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '打开工作台' })).toBeInTheDocument();
     expect(screen.getByText('追更剧有新集可更新')).toBeInTheDocument();
     expect(screen.queryByText('旧版待办计数')).not.toBeInTheDocument();
     expect(screen.queryByText('无海报 1')).not.toBeInTheDocument();
@@ -780,7 +1384,771 @@ describe('App shell', () => {
       expect(cleanupCalled).toBe(true);
       expect(gapsCalled).toBe(true);
       expect(dashboardSmartCalled).toBe(true);
+      expect(smartSummaryCalled).toBe(true);
     });
+  });
+
+  it('loads the smart actions workbench and shows read-only detail evidence', async () => {
+    const requested: string[] = [];
+    mockApi((url, init) => {
+      requested.push(`${init?.method || 'GET'} ${url.pathname}${url.search}`);
+      if (url.pathname.includes('/execute')) {
+        throw new Error(`smart action execute endpoint should not be called: ${url.pathname}`);
+      }
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      if (url.pathname === '/api/v2/dashboard/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 0,
+          warnings: [],
+          todo: {
+            noposter: 0,
+            no_rating: 0,
+            dups_auto: 0,
+            dups_review: 0,
+            airing_count: 0,
+            airing_low_count: 0,
+            noposter_by_lib: {},
+            no_rating_by_lib: {},
+            noposter_err: null,
+            no_rating_err: null,
+            dups_err: null,
+            airing_err: null
+          },
+          actions: []
+        });
+      }
+      if (url.pathname === '/api/v2/smart-actions') {
+        expect(init?.method || 'GET').toBe('GET');
+        return jsonResponse({
+          ok: true,
+          total: 1,
+          limit: Number(url.searchParams.get('limit') || 80),
+          offset: 0,
+          warnings: ['TMDb key 未配置时仅展示可判断的动作'],
+          summary: {
+            total: 1,
+            suggested: 1,
+            running: 0,
+            failed: 0,
+            auto_ready: 0,
+            confirm_required: 1,
+            low: 0,
+            medium: 0,
+            high: 1,
+            critical: 0
+          },
+          actions: [smartAction]
+        });
+      }
+      if (url.pathname === '/api/v2/smart-actions/refresh') {
+        expect(init?.method).toBe('POST');
+        return jsonResponse(taskRun('99999999-9999-4999-8999-999999999999', 'smart_actions_refresh', '刷新智能动作建议'));
+      }
+      if (url.pathname === `/api/v2/smart-actions/${smartAction.id}`) {
+        return jsonResponse({ ok: true, action: smartAction });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '智能动作' }));
+    expect(await screen.findByText('智能动作工作台')).toBeInTheDocument();
+    expect(screen.getByText('建议清单')).toBeInTheDocument();
+    expect(screen.getByText('莫离有新集可更新')).toBeInTheDocument();
+    expect(screen.getByText('Emby 当前 25 集，资源侧发现 26 集，建议一条龙转存、生成 STRM 并刷新媒体库。')).toBeInTheDocument();
+    expect(screen.getByText('TMDb key 未配置时仅展示可判断的动作')).toBeInTheDocument();
+    expect(screen.getByText('对象级动作')).toBeInTheDocument();
+    expect(screen.getByLabelText('智能动作策略执行视图')).toBeInTheDocument();
+    expect(screen.getByText('0 个 auto_ready')).toBeInTheDocument();
+    expect(screen.getByText('1 个需确认')).toBeInTheDocument();
+    expect(screen.getByLabelText('智能动作批量选择')).toBeInTheDocument();
+    expect(screen.getByLabelText('选择批量执行：莫离有新集可更新')).toBeDisabled();
+    expect(screen.getByText('高风险动作必须人工确认，不能直接自动执行')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '刷新建议' }));
+    expect(await screen.findByText('智能动作刷新任务已提交：刷新智能动作建议')).toBeInTheDocument();
+    expect(screen.getByLabelText('智能动作刷新任务')).toHaveTextContent('刷新智能动作建议');
+
+    fireEvent.change(screen.getByLabelText('搜索'), { target: { value: '莫离' } });
+    await waitFor(() => {
+      expect(requested.some((item) => item.includes('/api/v2/smart-actions?q=%E8%8E%AB%E7%A6%BB'))).toBe(true);
+    });
+    fireEvent.change(screen.getByLabelText('对象'), { target: { value: 'series' } });
+    fireEvent.change(screen.getByLabelText('库名'), { target: { value: '电视剧' } });
+    await waitFor(() => {
+      expect(requested.some((item) => item.includes('subject_kind=series') && item.includes('lib=%E7%94%B5%E8%A7%86%E5%89%A7'))).toBe(true);
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: '查看详情：莫离有新集可更新' }));
+    expect(await screen.findByRole('heading', { name: '智能动作详情' })).toBeInTheDocument();
+    expect(screen.getByText('推荐理由')).toBeInTheDocument();
+    expect(screen.getByText('更新转存并处理旧目录')).toBeInTheDocument();
+    expect(screen.getByText('追更库集数落后')).toBeInTheDocument();
+    expect(screen.getByText('Emby 当前剧集')).toBeInTheDocument();
+    expect(screen.getByText(/current_max_episode/)).toBeInTheDocument();
+    expect(screen.getByText('会删除同剧旧目录，必须保留 undo 记录')).toBeInTheDocument();
+    expect(screen.getByText('打开追更检查并锁定莫离')).toBeInTheDocument();
+    expect(screen.getByText('转存候选资源并生成 STRM')).toBeInTheDocument();
+    expect(screen.getByText('新集可见')).toBeInTheDocument();
+    expect(screen.getByText('新集入库、旧目录已清理、海报可见')).toBeInTheDocument();
+    expect(screen.getByLabelText('执行前安全提示')).toBeInTheDocument();
+    expect(screen.getByText('将把你填写的候选资源交给追更一条龙更新。提交前必须填写候选链接，并明确目标库或自定义 115 cid。')).toBeInTheDocument();
+    expect(screen.getByLabelText('追更更新执行参数')).toBeInTheDocument();
+    expect(screen.getByLabelText('追更更新资源名')).toHaveValue('The.First.Jasmine.2026.S01E26');
+    expect(screen.getByLabelText('追更更新 link_type')).toHaveValue('share115');
+    expect(screen.getByLabelText('追更更新目标库')).toHaveValue('电视剧');
+    expect(screen.getByLabelText('高风险执行确认')).toHaveTextContent('候选链接不能为空');
+    expect(screen.getByLabelText('执行参数检查')).toHaveTextContent('还不能执行');
+    expect(screen.getByLabelText('执行参数检查')).toHaveTextContent('候选链接不能为空');
+    expect(screen.getByRole('button', { name: '确认追更更新' })).toBeDisabled();
+    expect(requested.some((item) => item.includes('/api/v2/smart-actions/execute'))).toBe(false);
+  });
+
+  it('executes transfer update smart actions with candidate and target payload', async () => {
+    const requested: string[] = [];
+    let executeBody: unknown = null;
+    let verifyCalls = 0;
+    mockApi((url, init) => {
+      requested.push(`${init?.method || 'GET'} ${url.pathname}${url.search}`);
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      if (url.pathname === '/api/v2/dashboard/smart-actions') {
+        return jsonResponse({ ok: true, total: 0, warnings: [], todo: {}, actions: [] });
+      }
+      if (url.pathname === '/api/v2/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 1,
+          limit: 80,
+          offset: 0,
+          warnings: [],
+          summary: {
+            total: 1,
+            suggested: 1,
+            running: 0,
+            failed: 0,
+            auto_ready: 0,
+            confirm_required: 1,
+            low: 0,
+            medium: 0,
+            high: 1,
+            critical: 0
+          },
+          actions: [smartAction]
+        });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${smartAction.id}`) {
+        return jsonResponse({ ok: true, action: smartAction });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${smartAction.id}/execute`) {
+        executeBody = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: true,
+          task: taskRun('aaaaaaaa-eeee-4aaa-8aaa-aaaaaaaaaaa1', 'smart_action_execute', '智能动作追更更新')
+        });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${smartAction.id}/verify`) {
+        expect(init?.method).toBe('POST');
+        verifyCalls += 1;
+        return jsonResponse({
+          id: smartAction.id,
+          ok: true,
+          status: 'partial',
+          result: {
+            check_summaries: [
+              { summary: '新集还未在 Emby 可见，等待媒体库刷新后再复查。' }
+            ]
+          },
+          warnings: ['Emby 刷新可能有延迟']
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '智能动作' }));
+    expect(await screen.findByText('莫离有新集可更新')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看详情：莫离有新集可更新' }));
+    expect(await screen.findByRole('heading', { name: '智能动作详情' })).toBeInTheDocument();
+
+    const submitButton = screen.getByRole('button', { name: '确认追更更新' });
+    expect(submitButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('追更更新链接/分享链接'), { target: { value: 'https://115.com/s/jasmine' } });
+    expect(submitButton).not.toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText('追更更新目标库'), { target: { value: '' } });
+    expect(submitButton).toBeDisabled();
+    expect(screen.getByLabelText('高风险执行确认')).toHaveTextContent('请填写目标库');
+
+    fireEvent.change(screen.getByLabelText('追更更新自定义 cid'), { target: { value: '0' } });
+    expect(submitButton).toBeDisabled();
+    expect(screen.getByLabelText('高风险执行确认')).toHaveTextContent('正整数');
+
+    fireEvent.change(screen.getByLabelText('追更更新自定义 cid'), { target: { value: '67890' } });
+    fireEvent.change(screen.getByLabelText('追更更新提取码 rc'), { target: { value: 'rc' } });
+    expect(submitButton).not.toBeDisabled();
+
+    fireEvent.click(submitButton);
+    const modal = screen.getByRole('heading', { name: '确认追更更新' }).closest('.modal') as HTMLElement;
+    const confirmButton = within(modal).getByRole('button', { name: '确认追更更新' });
+    expect(confirmButton).toBeDisabled();
+    fireEvent.change(within(modal).getByLabelText('输入确认文本：执行'), { target: { value: '执行' } });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(executeBody).toEqual({
+        confirm_text: '执行',
+        payload: {
+          candidate: {
+            name: 'The.First.Jasmine.2026.S01E26',
+            link: 'https://115.com/s/jasmine',
+            link_type: 'share115',
+            share: 'https://115.com/s/jasmine',
+            rc: 'rc'
+          },
+          target: { cid: '67890' }
+        }
+      });
+    });
+    expect(await screen.findByText('智能动作已提交：智能动作追更更新')).toBeInTheDocument();
+    const nextSteps = await screen.findByLabelText('智能动作下一步');
+    expect(within(nextSteps).getByRole('button', { name: '查看任务中心' })).toBeInTheDocument();
+    expect(within(nextSteps).getByRole('button', { name: '验证结果' })).toBeInTheDocument();
+    fireEvent.click(within(nextSteps).getByRole('button', { name: '验证结果' }));
+    expect(await screen.findByLabelText('智能动作验证结果')).toHaveTextContent('新集还未在 Emby 可见');
+    expect(verifyCalls).toBe(1);
+    expect(requested.some((item) => item === `POST /api/v2/smart-actions/${smartAction.id}/execute`)).toBe(true);
+  });
+
+  it('executes transfer add-new smart actions with target and package acknowledgement', async () => {
+    const requested: string[] = [];
+    let executeBody: unknown = null;
+    mockApi((url, init) => {
+      requested.push(`${init?.method || 'GET'} ${url.pathname}${url.search}`);
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      if (url.pathname === '/api/v2/dashboard/smart-actions') {
+        return jsonResponse({ ok: true, total: 0, warnings: [], todo: {}, actions: [] });
+      }
+      if (url.pathname === '/api/v2/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 1,
+          limit: 80,
+          offset: 0,
+          warnings: [],
+          summary: {
+            total: 1,
+            suggested: 1,
+            running: 0,
+            failed: 0,
+            auto_ready: 0,
+            confirm_required: 1,
+            low: 0,
+            medium: 0,
+            high: 1,
+            critical: 0
+          },
+          actions: [transferAddNewSmartAction]
+        });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${transferAddNewSmartAction.id}`) {
+        return jsonResponse({ ok: true, action: transferAddNewSmartAction });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${transferAddNewSmartAction.id}/execute`) {
+        executeBody = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: true,
+          task: taskRun('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1', 'smart_action_execute', '智能动作新增转存')
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '智能动作' }));
+    expect(await screen.findByText('新片可从找资源转存')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看详情：新片可从找资源转存' }));
+
+    expect(await screen.findByRole('heading', { name: '智能动作详情' })).toBeInTheDocument();
+    expect(screen.getByText('将把当前候选资源交给智能动作执行新增转存。提交前必须明确目标库或自定义 115 cid，整包合集还要额外确认。')).toBeInTheDocument();
+    expect(screen.getByLabelText('新增转存执行参数')).toBeInTheDocument();
+    const candidate = screen.getByLabelText('新增转存候选资源');
+    expect(candidate).toHaveTextContent('Galaxy.Sample.2026.2160p');
+    expect(candidate).toHaveTextContent('https://115.com/s/galaxy?password=xy12');
+    expect(candidate).toHaveTextContent('整包合集');
+
+    const submitButton = screen.getByRole('button', { name: '确认新增转存' });
+    expect(submitButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('新增转存目标库'), { target: { value: '电影' } });
+    fireEvent.change(screen.getByLabelText('新增转存自定义 cid'), { target: { value: '12345' } });
+    expect(submitButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('含整包合集，输入“整包”确认'), { target: { value: '整包' } });
+    expect(submitButton).not.toBeDisabled();
+
+    fireEvent.click(submitButton);
+    const modal = screen.getByRole('heading', { name: '确认新增转存' }).closest('.modal') as HTMLElement;
+    const confirmButton = within(modal).getByRole('button', { name: '确认新增转存' });
+    expect(confirmButton).toBeDisabled();
+    fireEvent.change(within(modal).getByLabelText('输入确认文本：执行'), { target: { value: '执行' } });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(executeBody).toEqual({
+        confirm_text: '执行',
+        payload: {
+          request: {
+            target: { cid: '12345', lib: '电影' },
+            package_ack: '整包'
+          }
+        }
+      });
+    });
+    expect(await screen.findByText('智能动作已提交：智能动作新增转存')).toBeInTheDocument();
+    expect(await screen.findByLabelText('智能动作下一步')).toHaveTextContent('查看任务中心');
+    expect(screen.getByLabelText('智能动作下一步')).toHaveTextContent('验证结果');
+    expect(requested.some((item) => item === `POST /api/v2/smart-actions/${transferAddNewSmartAction.id}/execute`)).toBe(true);
+  });
+
+  it('executes a low-risk auto smart action from the detail drawer', async () => {
+    let executeCalls = 0;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      if (url.pathname === '/api/v2/dashboard/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 0,
+          warnings: [],
+          todo: {
+            noposter: 0,
+            no_rating: 0,
+            dups_auto: 0,
+            dups_review: 0,
+            airing_count: 0,
+            airing_low_count: 0,
+            noposter_by_lib: {},
+            no_rating_by_lib: {},
+            noposter_err: null,
+            no_rating_err: null,
+            dups_err: null,
+            airing_err: null
+          },
+          actions: []
+        });
+      }
+      if (url.pathname === '/api/v2/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 1,
+          limit: 80,
+          offset: 0,
+          warnings: [],
+          summary: {
+            total: 1,
+            suggested: 1,
+            running: 0,
+            failed: 0,
+            auto_ready: 1,
+            confirm_required: 0,
+            low: 1,
+            medium: 0,
+            high: 0,
+            critical: 0
+          },
+          actions: [lowRiskSmartAction]
+        });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${lowRiskSmartAction.id}`) {
+        return jsonResponse({ ok: true, action: lowRiskSmartAction });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${lowRiskSmartAction.id}/execute`) {
+        executeCalls += 1;
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        return jsonResponse({
+          ok: true,
+          task: taskRun('66666666-6666-4666-8666-666666666666', 'smart_action_execute', '低风险媒体库扫描任务')
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '智能动作' }));
+    expect(await screen.findByText('低风险媒体库扫描')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看详情：低风险媒体库扫描' }));
+    expect(await screen.findByRole('heading', { name: '智能动作详情' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: '执行动作' }));
+
+    await waitFor(() => expect(executeCalls).toBe(1));
+    expect(await screen.findByText('智能动作已提交：低风险媒体库扫描任务')).toBeInTheDocument();
+    const taskInfo = screen.getByLabelText('智能动作任务信息');
+    expect(within(taskInfo).getByText('低风险媒体库扫描任务')).toBeInTheDocument();
+    expect(within(taskInfo).getByText('运行中')).toBeInTheDocument();
+  });
+
+  it('requires typed confirmation before executing a destructive dedup smart action', async () => {
+    let executeBody: unknown = null;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      if (url.pathname === '/api/v2/dashboard/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 0,
+          warnings: [],
+          todo: {
+            noposter: 0,
+            no_rating: 0,
+            dups_auto: 0,
+            dups_review: 0,
+            airing_count: 0,
+            airing_low_count: 0,
+            noposter_by_lib: {},
+            no_rating_by_lib: {},
+            noposter_err: null,
+            no_rating_err: null,
+            dups_err: null,
+            airing_err: null
+          },
+          actions: []
+        });
+      }
+      if (url.pathname === '/api/v2/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 1,
+          limit: 80,
+          offset: 0,
+          warnings: [],
+          summary: {
+            total: 1,
+            suggested: 1,
+            running: 0,
+            failed: 0,
+            auto_ready: 0,
+            confirm_required: 1,
+            low: 0,
+            medium: 0,
+            high: 0,
+            critical: 1
+          },
+          actions: [dedupSmartAction]
+        });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${dedupSmartAction.id}`) {
+        return jsonResponse({ ok: true, action: dedupSmartAction });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${dedupSmartAction.id}/execute`) {
+        executeBody = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: true,
+          task: taskRun('88888888-8888-4888-8888-888888888888', 'smart_action_execute', '智能动作批量去重')
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '智能动作' }));
+    expect(await screen.findByText('莫离自动去重建议')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看详情：莫离自动去重建议' }));
+    expect(await screen.findByRole('heading', { name: '智能动作详情' })).toBeInTheDocument();
+    expect(screen.getByLabelText('高风险执行确认')).toHaveTextContent('待删条目1');
+
+    fireEvent.click(screen.getByRole('button', { name: '确认删除旧资源' }));
+    const modal = screen.getByRole('heading', { name: '确认删除重复旧资源' }).closest('.modal') as HTMLElement;
+    const confirmButton = within(modal).getByRole('button', { name: '确认删除旧资源' });
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.change(within(modal).getByLabelText('输入确认文本：删除'), { target: { value: '删除' } });
+    expect(confirmButton).not.toBeDisabled();
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(executeBody).toEqual({
+        confirm_text: '删除',
+        payload: {
+          request: {
+            groups: [{
+              tmdb: '12345',
+              remove: [{ lib: '电视剧', folder: '莫离 旧版', item_id: 'item-old' }]
+            }]
+          }
+        }
+      });
+    });
+    expect(await screen.findByText('智能动作已提交：智能动作批量去重')).toBeInTheDocument();
+  });
+
+  it('requires an archive target library before confirming an archive smart action', async () => {
+    let executeBody: unknown = null;
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      if (url.pathname === '/api/v2/dashboard/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 0,
+          warnings: [],
+          todo: {
+            noposter: 0,
+            no_rating: 0,
+            dups_auto: 0,
+            dups_review: 0,
+            airing_count: 0,
+            airing_low_count: 0,
+            noposter_by_lib: {},
+            no_rating_by_lib: {},
+            noposter_err: null,
+            no_rating_err: null,
+            dups_err: null,
+            airing_err: null
+          },
+          actions: []
+        });
+      }
+      if (url.pathname === '/api/v2/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 1,
+          limit: 80,
+          offset: 0,
+          warnings: [],
+          summary: {
+            total: 1,
+            suggested: 1,
+            running: 0,
+            failed: 0,
+            auto_ready: 0,
+            confirm_required: 1,
+            low: 0,
+            medium: 0,
+            high: 1,
+            critical: 0
+          },
+          actions: [archiveSmartAction]
+        });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${archiveSmartAction.id}`) {
+        return jsonResponse({ ok: true, action: archiveSmartAction });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${archiveSmartAction.id}/execute`) {
+        executeBody = JSON.parse(String(init?.body));
+        return jsonResponse({
+          ok: true,
+          task: taskRun('99999999-9999-4999-8999-999999999998', 'smart_action_execute', '智能动作完结归档')
+        });
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '智能动作' }));
+    expect(await screen.findByText('莫离已完结可归档')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '查看详情：莫离已完结可归档' }));
+    expect(await screen.findByRole('heading', { name: '智能动作详情' })).toBeInTheDocument();
+
+    const submitButton = screen.getByRole('button', { name: '确认归档' });
+    expect(submitButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText('归档目标库'), { target: { value: '完结剧' } });
+    expect(submitButton).not.toBeDisabled();
+
+    fireEvent.click(submitButton);
+    const modal = screen.getByRole('heading', { name: '确认归档完结剧' }).closest('.modal') as HTMLElement;
+    const confirmButton = within(modal).getByRole('button', { name: '确认归档' });
+    expect(confirmButton).toBeDisabled();
+    fireEvent.change(within(modal).getByLabelText('输入确认文本：归档'), { target: { value: '归档' } });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(executeBody).toEqual({
+        confirm_text: '归档',
+        payload: { to_lib: '完结剧' }
+      });
+    });
+    expect(await screen.findByText('智能动作已提交：智能动作完结归档')).toBeInTheDocument();
+  });
+
+  it('only batch-executes low-risk auto-ready smart actions', async () => {
+    const executed: string[] = [];
+    mockApi((url, init) => {
+      if (url.pathname === '/api/v2/system/summary') {
+        return jsonResponse(systemSummary);
+      }
+      if (url.pathname === '/api/v2/cleanup/suggest') {
+        return jsonResponse(cleanupSummary);
+      }
+      if (url.pathname === '/api/v2/gaps/scan') {
+        return jsonResponse(gapsSummary);
+      }
+      if (url.pathname === '/api/v2/autostrm/status') {
+        return jsonResponse(autostrmStatus);
+      }
+      if (url.pathname === '/api/v2/dashboard/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 0,
+          warnings: [],
+          todo: {
+            noposter: 0,
+            no_rating: 0,
+            dups_auto: 0,
+            dups_review: 0,
+            airing_count: 0,
+            airing_low_count: 0,
+            noposter_by_lib: {},
+            no_rating_by_lib: {},
+            noposter_err: null,
+            no_rating_err: null,
+            dups_err: null,
+            airing_err: null
+          },
+          actions: []
+        });
+      }
+      if (url.pathname === '/api/v2/smart-actions') {
+        return jsonResponse({
+          ok: true,
+          total: 2,
+          limit: 80,
+          offset: 0,
+          warnings: [],
+          summary: {
+            total: 2,
+            suggested: 2,
+            running: 0,
+            failed: 0,
+            auto_ready: 1,
+            confirm_required: 1,
+            low: 1,
+            medium: 0,
+            high: 1,
+            critical: 0
+          },
+          actions: [lowRiskSmartAction, smartAction]
+        });
+      }
+      if (url.pathname === '/api/v2/smart-actions/execute-batch') {
+        executed.push(url.pathname);
+        expect(init?.method).toBe('POST');
+        expect(JSON.parse(String(init?.body))).toEqual({ ids: [lowRiskSmartAction.id] });
+        return jsonResponse({
+          ok: true,
+          total: 1,
+          submitted: 1,
+          failed: 0,
+          results: [{
+            id: lowRiskSmartAction.id,
+            ok: true,
+            status: 'queued',
+            task: taskRun('77777777-7777-4777-8777-777777777777', 'smart_action_execute', '批量低风险媒体库扫描'),
+            err: null
+          }]
+        });
+      }
+      if (url.pathname === `/api/v2/smart-actions/${smartAction.id}/execute`) {
+        throw new Error('high risk action must not be batch executed');
+      }
+      return undefined;
+    });
+
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: '智能动作' }));
+    expect(await screen.findByText('低风险媒体库扫描')).toBeInTheDocument();
+    expect(screen.getByText('1 个 auto_ready')).toBeInTheDocument();
+    expect(screen.getByText('1 个需确认')).toBeInTheDocument();
+
+    const lowRiskCheckbox = screen.getByLabelText('选择批量执行：低风险媒体库扫描');
+    const highRiskCheckbox = screen.getByLabelText('选择批量执行：莫离有新集可更新');
+    expect(lowRiskCheckbox).not.toBeDisabled();
+    expect(highRiskCheckbox).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: '选择全部可批量' }));
+    expect(lowRiskCheckbox).toBeChecked();
+    expect(highRiskCheckbox).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole('button', { name: '批量执行 1 项' }));
+
+    await waitFor(() => {
+      expect(executed).toEqual(['/api/v2/smart-actions/execute-batch']);
+    });
+    expect(await screen.findByText('已提交 1 个低风险智能动作')).toBeInTheDocument();
+    const bulkResult = screen.getByLabelText('批量执行结果');
+    expect(within(bulkResult).getByText('已提交 1 项')).toBeInTheDocument();
+    expect(within(bulkResult).getByText('低风险动作已进入任务中心，后续进度在那里查看。')).toBeInTheDocument();
   });
 
   it('renders system health details from the system tab', async () => {
@@ -2686,6 +4054,7 @@ describe('App shell', () => {
 
   it('shows remote catalog context and smart-selects recommended 115 resources', async () => {
     const planPayloads: unknown[] = [];
+    const inspectPayloads: unknown[] = [];
     let wizardPayload: unknown = null;
     mockApi((url, init) => {
       if (url.pathname === '/api/v2/catalog/stats') {
@@ -2787,6 +4156,22 @@ describe('App shell', () => {
           ]
         });
       }
+      if (url.pathname === '/api/v2/smart-actions/inspect') {
+        const headers = init?.headers as Headers;
+        expect(init?.method).toBe('POST');
+        expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
+        inspectPayloads.push(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          ok: true,
+          warnings: [],
+          actions: [{
+            ...smartAction,
+            id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+            title: '莫离资源候选可一条龙更新',
+            summary: '远端搜索结果已结合本库缺集，建议一条龙转存并刷新媒体库。'
+          }]
+        });
+      }
       if (url.pathname === '/api/v2/catalog/transfer-plan') {
         const headers = init?.headers as Headers;
         expect(headers.get('X-CSRF-Token')).toBe('csrf-me');
@@ -2845,6 +4230,22 @@ describe('App shell', () => {
     expect(screen.getByText('莫离 S01E01-E40 2160p')).toBeInTheDocument();
     expect(screen.getByText('推荐转存')).toBeInTheDocument();
     expect(screen.getByText('可能已存在')).toBeInTheDocument();
+    expect(await screen.findByText('莫离资源候选可一条龙更新')).toBeInTheDocument();
+    await waitFor(() => expect(inspectPayloads).toHaveLength(1));
+    expect(inspectPayloads[0]).toMatchObject({
+      q: '莫离',
+      limit: 4,
+      catalog_context: {
+        query: '莫离',
+        summary: {
+          missing_ranges: ['S01E09-E40']
+        }
+      }
+    });
+    expect((inspectPayloads[0] as { catalog_items?: Array<{ name: string }> }).catalog_items?.map((item) => item.name)).toEqual([
+      '莫离 S01E01-E40 2160p',
+      '莫离 S01E05 2160p'
+    ]);
 
     fireEvent.click(screen.getByRole('button', { name: '智能选择 1' }));
     fireEvent.click(screen.getByRole('button', { name: '转存选中' }));

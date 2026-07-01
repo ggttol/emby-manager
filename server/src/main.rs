@@ -74,6 +74,7 @@ async fn serve() -> anyhow::Result<()> {
     emby_manager::auth::ensure_default_admin(&pool, &settings).await?;
     emby_manager::tasks::reconcile_interrupted(&pool).await?;
     emby_manager::scheduler::reconcile_interrupted(&pool).await?;
+    emby_manager::smart_actions::reconcile_interrupted(&pool).await?;
 
     let state = AppState::new(pool, settings.clone());
     if env_flag("EMBY_MANAGER_SCHEDULER_ENABLED", true) {

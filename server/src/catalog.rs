@@ -34,7 +34,7 @@ pub struct CatalogSearchQuery {
     pub link_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CatalogItem {
     pub name: String,
     pub sheet: String,
@@ -93,7 +93,7 @@ pub struct CatalogLibraryContextQuery {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CatalogResourceRecommendation {
     pub score: i32,
     pub level: String,
@@ -105,7 +105,7 @@ pub struct CatalogResourceRecommendation {
     pub already_have: bool,
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CatalogLibraryContextResponse {
     pub ok: bool,
     pub query: String,
@@ -116,7 +116,7 @@ pub struct CatalogLibraryContextResponse {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CatalogLibraryContextSummary {
     pub matched: bool,
     pub duplicate: bool,
@@ -131,7 +131,7 @@ pub struct CatalogLibraryContextSummary {
     pub note: String,
 }
 
-#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct CatalogLibraryContextItem {
     pub id: Option<String>,
     pub name: String,
@@ -1481,6 +1481,16 @@ pub async fn catalog_transfer_execute(
     State(state): State<AppState>,
     Json(req): Json<CatalogTransferExecuteRequest>,
 ) -> AppResult<Json<TaskRun>> {
+    Ok(Json(
+        catalog_transfer_execute_for_state(state, req, "manual").await?,
+    ))
+}
+
+pub async fn catalog_transfer_execute_for_state(
+    state: AppState,
+    req: CatalogTransferExecuteRequest,
+    source: &str,
+) -> AppResult<TaskRun> {
     let plans = build_execute_plans(&req)?;
     let target = merged_execute_target(&req);
     let (target_cid, target_lib) = resolve_catalog_target_cid(&state.pool, &target).await?;
@@ -1494,7 +1504,7 @@ pub async fn catalog_transfer_execute(
         "catalog_transfer_execute",
         &label,
         plans.len() as i64,
-        "manual",
+        source,
         params,
     )
     .await?;
@@ -1510,7 +1520,7 @@ pub async fn catalog_transfer_execute(
             target_lib,
         },
     );
-    Ok(Json(task))
+    Ok(task)
 }
 
 fn build_execute_plans(

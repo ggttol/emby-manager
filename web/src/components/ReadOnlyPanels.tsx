@@ -26,6 +26,8 @@ type DashboardTodoResponse = components['schemas']['DashboardTodoResponse'];
 type GapsSummaryResponse = components['schemas']['GapsSummaryResponse'];
 type InsightMeta = components['schemas']['InsightMeta'];
 type InsightTodo = components['schemas']['InsightTodo'];
+type SmartActionsSummary = components['schemas']['SmartActionsSummary'];
+type SmartActionsSummaryResponse = components['schemas']['SmartActionsSummaryResponse'];
 type PathStatus = components['schemas']['PathStatus'];
 type SystemSummary = components['schemas']['SystemSummary'];
 type TaskHistorySummary = components['schemas']['TaskHistorySummary'];
@@ -338,6 +340,7 @@ export function DashboardPanel({ onNavigate }: { onNavigate?: (tabId: string) =>
   const [autostrm, setAutostrm] = useState<AutostrmStatusResponse | null>(null);
   const [dashboardTodo, setDashboardTodo] = useState<DashboardTodoParity>(EMPTY_DASHBOARD_TODO);
   const [smartActions, setSmartActions] = useState<DashboardSmartActionsResponse | null>(null);
+  const [smartSummary, setSmartSummary] = useState<SmartActionsSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const toast = useToast();
@@ -347,13 +350,15 @@ export function DashboardPanel({ onNavigate }: { onNavigate?: (tabId: string) =>
     setError('');
     setDashboardTodo(EMPTY_DASHBOARD_TODO);
     setSmartActions(null);
+    setSmartSummary(null);
     try {
-      const [systemData, cleanupData, gapsData, autostrmData, smartData] = await Promise.all([
+      const [systemData, cleanupData, gapsData, autostrmData, smartData, smartSummaryData] = await Promise.all([
         api<SystemSummary>('/api/v2/system/summary'),
         api<CleanupSummaryResponse>('/api/v2/cleanup/suggest', { method: 'POST', body: JSON.stringify({}) }),
         api<GapsSummaryResponse>('/api/v2/gaps/scan', { method: 'POST', body: JSON.stringify({}) }),
         api<AutostrmStatusResponse>('/api/v2/autostrm/status'),
-        api<DashboardSmartActionsResponse>('/api/v2/dashboard/smart-actions')
+        api<DashboardSmartActionsResponse>('/api/v2/dashboard/smart-actions'),
+        api<SmartActionsSummaryResponse>('/api/v2/smart-actions/summary')
       ]);
       const todoData = smartData.todo;
       setSystem(systemData);
@@ -361,6 +366,7 @@ export function DashboardPanel({ onNavigate }: { onNavigate?: (tabId: string) =>
       setGaps(gapsData);
       setAutostrm(autostrmData);
       setSmartActions(smartData);
+      setSmartSummary(smartSummaryData.summary || null);
       setDashboardTodo({
         noposter: todoData.noposter || 0,
         no_rating: todoData.no_rating || 0,
@@ -413,7 +419,10 @@ export function DashboardPanel({ onNavigate }: { onNavigate?: (tabId: string) =>
       <div className="statGrid">
         <StatCard icon={<Server />} label="服务状态" value={system?.ok ? '正常' : '需检查'} tone={system?.ok ? 'ok' : 'warn'} hint={system?.version || '等待数据'} />
         <StatCard icon={<Database />} label="数据库" value={system?.database?.status || '未知'} tone={system?.database?.status === 'ok' ? 'ok' : 'warn'} hint={system?.database?.current_database || system?.database?.url} />
-        <StatCard icon={<ListChecks />} label="智能建议" value={count(smartActions?.total || todos.length)} tone={(smartActions?.total || todos.length) ? 'warn' : 'ok'} hint="可直接跳转处理" />
+        <StatCard icon={<ListChecks />} label="智能建议" value={count(smartSummary?.total ?? smartActions?.total ?? todos.length)} tone={(smartSummary?.total || smartActions?.total || todos.length) ? 'warn' : 'ok'} hint="来自 SmartAction" />
+        <StatCard icon={<Sparkles />} label="可自动执行" value={count(smartSummary?.auto_ready)} tone={smartSummary?.auto_ready ? 'ok' : 'neutral'} hint="低风险动作" />
+        <StatCard icon={<AlertTriangle />} label="需要确认" value={count(smartSummary?.confirm_required)} tone={smartSummary?.confirm_required ? 'warn' : 'ok'} hint="高风险先审阅" />
+        <StatCard icon={<Activity />} label="执行中/失败" value={`${count(smartSummary?.running)} / ${count(smartSummary?.failed)}`} tone={smartSummary?.failed ? 'error' : smartSummary?.running ? 'warn' : 'ok'} hint="SmartAction 状态" />
         <StatCard icon={<Activity />} label="异常任务" value={count(taskProblemCount(cleanup?.task_history))} tone={taskProblemCount(cleanup?.task_history) ? 'warn' : 'ok'} hint={`运行中 ${count(cleanup?.task_history?.running)}`} />
         <StatCard icon={<AlertTriangle />} label="无海报" value={count(dashboardTodo.noposter)} tone={dashboardTodo.noposter ? 'warn' : 'ok'} hint="海报修复入口" />
         <StatCard icon={<Gauge />} label="无评分" value={count(dashboardTodo.no_rating)} tone={dashboardTodo.no_rating ? 'warn' : 'ok'} hint="可刷新元数据" />
@@ -425,7 +434,13 @@ export function DashboardPanel({ onNavigate }: { onNavigate?: (tabId: string) =>
       </div>
       <WarningList warnings={warnings} />
       <section className="readonlyBlock">
-        <h2>智能下一步</h2>
+        <div className="sectionTitleRow">
+          <h2>智能下一步</h2>
+          <button className="btn ghost compact" onClick={() => onNavigate?.('smart-actions')} disabled={!onNavigate}>
+            <Sparkles size={14} />
+            打开工作台
+          </button>
+        </div>
         <SmartActionList
           actions={smartActions?.actions || []}
           empty="当前没有需要立即处理的智能建议"
